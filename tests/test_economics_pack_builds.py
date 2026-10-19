@@ -39,6 +39,7 @@ from assurance.economics.engine import pack_inputs, pack_registry
 from assurance.economics.engine.pack_base import HARM_EXCLUDED, PHYSICAL_WORLD_CAUTION
 from assurance.economics.engine.parameters import MONEY_UNITS, ParameterRefused, Unit
 from assurance.economics.models import (
+    PACK_STATEMENTS_UNRECORDED,
     CausalEffect,
     CustomerParameterSet,
     FinancialParameter,
@@ -619,6 +620,27 @@ def test_a_banking_card_and_report_name_no_pack(people):
     assert served["limitations"] == list(report.LIMITATIONS)
     card = FinancialValidityCard.objects.get(simulation=SimulationResult.objects.get(scenario=scenario))
     assert "pack" not in card.card["fields"]["scenario"]
+
+
+def test_only_an_industry_pack_id_reads_as_an_industry_build():
+    """F5: a recorded build reads as an industry pack's -- its record, its report's
+    statements, its refresh naming the pack -- only where its pack has the form of an
+    industry pack's id, held by this release or not; a banking build and a hand-made
+    label from before E7 read as they did before E7. An industry build that recorded no
+    statements says so, and that the release does not hold its pack: never the banking
+    shape."""
+    for pack in ("mythos.economics.banking-pack/v1", "test-fixture", ""):
+        build = ScenarioBuild(pack=pack, inputs={"pack": pack})
+        assert build.pack_record() is None and report.pack_limitations(build, None) == []
+    unheld = "mythos.economics.mobility-pack/v9"
+    build = ScenarioBuild(pack=unheld, inputs={"pack": unheld})
+    assert build.pack_record() == {"id": unheld, "digest": None, "cautions": [PACK_STATEMENTS_UNRECORDED],
+                                   "excluded": []}
+    limitations = report.pack_limitations(build, None)
+    assert limitations[0].startswith(f"built under the industry pack {unheld}")
+    assert limitations[1].startswith(f"this release does not hold the industry pack {unheld}")
+    assert limitations[2:] == [PACK_STATEMENTS_UNRECORDED]
+    assert validity_service.pack_statement(build) == build.pack_record()
 
 
 # ======================================================================

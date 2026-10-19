@@ -7052,7 +7052,10 @@ and its exclusions; the report then adds, after the first statement, that the re
 does not hold the pack and that what follows is as the build recorded it. It is never
 shown as a banking scenario, and its card still reproduces. A record without its
 statements -- none is made -- states that they were not recorded, and the harm
-exclusion, rather than nothing.
+exclusion, rather than nothing. A build is an industry pack's where its pack has the
+form of an industry pack's id (`mythos.economics.<vertical>-pack/v<n>`, any vertical
+but banking: `pack_inputs.is_industry_pack_id`), held by the release or not; a banking
+build, and a hand-made label from before E7, read as they did before E7.
 
 The industry packs follow, each with its vocabulary, its customer-input schema, its
 attributes and its templates. In a template's table, `+` is an input that increases

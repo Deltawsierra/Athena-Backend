@@ -59,7 +59,7 @@ from django.utils import timezone
 from assurance.composition import OFF_ROUTE
 
 from .engine import feeds as feed_rules
-from .engine.pack_inputs import BANKING_PACK
+from .engine.pack_inputs import is_industry_pack_id
 from .report import STALE_BANNER
 from .models import (
     DEPENDENCIES_SCHEMA,
@@ -1190,7 +1190,7 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
     # build names none, as it never did. Its set answers that pack in every version
     # (set_pack_changed), so the rebuild reads the latest version under it.
     pack = document.get("pack")
-    if pack and pack != BANKING_PACK:
+    if is_industry_pack_id(pack):
         body["pack"] = pack
     return body
 

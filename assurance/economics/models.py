@@ -2670,12 +2670,14 @@ class ScenarioBuild(_AppendOnly):
         """The industry pack this build was built under, as the BUILD recorded it (E7,
         spec section 37.3): its ``id``, its ``digest``, the ``cautions`` of the
         templates its effects were assigned to and what it ``excluded``; ``None`` for a
-        banking build, which records none. Read from the build's own document, never
+        build whose pack is not an industry pack's id -- a banking build, which records
+        none, or a hand-made label from before E7 -- as before E7. Read from the
+        build's own document, never
         from the registry, so a report and a card keep the pack's statements even when
         a later release no longer holds the pack. A record without them -- none is
         made, but one would be read so -- states that, and never reads as a banking
         build."""
-        if self.pack == pack_schemas.BANKING_PACK:
+        if not pack_schemas.is_industry_pack_id(self.pack):
             return None
         document = self.inputs if isinstance(self.inputs, dict) else {}
         statements = document.get("pack_statements")
