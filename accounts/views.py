@@ -89,8 +89,10 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user.role = new_role
-        user.save(update_fields=["role"])
+        # The one UPDATE it always was; a promotion then records who granted it and
+        # when (spec-v1, section 35.6, T9b), which a later approval reads. A demotion
+        # records nothing, reads nothing more and is never refused: it is a revoke.
+        user.change_role(new_role, by=request.user)
 
         return Response(
             {"status": f"Role updated to '{new_role}' for user {user.username}."}

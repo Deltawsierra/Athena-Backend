@@ -56,7 +56,9 @@ a deployment is: a platform-wide one to every signed-in account, a tenant's to t
 who see that deployment (404 otherwise, whether or not it exists). Reading needs no
 more. Every write is an admin's only, refused 403 (``admin_required``) for anyone
 else, before the body is read; so is an approval by the requester
-(``second_person_required``). A raise whose state or source moved meanwhile is 409
+(``second_person_required``), and one by an admin the requester promoted, who
+promoted themselves, or who was promoted after the request
+(``approver_role_not_independent``; section 28 hardening, T9b, spec section 35). A raise whose state or source moved meanwhile is 409
 (``trust_raise_not_pending``, ``source_superseded``, ``requester_no_longer_admin``,
 ``trust_raise_expired``, or another version of the source recorded at the same
 moment), and every other refusal 400 with its code. A pending raise expires 30 days
@@ -348,6 +350,7 @@ class TrustDecisionJSONParser(StrictJSONParser):
 _TRUST_REFUSAL_STATUS = {
     "admin_required": status.HTTP_403_FORBIDDEN,
     "second_person_required": status.HTTP_403_FORBIDDEN,
+    "approver_role_not_independent": status.HTTP_403_FORBIDDEN,
     "trust_raise_not_pending": status.HTTP_409_CONFLICT,
     "source_superseded": status.HTTP_409_CONFLICT,
     "requester_no_longer_admin": status.HTTP_409_CONFLICT,

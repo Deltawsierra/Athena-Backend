@@ -32,7 +32,11 @@ stored card exactly (:func:`reproduces`), under the release the card records
 
 A failure that the stored rows do not decide (the engine will not import, the
 draws are not reproduced on this platform, the time budget, memory, a fault) is
-returned with its code and never recorded. **Never raises.** Nothing here is on a
+returned with its code and never recorded. A result whose stored rows no longer
+give their digests -- or, for a card already recorded, whose card fails a check or
+whose recorded receipt no longer binds them (:func:`assurance.economics.report.receipt_binds`)
+-- is ``stored_row_unverified``: never carded, and the card recorded is not returned
+(section 28 hardening, T5; spec, section 35). **Never raises.** Nothing here is on a
 stop path; nothing Django loads at start imports it, and it imports the engine,
 and numpy, only when called. No route serves it: step 6 serves reports.
 """
@@ -87,8 +91,33 @@ UNRECORDED = frozenset(
         "memory_exhausted",
         "invariant_broken",
         "card_failed",
+        "stored_row_unverified",
     }
 )
+#: Why a card is refused for a run whose stored inputs no longer give its input digest.
+INPUTS_UNVERIFIED = (
+    "the run's stored inputs no longer give its input digest: nothing the card would read from them -- its figures' "
+    "sources and freshness, its unknowns, the normalized figures' downgrades -- is vouched for, so nothing is graded"
+)
+
+
+class StoredInputsUnverified(ValueError):
+    """A card asked of a run whose stored inputs no longer give its input digest."""
+
+    code = "stored_row_unverified"
+
+    def __init__(self):
+        self.detail = INPUTS_UNVERIFIED
+        super().__init__(f"{self.code}: {self.detail}")
+
+
+def inputs_verified(result: SimulationResult) -> bool:
+    """Whether ``result``'s stored inputs still give its input digest: the one check
+    before a card takes anything from them (the report's ``input_digest`` check)."""
+    try:
+        return canonical_digest(result.inputs) == result.input_digest
+    except (TypeError, ValueError):
+        return False
 
 OBSERVED_STATUS = (
     "in force when the scenario version was built: the builder refuses an observed effect whose signature does "
@@ -127,9 +156,16 @@ def release_record(versions) -> dict:
     return {
         "engine": versions,
         "sensitivity": sensitivity.version_record(),
-        "grade": grade.version_record(),
+        # A run that read a normalized figure (its versions name the rule, spec section
+        # 36) is graded under v4; every other under v3, its record unchanged.
+        "grade": grade.version_record(normalized=_normalized_run(versions)),
         "card": {"schema": CARD_SCHEMA, "version": CARD_VERSION, "top_drivers": TOP_DRIVERS},
     }
+
+
+def _normalized_run(versions) -> bool:
+    """Whether a run's versions say it read a figure its build normalized."""
+    return isinstance(versions, dict) and "normalization" in versions
 
 
 def model_release(versions) -> dict:
@@ -203,6 +239,10 @@ def _as_of(inputs, build) -> str | None:
 UNREAD = {
     "scenario": "nothing: a parameter of the scenario version that no component, policy or frequency reads",
     "parameter_set": "nothing: a parameter-set variable no component reads",
+    "normalized": (
+        "its normalized figure: the build normalized this parameter-set figure into the reporting currency at the "
+        "valuation date, and the run reads that figure in its place (spec, section 36)"
+    ),
 }
 
 
@@ -398,10 +438,25 @@ def _description(scenario, events, effects, links) -> str:
     return f"{scenario.title}. {count} causal loss event(s): " + "; ".join(parts) + "."
 
 
+def pack_statement(build: ScenarioBuild | None) -> dict | None:
+    """The industry pack a scenario version was built under, for its card: the pack's
+    id and version, the digest of the content it was built under, the cautions of the
+    templates its effects were assigned to, and what the pack never prices -- each as
+    the BUILD recorded it (:meth:`ScenarioBuild.pack_record`), never as the registry
+    holds it now, so the card states them, and reproduces, even when a later release no
+    longer holds the pack; ``None`` for a banking build (or none), whose card names no
+    pack, as no card did before E7 (spec, section 37.3)."""
+    return build.pack_record() if build is not None else None
+
+
 def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: dict) -> dict:
     """The Validity Card of ``result``, from the stored result, the scenario
     version's rows, the stored sensitivity analysis and what was read at issue
-    (``issued``). Deterministic: the same arguments give the same card."""
+    (``issued``). Deterministic: the same arguments give the same card. Refused
+    (:class:`StoredInputsUnverified`) unless the stored inputs still give the run's
+    input digest: every field read from them is vouched for, or none is graded."""
+    if not inputs_verified(result):
+        raise StoredInputsUnverified()
     _, grade, money, _, sens, _ = _engine()
     scenario = FinancialScenario.objects.get(pk=result.scenario_id)
     inputs = result.inputs or {}
@@ -416,9 +471,14 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
     roles, unknown_cash, unknown = _reads(inputs)
     as_of = _as_of(inputs, build)
     rows_unread = [("scenario", row) for row in FinancialParameter.objects.filter(scenario=scenario).order_by("name", "id")]
+    # Each figure the build normalized, and the downgrades its record carries (spec,
+    # section 36), as the run's stored inputs hold them: None for a run that read none.
+    held = inputs.get("normalizations")
+    normalized = None if not held else {record["figure"]: tuple(record["confidence_downgrades"]) for record in held}
+    natives = {record["native"]["name"] for record in held or []}
     if build is not None:
         rows_unread += [
-            ("parameter_set", row)
+            ("normalized" if row.name in natives else "parameter_set", row)
             for row in FinancialParameter.objects.filter(parameter_set_id=build.parameter_set_id).order_by("name", "id")
         ]
     drivers = (sensitivity or {}).get("ranked", [])[:TOP_DRIVERS]
@@ -442,6 +502,8 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
             stale_sources=stale_sources,
             per_occurrence=(sensitivity or {}).get("per_occurrence", []),
             undefined=(_level(sensitivity, line) or {}).get("undefined_because") if completed else None,
+            # Each line is lowered by the normalized figures IT reads (grade v4).
+            normalized=normalized,
         )
         for line in lines
     }
@@ -624,7 +686,10 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
             "release": release["record"],
             "methods": {
                 "sensitivity": {"id": sens.METHOD_ID, "version": sens.VERSION},
-                "grade": {"version": grade.VERSION, "version_digest": grade.version_digest()},
+                "grade": {
+                    "version": grade.VERSION_NORMALIZED if normalized is not None else grade.VERSION,
+                    "version_digest": grade.version_digest(normalized=normalized is not None),
+                },
                 "card": {"schema": CARD_SCHEMA, "version": CARD_VERSION},
             },
             "inventory": issued.get("model_inventory")
@@ -678,6 +743,11 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
         "unknown_variables": unknown_variables,
         "reproduction": reproduction,
     }
+    pack = pack_statement(build)
+    if pack is not None:
+        # An industry pack's scenario names its pack, with what its figures are read
+        # with (E7, spec section 37); a banking card is the card it was, byte for byte.
+        fields["scenario"]["pack"] = pack
     card = {
         "schema": CARD_SCHEMA,
         "scenario_id": str(scenario.uuid),
@@ -719,6 +789,8 @@ def reproduces(card: FinancialValidityCard) -> bool:
     """Whether the stored card is exactly what :func:`build_card` gives from the
     stored result, the stored analysis and the card's own issued section."""
     result = SimulationResult.objects.get(pk=card.simulation_id)
+    if not inputs_verified(result):
+        return False
     rebuilt = build_card(result, sensitivity=card.sensitivity, issued=card.card.get("issued", {}))
     return card_digest(rebuilt) == card_digest(card.card) == card.card_digest
 
@@ -741,10 +813,30 @@ def issue_card(result: SimulationResult, *, time_budget: float = TIME_BUDGET_SEC
         return CardOutcome(None, False, "card_failed", f"{type(error).__name__}: {error}")
 
 
+def _unverified(failed: list[str]) -> CardOutcome:
+    return CardOutcome(
+        None, False, "stored_row_unverified",
+        f"the stored rows fail {', '.join(failed)}: a row rewritten past the records' rules is never carded",
+    )
+
+
 def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
+    from . import report
+
     found = FinancialValidityCard.objects.filter(simulation=result).first()
     if found is not None:
+        # The card recorded is returned only where the stored rows verify, and where a
+        # receipt is recorded, it still binds them (section 28 hardening, T5; spec,
+        # section 35): a result or card rewritten past the ORM is never carded.
+        scenario = FinancialScenario.objects.get(pk=result.scenario_id)
+        failed = report.stored_row_failures(result, found, None, scenario)
+        if failed:
+            return _unverified(failed)
         return CardOutcome(found, False)
+    # Before the card takes anything from the stored inputs: they still give the run's
+    # input digest, or nothing is graded (review round 1 of #170, MEDIUM-2).
+    if not inputs_verified(result):
+        return CardOutcome(None, False, StoredInputsUnverified.code, INPUTS_UNVERIFIED)
     try:
         distributions, grade, money, ss, sens, sim = _engine()
     except Exception as error:  # noqa: BLE001 - an import fault of numpy or the engine is a returned refusal
@@ -782,6 +874,11 @@ def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
             return CardOutcome(None, False, *_code(refused))
         except (sim.InvariantBroken, AssertionError) as broken:
             return CardOutcome(None, False, "invariant_broken", f"{type(broken).__name__}: {broken}")
+    # The record the card states is the one recorded: its digest is checked before
+    # the card is built from it (T5). The analysis above checked the draws.
+    failed = report.stored_row_failures(result, None, None, scenario, receipt=None)
+    if failed:
+        return _unverified(failed)
     issued = issued_context(result, scenario)
     card = build_card(result, sensitivity=sensitivity, issued=issued)
     row = FinancialValidityCard(
@@ -814,6 +911,9 @@ def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
 
 
 __all__ = [
+    "INPUTS_UNVERIFIED",
+    "StoredInputsUnverified",
+    "inputs_verified",
     "CARD_SCHEMA",
     "CARD_VERSION",
     "MODEL_ID",

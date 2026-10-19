@@ -22,6 +22,8 @@ The safety rule (``docs/economics/spec-v1.md``, section 2): an economics fault
 never blocks a stop. Under either fault Django loads, the scan's Stop is answered
 and saved, ``deliver_owed_stops`` runs the system checks (the URL check among them)
 and reaches its handler, and ``manage.py check`` passes; only economics refuses.
+And economics' own stop, an override revoked (section 35.5; review round 1 of
+#169, H1), is served from its own module under every fault, and recorded.
 
 Its name does not match ``test_*.py``, so the suite never collects it on its own.
 """
@@ -80,6 +82,29 @@ def test_manage_py_check_passes():
     out = io.StringIO()
     call_command("check", stdout=out)
     assert "no issues" in out.getvalue()
+
+
+def test_an_override_revoke_is_answered_and_recorded():
+    """The override revoke is a stop: whatever part of economics will not import, it is
+    served (its module imports only the economics models and ``safety.stops``),
+    answered 200, and the revocation recorded: the override is not in force."""
+    from assurance.economics.models import FinancialScenario, OverrideRevocation, SensitiveOverride
+
+    analyst = get_user_model().objects.create_user(username="revoker", password="x", role="analyst")
+    deployment = Deployment.objects.create(name="economics-stop")
+    override = SensitiveOverride.objects.create(
+        scenario=FinancialScenario.objects.create(deployment=deployment, title="t", author=analyst),
+        subject="parameter-set:q4:v2:transactions_per_day", reason="r", requested_by=analyst,
+    )
+    path = f"/api/assurance/deployments/{deployment.uuid}/economics/overrides/{override.uuid}/revoke/"
+    assert resolve(path).view_name == "deployment-economics-override-revoke"
+    client = APIClient()
+    client.force_authenticate(user=analyst)
+    response = client.post(path, {"reason": "approved in error"}, format="json")
+    assert response.status_code == 200, response.content
+    assert response.json()["override"]["in_force"] is False
+    assert OverrideRevocation.objects.filter(override=override).count() == 1
+    assert SensitiveOverride.standing_refusal(override.pk) == "override_revoked"
 
 
 def test_only_economics_is_refused():
@@ -194,8 +219,11 @@ def test_only_economics_is_refused():
         assert "assurance.economics.scenario_api" not in sys.modules
         assert "assurance.economics.builder" not in sys.modules
         assert "assurance.economics.engine.templates" not in sys.modules
+        assert "assurance.economics.engine.pack_registry" not in sys.modules
         with pytest.raises(Resolver404):
             resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
+        with pytest.raises(Resolver404):
+            resolve("/api/assurance/economics/packs/")
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         return
     if FAULT == "api":

@@ -7,6 +7,9 @@
 # deployment per transaction after the commit. Nothing is backfilled; no existing
 # column changes. Each row goes with its obligation and its deployment. Rolling it
 # back drops the table, and with it any review still owed.
+#
+# Numbered 0079, on this route's 0078_legal_obligation_recorded_by (it was 0075, on
+# 0074), after #171's 0077_parameter_set_pack.
 
 import django.db.models.deletion
 from django.db import migrations, models
@@ -15,7 +18,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0074_legal_obligation_recorded_by"),
+        ("assurance", "0078_legal_obligation_recorded_by"),
     ]
 
     operations = [

@@ -1501,6 +1501,7 @@ def test_an_exposure_receipt_issued_twice_is_one_row_and_one_signature(engine):
 
     from assurance.economics import receipt_service
     from assurance.economics.models import FinancialExposureReceipt
+    from tests.economics_review import approve_for_receipt
     from tests.test_economics_validity_card import simulated, stored
 
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -1509,7 +1510,10 @@ def test_an_exposure_receipt_issued_twice_is_one_row_and_one_signature(engine):
     key = Ed25519PrivateKey.generate()
     ring = exposure_receipt.receipt_keyring([key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)],
                                             other_roles={})
-    result = simulated(stored(_deployment(_user(User.Roles.ADMIN)), _user(User.Roles.ANALYST)))
+    reviewer = _user(User.Roles.ADMIN)
+    result = simulated(stored(_deployment(reviewer), _user(User.Roles.ANALYST)))
+    # The human review a signed receipt needs (spec, section 35.4).
+    approve_for_receipt(result, reviewer)
     refused = receipt_service.issue_receipt(result, keyring=ring)
     assert refused.receipt is None and refused.code == "signer_unavailable"
     assert not FinancialExposureReceipt.objects.exists()

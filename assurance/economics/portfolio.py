@@ -53,7 +53,7 @@ from django.utils import timezone
 
 from assurance.models import Deployment
 
-from . import report
+from . import report, run_normalization
 from .engine import currency as _currency
 from .engine import loss as engine_loss
 from .engine import money
@@ -72,7 +72,6 @@ from .models import (
     SIMULATION_REFUSED,
     CausalEffect,
     CorrelationGroup,
-    CustomerParameterSet,
     EconomicsRefused,
     FinancialScenario,
     FinancialSource,
@@ -477,8 +476,8 @@ def _normalizer(deployment, request: PortfolioRequest) -> _Normalizer:
 def _event_refs(scenario: FinancialScenario, build: ScenarioBuild | None, factor: Decimal, ep) -> list:
     """Each loss event of ``scenario`` as the shared-event rule reads it, its gross
     cash at low, base and high (step 4's) normalised by ``factor``."""
-    policy = None if build is None else CustomerParameterSet.objects.get(pk=build.parameter_set_id).content(
-    ).insurance_policy()
+    # The version's policy, each term its build normalized read as its normalized figure (section 36).
+    policy = run_normalization.policy_of(build)
     refs = []
     for row in LossEvent.objects.filter(scenario=scenario).order_by("event_key", "id"):
         assessment = engine_loss.assess(row.as_engine(), policy)

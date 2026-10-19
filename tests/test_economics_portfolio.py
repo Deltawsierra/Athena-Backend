@@ -654,13 +654,15 @@ def test_a_vanished_card_refuses_the_portfolio_it_was_totalled_in(deployment, pe
 def sources(tmp_path):
     """The committed snapshot's observations, registered as a NON-synthetic source a
     production run may read (a benchmark, open licence): SYNTHETIC TEST DATA all the
-    same, as its label says."""
+    same, as its label says. Registered as a feed's answer is, with the terms a
+    reviewed registry line gives (a snapshot FILE's own statement is not read: spec,
+    section 35.2)."""
     document = json.loads(snapshots.SYNTHETIC_SNAPSHOT.read_bytes())
     document["synthetic"] = False
     document["source"].update(trust_tier="benchmark")
     path = tmp_path / "snapshot.json"
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
-    return [snapshots.register_snapshot(path)]
+    return [snapshots.register(snapshots.read_snapshot(path))[0]]
 
 
 def _normalization(sources):
@@ -719,7 +721,8 @@ def restricted(tmp_path):
                               source_key="restricted-fx-and-cost-index")
     path = tmp_path / "restricted.json"
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
-    return [snapshots.register_snapshot(path)]
+    # As a feed's answer is registered, with its registry line's terms (spec, section 35.2).
+    return [snapshots.register(snapshots.read_snapshot(path))[0]]
 
 
 def test_a_restricted_sources_raw_rates_never_reach_a_reader(deployment, people, restricted):
@@ -781,7 +784,8 @@ def test_a_conflict_naming_a_restricted_source_never_shows_its_values(deployment
     document["cost_index"] = []
     path = tmp_path / "other.json"
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
-    other = snapshots.register_snapshot(path)
+    # As a feed's answer is registered, with its registry line's terms (spec, section 35.2).
+    other, _ = snapshots.register(snapshots.read_snapshot(path))
     valued = date(2026, 9, 30)
     eur, _ = made_and_simulated(deployment, people["analyst"], title="EUR", currency="EUR", as_of=valued)
     posted = _totalled(deployment, people, valuation_date="2026-09-30",
@@ -1447,7 +1451,7 @@ def test_a_portfolio_fault_never_takes_down_a_stop():
         cwd=REPO, env=env, capture_output=True, text=True, timeout=600, check=False,
     )
     assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-2000:])
-    assert "4 passed" in result.stdout, result.stdout[-2000:]
+    assert "5 passed" in result.stdout, result.stdout[-2000:]
 
 
 def test_removing_an_operator_never_writes_a_portfolio(deployment, people):

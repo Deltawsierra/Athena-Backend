@@ -39,10 +39,22 @@ version, :func:`build`:
    that cannot be computed is recorded as none, with the reason, and never fails
    the build.
 
+A build may NAME a stored normalization policy (``"normalization": "<key>"``; spec,
+section 36): each money figure of the parameter-set version it reads that is stated in
+another currency than the build's, or at another date than its as-of date, and each
+money attribute of its effects a template reads that is stated at another date, is then
+normalized into the build's currency at its as-of date
+(:mod:`assurance.economics.run_normalization`, through the normalization route's own
+service) BEFORE the build's transaction, and the build reads the normalized figure, a
+parameter of the scenario version, with its record (``FigureNormalization``). Without a
+policy a figure in another currency is refused (``currency_mismatch``), as before.
+
 IDEMPOTENT. A build's identity is the content digest of everything it is built from
 (:func:`build_document`, :func:`build_digest`): the builder, grouping and pack
 versions, the deployment, the parameter-set version and its digest, the currency,
-the as-of date, every effect as resolved and every finding link. Building the same
+the as-of date, every effect as resolved and every finding link, and where it names
+one, the stored normalization policy (key, version, digest) and the source versions
+its normalizations read. Building the same
 inputs again returns the scenario already built, and never a second one; two builds
 of the same inputs racing are refused by the database (the digest is unique per
 deployment), and the later writes nothing. The system fingerprint is not in the
@@ -70,23 +82,27 @@ from assurance import composition, consequential, observed_effects, observed_out
 from assurance.authority_chain_records import effect_digest
 from assurance.models import Asset, Finding, WorkflowChainOutcome
 
-from .engine import formulas, governance
+from . import run_normalization
+from .engine import figure_normalization, formulas, governance, pack_registry
 from .engine import loss as engine_loss
 from .engine import money
 from .engine import parameter_set as pset
 from .engine import templates as tpl
-from .engine.parameters import POINTS, Parameter, ParameterRefused, Point
+from .engine.pack_inputs import PACK_INPUT_PREFIX
+from .engine.parameters import MONEY_UNITS, POINTS, Parameter, ParameterRefused, Point
 from .models import (
     BuildRows,
     CausalEffect,
     CustomerParameterSet,
     EffectFinding,
+    FigureNormalization,
     FinancialParameter,
     FinancialScenario,
     LossComponent,
     LossEvent,
     ScenarioBuild,
     ScenarioReview,
+    canonical_digest,
     check_build_rows,
     insert_checked_rows,
 )
@@ -113,7 +129,7 @@ MAX_EFFECTS = 50
 MAX_LINKS = 500
 
 _REQUEST_REQUIRED = frozenset({"title", "parameter_set", "currency", "as_of", "effects"})
-_REQUEST_OPTIONAL = frozenset({"findings", "supersedes"})
+_REQUEST_OPTIONAL = frozenset({"findings", "supersedes", "pack", "normalization"})
 _SET_REQUIRED = frozenset({"set_key", "version"})
 _EFFECT_REQUIRED = frozenset({"key", "origin", "effect_type", "asset", "business_process"})
 _EFFECT_OPTIONAL = frozenset({"attributes", "observed_effect"})
@@ -314,10 +330,13 @@ def _connected(units: Mapping[str, list[EffectInput]]) -> list[list[EffectInput]
     return sorted(events.values(), key=lambda members: min(e.occurred_at for e in members))
 
 
-def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[EventPlan, ...]:
+def group(
+    effects: Iterable[EffectInput], links: Iterable[LinkInput], *, pack: pack_registry.Pack | None = None
+) -> tuple[EventPlan, ...]:
     """The causal loss events ``effects`` and the findings enabling them (``links``)
-    make. Pure and deterministic: the same inputs give the same events in the same
-    order, whatever order they are given in.
+    make, under ``pack`` (the banking pack unless an industry pack is given: spec,
+    section 37). Pure and deterministic: the same inputs give the same events in the
+    same order, whatever order they are given in.
 
     Each effect is assigned to one template (by precedence); the members -- every
     finding link, and every effect no finding enables -- are bucketed by
@@ -336,9 +355,10 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
     effect declared two ways is refused (:func:`check_spine_declarations`)."""
     effects = tuple(effects)
     links = tuple(links)
+    pack = pack_registry.BANKING if pack is None else pack
     check_spine_declarations(effects)
     by_key = {e.key: e for e in effects}
-    selections = {e.key: tpl.select(e.effect_type, e.business_process) for e in effects}
+    selections = {e.key: pack.select(e.effect_type, e.business_process) for e in effects}
     members: list[Member] = []
     linked: set[str] = set()
     for link in links:
@@ -396,14 +416,14 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
 
 
 def gross_cash(plan: EventPlan, effects: Iterable[EffectInput], variables: Mapping[str, Parameter], *,
-               currency: str, as_of: date) -> tuple:
+               currency: str, as_of: date, inputs: Mapping[str, Parameter] | None = None) -> tuple:
     """The gross cash loss (low, base, high, as decimals) ``plan``'s template makes
     of ``effects``: each attribute it reads at the larger loss across them
     (:func:`~assurance.economics.engine.templates.larger_loss`), each component by
-    its formula from those and the parameter set's ``variables``, the components
-    summed, gross of insurance and apart from market value. An unknown component adds
-    nothing, as in the event's own total. Pure: what the build would write for an
-    event of exactly ``effects``."""
+    its formula from those and the parameter set's ``variables`` (and, under an
+    industry pack, its ``inputs``), the components summed, gross of insurance and
+    apart from market value. An unknown component adds nothing, as in the event's own
+    total. Pure: what the build would write for an event of exactly ``effects``."""
     effects = tuple(effects)
     attributes: dict[str, Parameter] = {}
     for name, reading in sorted(tpl.readings(plan.template).items()):
@@ -419,14 +439,14 @@ def gross_cash(plan: EventPlan, effects: Iterable[EffectInput], variables: Mappi
             planned.bindings(),
             as_of=as_of,
         )
-        for planned in tpl.plan(plan.template, variables, attributes)
+        for planned in tpl.plan(plan.template, variables, attributes, inputs)
     )
     total = engine_loss.assess(engine_loss.LossEvent(plan.event_key, currency, components), None).gross.total
     return tuple(total.at(point).amount for point in POINTS)
 
 
 def price(plans: Iterable[EventPlan], variables: Mapping[str, Parameter], *, currency: str,
-          as_of: date) -> tuple[EventPlan, ...]:
+          as_of: date, inputs: Mapping[str, Parameter] | None = None) -> tuple[EventPlan, ...]:
     """``plans`` with each key's hypothetical effects PRICED in ONE event (grouping
     v2; the lead's call of 12 Oct 2026 on the owner's decision 12, spec 24.9).
 
@@ -453,8 +473,8 @@ def price(plans: Iterable[EventPlan], variables: Mapping[str, Parameter], *, cur
         def gain(index: int, events=events) -> tuple:
             plan = events[index]
             observed = [e for e in plan.effects if e.occurred_at is not None]
-            alone = gross_cash(plan, observed, variables, currency=currency, as_of=as_of)
-            joined = gross_cash(plan, plan.effects, variables, currency=currency, as_of=as_of)
+            alone = gross_cash(plan, observed, variables, currency=currency, as_of=as_of, inputs=inputs)
+            joined = gross_cash(plan, plan.effects, variables, currency=currency, as_of=as_of, inputs=inputs)
             low, base, high = (j - a for j, a in zip(joined, alone, strict=True))
             return (base, high, low, -index)
 
@@ -473,16 +493,32 @@ def build_document(
     as_of: date,
     effects: Iterable[EffectInput],
     links: Iterable[LinkInput],
+    pack: pack_registry.Pack | None = None,
+    normalization: Mapping | None = None,
 ) -> dict:
     """Everything a build is built from, canonical: what its digest is taken over
     and what its record keeps. A title and the scenario superseded are not here:
-    they name the draft and do not change its events."""
-    return {
+    they name the draft and do not change its events. The pack is the build's ONE
+    pack, its id and version and every template of it (the banking pack's unless an
+    industry pack is given): a banking build's document is the one it was before E7,
+    byte for byte (spec, section 37). An industry pack's build also records the pack's
+    digest (``pack_digest``: the content it was built under) and what its figures are
+    read with (``pack_statements``: the cautions of the templates its effects are
+    assigned to and what the pack never prices), so its report and card state them
+    even when a later release no longer holds the pack (section 37.3).
+    ``normalization`` -- the policy a build states and the source versions its
+    normalizations read (spec, section 36) -- only where it states one: a build that
+    states none keeps the document, and the digest, it had before a policy could be
+    stated. The two are independent: an industry build that names a policy records
+    both."""
+    pack = pack_registry.BANKING if pack is None else pack
+    effects = tuple(effects)
+    document = {
         "builder": BUILDER_VERSION,
         "grouping": GROUPING_VERSION,
         "grouping_window_hours": int(GROUPING_WINDOW.total_seconds() // 3600),
-        "pack": tpl.PACK,
-        "templates": [[t.template_id, t.version] for t in tpl.TEMPLATES],
+        "pack": pack.pack_id,
+        "templates": [[t.template_id, t.version] for t in pack.templates],
         "deployment": deployment_uuid,
         "parameter_set": dict(parameter_set),
         "currency": currency,
@@ -490,6 +526,13 @@ def build_document(
         "effects": [e.canonical() for e in sorted(effects, key=lambda e: e.key)],
         "findings": sorted(link.canonical() for link in links),
     }
+    if not pack.banking:
+        chosen = [pack.select(e.effect_type, e.business_process).template for e in sorted(effects, key=lambda e: e.key)]
+        document["pack_digest"] = pack.digest
+        document["pack_statements"] = pack.statements(chosen)
+    if normalization is not None:
+        document["normalization"] = dict(normalization)
+    return document
 
 
 def build_digest(document: Mapping) -> str:
@@ -505,9 +548,9 @@ def build_digest(document: Mapping) -> str:
 class EffectRequest:
     key: str
     origin: tpl.Origin
-    effect_type: tpl.EffectType
+    effect_type: tpl.EffectType  # or the build's industry pack's effect type
     asset: str
-    business_process: tpl.BusinessProcess
+    business_process: tpl.BusinessProcess  # or the build's industry pack's process
     attributes: Mapping[str, Parameter]
     observed_effect: str
     distributions: Mapping[str, dict] = field(default_factory=dict)
@@ -525,6 +568,12 @@ class BuildRequest:
     effects: tuple[EffectRequest, ...]
     links: tuple[LinkInput, ...]
     supersedes: str | None
+    #: The ONE pack the build is under (spec, section 37): the banking pack unless the
+    #: request names an industry pack.
+    pack: pack_registry.Pack = pack_registry.BANKING
+    #: What the request names as its normalization policy (spec, section 36): a stored
+    #: policy's key, resolved in the deployment; ``None`` where it names none.
+    normalization: object | None = None
 
 
 def _uuid_text(value, path: str) -> str:
@@ -548,8 +597,11 @@ def _list(value, path: str, most: int) -> list:
 
 def parse_request(body) -> BuildRequest:
     """A build request read from ``body``, or refused with the engine's or the
-    builder's code and the field's path. Exactly the fields, at every level."""
+    builder's code and the field's path. Exactly the fields, at every level. A body
+    that names no ``pack`` is under the banking pack; one that names an industry
+    pack is read against that pack's vocabularies and attributes (spec, section 37)."""
     body = pset._object(body, "body", _REQUEST_REQUIRED, _REQUEST_OPTIONAL)
+    pack = pack_registry.pack_of(body.get("pack"), "pack")
     title = body["title"]
     if not isinstance(title, str) or not title.strip() or len(title) > _TITLE_MAX:
         raise ParameterRefused("field_malformed", f"title is text of 1 to {_TITLE_MAX} characters")
@@ -582,7 +634,7 @@ def parse_request(body) -> BuildRequest:
         elif observed is not None:
             raise ParameterRefused("field_unrecognised", f"{path}: ['observed_effect'] on a hypothetical effect")
         raw_attributes = raw.get("attributes", {})
-        attributes = tpl.parse_attributes(key, raw_attributes, f"{path}.attributes", origin=origin)
+        attributes = pack.parse_attributes(key, raw_attributes, f"{path}.attributes", origin=origin)
         # The distribution an attribute states, read as the parameter set reads one
         # (pset.stated_distribution); it is held to its figures when its row is checked.
         distributions = {}
@@ -594,9 +646,9 @@ def parse_request(body) -> BuildRequest:
             EffectRequest(
                 key=key,
                 origin=origin,
-                effect_type=tpl.check_effect_type(raw["effect_type"], f"{path}.effect_type"),
+                effect_type=pack.check_effect_type(raw["effect_type"], f"{path}.effect_type"),
                 asset=_uuid_text(raw["asset"], f"{path}.asset"),
-                business_process=tpl.check_business_process(raw["business_process"], f"{path}.business_process"),
+                business_process=pack.check_business_process(raw["business_process"], f"{path}.business_process"),
                 attributes=attributes,
                 observed_effect=observed or "",
                 distributions=distributions,
@@ -627,6 +679,17 @@ def parse_request(body) -> BuildRequest:
     supersedes = body.get("supersedes")
     if supersedes is not None:
         supersedes = _uuid_text(supersedes, "supersedes")
+    normalization = None
+    if "normalization" in body:
+        # A stored policy's key, and nothing else: never a policy, so never the order of
+        # its providers (spec, section 36.1). Resolved in the deployment.
+        normalization = body["normalization"]
+        if not isinstance(normalization, str) or not normalization:
+            raise ParameterRefused(
+                "field_malformed",
+                "normalization names a stored normalization policy by its key: the policy and its providers' order "
+                "are never a build request's to state",
+            )
     return BuildRequest(
         title=title,
         set_key=set_key,
@@ -636,6 +699,8 @@ def parse_request(body) -> BuildRequest:
         effects=tuple(effects),
         links=tuple(links),
         supersedes=supersedes,
+        pack=pack,
+        normalization=normalization,
     )
 
 
@@ -683,6 +748,58 @@ class Resolved:
     supersedes: FinancialScenario | None
     document: dict
     digest: str
+    #: The industry pack's inputs the parameter set states, by input name (none for
+    #: a banking build); each the build normalized read as its normalized figure.
+    inputs: Mapping[str, Parameter] = field(default_factory=dict)
+    #: Each figure the build normalized (spec, section 36), by the native figure's name
+    #: (a variable's, or ``<effect>.<attribute>``); ``variables`` and
+    #: ``planning_effects`` read the normalized figure in its place.
+    normalized: Mapping[str, run_normalization.Normalized] = field(default_factory=dict)
+    #: The effects as the build's events and components read them: ``effects`` with each
+    #: normalized attribute in its place (the same objects where none is).
+    planning_effects: tuple[EffectInput, ...] = ()
+    #: The stored normalization policy the build named, and the engine's policy.
+    policy_row: object | None = None
+    policy: object | None = None
+
+    def planned(self) -> tuple[EffectInput, ...]:
+        return self.planning_effects or self.effects
+
+
+def read_attributes(effect: EffectInput, pack: pack_registry.Pack | None = None) -> set[str]:
+    """The attributes of ``effect`` its template reads: the template the build's
+    ``pack`` assigns it to (the banking pack unless an industry pack is given; spec,
+    section 37), so an industry effect is read by its own pack's template."""
+    pack = pack_registry.BANKING if pack is None else pack
+    return set(tpl.readings(pack.select(effect.effect_type, effect.business_process).template))
+
+
+def read_set_figures(effects: Iterable[EffectInput], content, pack: pack_registry.Pack | None = None) -> set[str]:
+    """The parameter-set figures a build of ``effects`` under ``pack`` reads (the
+    banking pack unless an industry pack is given): each variable a template its
+    effects are assigned to reads; each pack input such a template reads, by its row's
+    name (``pack_input:<name>``; spec, section 37), so it is currency-checked and
+    normalized as a variable is; and each term of the version's insurance policy,
+    which every event applies. An optional component whose pack inputs the version
+    does not state is not made (:meth:`.templates.Template.switched_off`), so nothing
+    it would read is read."""
+    pack = pack_registry.BANKING if pack is None else pack
+    stated = content.pack_inputs
+    names: set[str] = set()
+    for effect in effects:
+        chosen = pack.select(effect.effect_type, effect.business_process).template
+        for spec in chosen.components:
+            if chosen.switched_off(spec, stated):
+                continue
+            for source in spec.sources.values():
+                if source.kind is tpl.SourceKind.PARAMETER_SET:
+                    names.add(source.name)
+                elif source.kind is tpl.SourceKind.PACK_INPUT:
+                    names.add(PACK_INPUT_PREFIX + source.name)
+    policy = content.insurance_policy()
+    if policy is not None:
+        names |= {policy.deductible.name, policy.limit.name, *(t.name for t in policy.sublimits.values())}
+    return names
 
 
 def check_set_distributions(rows: Iterable[FinancialParameter]) -> None:
@@ -711,8 +828,13 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
     rows = version.parameter_rows()
     if not version.intact(rows):
         raise tpl.BuildRefused("parameter_set_not_found", f"{request.set_key} version {request.set_version} is not intact")
+    # One pack per build: the version answers the build's pack (spec, section 37); the
+    # inputs a template the build uses reads are checked once its effects are known.
+    request.pack.check_set(version.pack)
     check_set_distributions(rows)
-    variables = version.content(rows).variables
+    content = version.content(rows)
+    variables = content.variables
+    inputs = content.pack_inputs
 
     wanted = {e.asset for e in request.effects}
     found = {str(u) for u in Asset.objects.filter(deployment=deployment, uuid__in=wanted).values_list("uuid", flat=True)}
@@ -767,12 +889,89 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
     if len(set(observations)) != len(observations):
         raise ParameterRefused("duplicate_id", "one SPINE observation declared as two effects")
     check_spine_declarations(effects)
+    # Every pack input a template the build uses reads is stated: refused, never
+    # defaulted and never left unknown (spec, section 37). No banking template reads one.
+    if not request.pack.banking:
+        for effect in sorted(effects, key=lambda e: e.key):
+            chosen = request.pack.select(effect.effect_type, effect.business_process).template
+            request.pack.check_template_inputs(chosen, inputs)
 
     supersedes = None
     if request.supersedes is not None:
         supersedes = FinancialScenario.objects.filter(deployment=deployment, uuid=request.supersedes).first()
         if supersedes is None:
             raise tpl.BuildRefused("scenario_not_found", request.supersedes)
+
+    # The figures it reads in another currency, or at another date, normalized now,
+    # before any transaction: each read from the stored source versions (spec,
+    # section 36). Without a policy, one in another currency is refused as before.
+    # The figures are those the templates of the build's OWN pack read, its pack
+    # inputs among them (section 37): an industry build is read as it is planned.
+    normalized: dict[str, run_normalization.Normalized] = {}
+    normalization = None
+    planning = tuple(effects)
+    policy_row = policy = None
+    money_rows = [row for row in rows if row.currency]
+    if request.normalization is not None or any(row.currency != request.currency for row in money_rows):
+        read = run_normalization.read_rows(rows, read_set_figures(effects, content, request.pack))
+        if request.normalization is None:
+            run_normalization.check_currency(read, request.currency)
+        else:
+            policy_row, policy = run_normalization.resolve_policy(deployment, request.normalization, request.currency)
+            candidates = run_normalization.set_candidates(
+                read, {"set_key": version.set_key, "version": version.version}
+            )
+            for effect in effects:
+                reads = read_attributes(effect, request.pack)
+                for name, parameter in sorted(effect.attributes.items()):
+                    if name not in reads or parameter.unit not in MONEY_UNITS:
+                        continue
+                    if parameter.currency != request.currency:
+                        # An effect's attribute is the analyst's figure in the build's
+                        # currency: only a parameter-set figure is converted (section 36.1).
+                        raise money.MoneyRefused(
+                            "currency_mismatch",
+                            f"{parameter.name} is in {parameter.currency}: an effect's attribute is stated in the "
+                            f"build's currency, {request.currency}; only a parameter-set figure is converted",
+                        )
+                    candidates.append(
+                        run_normalization.Candidate(parameter, {"effect": effect.key}, effect.distributions.get(name))
+                    )
+            normalized = run_normalization.normalize(
+                deployment, candidates, currency=request.currency, valuation_date=request.as_of,
+                policy=policy, new_id=lambda: str(_uuid.uuid4()),
+            )
+            variables = {
+                name: normalized[name].parameter if name in normalized else parameter
+                for name, parameter in variables.items()
+            }
+            # A pack input is read as its normalized figure, as a variable is (its row's
+            # name, and so the normalized figure's key, is ``pack_input:<name>``).
+            inputs = {
+                name: normalized[PACK_INPUT_PREFIX + name].parameter
+                if PACK_INPUT_PREFIX + name in normalized
+                else parameter
+                for name, parameter in inputs.items()
+            }
+            planning = tuple(
+                replace(effect, attributes={
+                    name: normalized[parameter.name].parameter if parameter.name in normalized else parameter
+                    for name, parameter in effect.attributes.items()
+                })
+                if any(parameter.name in normalized for parameter in effect.attributes.values()) else effect
+                for effect in effects
+            )
+            # The stored policy and the source versions the normalizations read are
+            # inputs of the build: a refresh after a newer usable version (E6, section
+            # 34.4) rebuilds a NEW version that reads it, never this one returned.
+            fields = ("source_key", "tenant", "version", "snapshot_hash")
+            read_from = sorted({tuple(s[f] for f in fields) for figure in normalized.values() for s in figure.sources})
+            normalization = {
+                "rule": figure_normalization.VERSION,
+                "policy": policy_row.reference(),
+                "applied": policy.as_dict(),
+                "sources": [dict(zip(fields, source, strict=True)) for source in read_from],
+            }
 
     document = build_document(
         deployment_uuid=str(deployment.uuid),
@@ -781,9 +980,12 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
         as_of=request.as_of,
         effects=effects,
         links=request.links,
+        pack=request.pack,
+        normalization=normalization,
     )
     return Resolved(
-        request, version, variables, tuple(rows), tuple(effects), supersedes, document, build_digest(document)
+        request, version, variables, tuple(rows), tuple(effects), supersedes, document, build_digest(document),
+        inputs=inputs, normalized=normalized, planning_effects=planning, policy_row=policy_row, policy=policy,
     )
 
 
@@ -841,7 +1043,11 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
     for the ids each row is given; nothing is read or written."""
     request = resolved.request
     plans = price(
-        group(resolved.effects, request.links), resolved.variables, currency=request.currency, as_of=request.as_of
+        group(resolved.planned(), request.links, pack=request.pack),
+        resolved.variables,
+        currency=request.currency,
+        as_of=request.as_of,
+        inputs=resolved.inputs,
     )
     value, unavailable = fingerprint
     scenario = FinancialScenario(
@@ -859,13 +1065,14 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
         build_digest=resolved.digest,
         builder_version=BUILDER_VERSION,
         grouping_version=GROUPING_VERSION,
-        pack=tpl.PACK,
+        pack=request.pack.pack_id,
         currency=request.currency,
         as_of=request.as_of,
         inputs=resolved.document,
     )
     parameters: list[FinancialParameter] = []
     stored: dict[str, dict[str, FinancialParameter]] = {}
+    attribute_rows: dict[str, FinancialParameter] = {}
     for effect in resolved.effects:
         stored[effect.key] = {}
         for name, parameter in sorted(effect.attributes.items()):
@@ -874,6 +1081,26 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
             )
             parameters.append(row)
             stored[effect.key][name] = row
+            attribute_rows[parameter.name] = row
+    # Each figure the build normalized, as a parameter of the scenario version with the
+    # id its plan cites, and its record (spec, section 36). An effect's attribute is
+    # read as its normalized figure; the attribute as stated stays, read by nothing.
+    normalizations: list[FigureNormalization] = []
+    for name, figure in sorted(resolved.normalized.items()):
+        row = FinancialParameter.from_engine(figure.parameter, scenario=scenario)
+        row.uuid = _uuid.UUID(figure.parameter.parameter_id)
+        parameters.append(row)
+        native = figure.candidate.row if figure.candidate.row is not None else attribute_rows[name]
+        if "effect" in figure.candidate.parent:
+            effect_key, _, attribute = name.partition(".")
+            stored[effect_key][attribute] = row
+        record = figure.record(native.as_engine(), resolved.policy_row.reference(), resolved.policy.as_dict())
+        normalizations.append(
+            FigureNormalization(
+                deployment=deployment, scenario=scenario, native=native, normalized=row, record=record,
+                record_digest=canonical_digest(record),
+            )
+        )
     events: list[LossEvent] = []
     effects: list[CausalEffect] = []
     links: list[EffectFinding] = []
@@ -932,7 +1159,7 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
                 attributes[name] = row.as_engine()
             else:
                 attributes[name] = merged.parameter
-        for planned in tpl.plan(plan.template, resolved.variables, attributes):
+        for planned in tpl.plan(plan.template, resolved.variables, attributes, resolved.inputs):
             components.append(
                 LossComponent(
                     loss_event=event,
@@ -953,6 +1180,7 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
         links=links,
         components=components,
         set_parameters={str(row.uuid): row for row in resolved.set_rows},
+        normalizations=normalizations,
     )
 
 
@@ -1019,14 +1247,38 @@ def _source(
     row: FinancialParameter | None,
     versions: Mapping[int, CustomerParameterSet],
     derived: Mapping[str, FinancialParameter],
+    normalized: Mapping[str, FigureNormalization] | None = None,
 ) -> dict | None:
     if row is None:
         return None
+    figure = (normalized or {}).get(str(row.uuid))
+    if figure is not None:
+        # A figure the build normalized into its currency (spec, section 36): a
+        # parameter-set variable, an industry pack's input (section 37), or an
+        # effect's attribute.
+        how = {"native": str(figure.native.uuid), "currency": figure.native.currency, "rule": figure_normalization.VERSION}
+        if figure.native.parameter_set_id is None:
+            effect, _, attribute = figure.native.name.partition(".")
+            return {"from": tpl.SourceKind.EFFECT_ATTRIBUTE.value, "name": attribute, "effect": effect, "normalized": how}
+        version = versions.get(figure.native.parameter_set_id)
+        kind, name = tpl.SourceKind.PARAMETER_SET.value, figure.native.name
+        if name.startswith(PACK_INPUT_PREFIX):
+            kind, name = tpl.SourceKind.PACK_INPUT.value, name[len(PACK_INPUT_PREFIX):]
+        return {
+            "from": kind,
+            "name": name,
+            "parameter_set": {"set_key": version.set_key, "version": version.version} if version else None,
+            "normalized": how,
+        }
     if row.parameter_set_id is not None:
         version = versions.get(row.parameter_set_id)
+        kind, name = tpl.SourceKind.PARAMETER_SET.value, row.name
+        if row.name.startswith(PACK_INPUT_PREFIX):
+            # An industry pack's input, stated in the set beside its variables (section 37).
+            kind, name = tpl.SourceKind.PACK_INPUT.value, row.name[len(PACK_INPUT_PREFIX):]
         return {
-            "from": tpl.SourceKind.PARAMETER_SET.value,
-            "name": row.name,
+            "from": kind,
+            "name": name,
             "parameter_set": {"set_key": version.set_key, "version": version.version} if version else None,
         }
     if row.derived_from:
@@ -1060,6 +1312,22 @@ def review_status(scenario: FinancialScenario) -> dict:
     }
 
 
+def _withheld(value, names: Mapping[str, str]):
+    """``value`` with the figures of every parameter ``names`` names withheld: a
+    parameter's low, base and high, and the values a component read of it."""
+    if isinstance(value, list):
+        return [_withheld(item, names) for item in value]
+    if not isinstance(value, dict):
+        return value
+    found = {key: _withheld(item, names) for key, item in value.items()}
+    if found.get("name") in names and {"low", "base", "high"} & set(found):
+        found.update(low=None, base=None, high=None, withheld=names[found["name"]])
+    held = found.get("parameter")
+    if isinstance(held, dict) and held.get("name") in names and isinstance(found.get("values"), dict):
+        found["values"] = dict.fromkeys(found["values"])
+    return found
+
+
 def describe(scenario: FinancialScenario) -> dict:
     """The scenario's events as built: each with its template, grouping key, effects
     (by when they occurred) and the findings enabling them, its components with the
@@ -1081,7 +1349,9 @@ def describe(scenario: FinancialScenario) -> dict:
     if build_row is not None:
         version = CustomerParameterSet.objects.get(pk=build_row.parameter_set_id)
         versions[version.pk] = version
-        policy = version.content().insurance_policy()
+        policy = run_normalization.policy_of(build_row)
+    figures = run_normalization.stored(scenario)
+    normalized = {str(row.normalized.uuid): row for row in figures}
     currency = build_row.currency if build_row is not None else None
     events = []
     assessments = []
@@ -1117,7 +1387,12 @@ def describe(scenario: FinancialScenario) -> dict:
             str(f.uuid): f
             for f in Finding.objects.filter(deployment_id=scenario.deployment_id, uuid__in={x.finding for x in links})
         }
-        chosen = tpl.CATALOGUE.get((first.template_id, first.template_version)) if first else None
+        # The template as the build's own pack version holds it (spec, section 37.1).
+        chosen = (
+            pack_registry.template(first.template_id, first.template_version, build_row.pack if build_row else None)
+            if first
+            else None
+        )
         specs = {c.component_key: c for c in chosen.components} if chosen else {}
         component_rows = list(LossComponent.objects.filter(loss_event=event).order_by("id"))
         cited = {
@@ -1143,7 +1418,7 @@ def describe(scenario: FinancialScenario) -> dict:
                 read = cited.get(row.cited_parameters.get(name, ""))
                 sources[name] = {
                     "template": spec.sources[name].as_dict() if spec else None,
-                    "read": _source(read, versions, derived),
+                    "read": _source(read, versions, derived, normalized),
                     "parameter": str(read.uuid) if read else None,
                 }
             components.append({**component.as_dict(), "sources": sources})
@@ -1202,6 +1477,20 @@ def describe(scenario: FinancialScenario) -> dict:
                 **record,
             }
         )
+    if figures:
+        # A figure normalized from a source that may not be redistributed is shown by
+        # its provenance only, wherever an event would show its values (section 36.4).
+        from .report import withheld_figures
+
+        restricted = withheld_figures({"normalizations": [figure.record for figure in figures]})
+        derived_rows = FinancialParameter.objects.filter(scenario=scenario).exclude(derived_from=[])
+        by_uuid = {str(figure.normalized.uuid): figure.normalized.name for figure in figures}
+        for row in derived_rows:
+            taken = [restricted[by_uuid[u]] for u in row.derived_from if by_uuid.get(u) in restricted]
+            if taken:
+                restricted.setdefault(row.name, taken[0])
+        if restricted:
+            events = _withheld(events, restricted)
     return {
         "scenario": {
             "uuid": str(scenario.uuid),

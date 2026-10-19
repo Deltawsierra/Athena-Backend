@@ -6,6 +6,10 @@
 # held back) and its username kept beside it. Nothing is backfilled: a version
 # recorded before this reads "not recorded", which is what is known of it. Rolling
 # it back drops the two columns.
+#
+# Numbered 0078 behind #169's 0074_section_28_hardening and 0075_section_28_row_macs,
+# #170's 0076_figure_normalizations and #171's 0077_parameter_set_pack, on which it
+# depends, so the migrations keep one head (it was 0074, on 0073).
 
 import django.db.models.deletion
 from django.conf import settings
@@ -15,7 +19,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0073_exposure_assurance"),
+        ("assurance", "0077_parameter_set_pack"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

@@ -1,0 +1,274 @@
+"""The review and override gates a signed receipt passes (section 28 hardening, T9a
+and T1/T4; ``docs/economics/spec-v1.md``, section 35).
+
+**The review gate (T9a).** The specification asks for "human review before external
+delivery". A Financial Exposure Receipt is the delivered figure, so
+:func:`review_refusal` refuses one (``scenario_not_reviewed``) unless the LATEST
+review of the run's scenario version is ``approved``, by a person who authored no
+version of the scenario and recorded none of the customer parameter-set versions its
+figures rest on (review round 1 of #169, M3; matched on the account and the
+username, as every separation rule here), and whose account, read now, still exists,
+is active and is an admin or an analyst (L1): an approval by someone since demoted,
+deactivated or removed no longer counts. The review itself is written through
+``POST .../economics/scenarios/<uuid>/reviews/`` (:mod:`.report_api`), whose model
+refuses an author, and refuses an approval from someone an author promoted, who
+promoted themselves, or who was promoted after the version was recorded (T9b,
+``approver_role_not_independent``). The gate is ON by default. It is switched only by
+the environment variable :data:`REVIEW_GATE_ENV`, read here in code and in no
+settings module: ``off`` (exactly) turns it off; ``required``, unset, or any other
+value keeps it on. It applies to every receipt: a receipt of a ``dev`` or
+``staging`` deployment carries the same signature and states no environment, so it
+is gated the same way.
+
+**The override gate (T1/T4).** :func:`sensitive_changes` lists what moved in the
+customer parameter-set version the run's build names against its ANCHOR (review
+round 1 of #169, M4; the lead's interim default, which the owner may change): the
+most recently recorded version of the same set, recorded before it, that passed an
+approved non-author review (:func:`~assurance.economics.models.parameter_set_anchor`),
+so stepwise cuts accumulate against it. A set with no anchor of its own -- a new one
+-- is measured against the version before it of the same set and, on the variables
+both state, against the deployment's anchor of any set, so a new set is measured
+too. What counts: a variable added or removed, its unit or currency changed, its low,
+base or high moved by a factor of :data:`MATERIAL_FACTOR` or more either way (or to
+or from zero, or across zero), its stated distribution changed in kind or a
+parameter of it moved by that factor, or the set's insurance exclusions changed.
+That is how one analyst cut the transactions, the value or the frequency prior of a
+version (the audit's probes T1b and T3a). Each change needs an IN-FORCE
+:class:`~assurance.economics.models.SensitiveOverride` on the run's scenario version
+naming its subject exactly: approved by two people, neither its requester; not
+expired (:data:`~assurance.economics.engine.governance.OVERRIDE_EXPIRES_AFTER`); and
+not revoked. Otherwise the receipt is refused (``material_change_unapproved``). An
+override counts only while it is in force, read at the moment the receipt is asked
+for, never stored. A first version with no anchor has nothing to compare.
+
+Both gates read rows and nothing else: no lock, no transaction, no engine. Nothing
+here is on a stop path; nothing Django loads at start imports it.
+"""
+
+from __future__ import annotations
+
+import os
+from decimal import Decimal, InvalidOperation
+
+from .models import (
+    CustomerParameterSet,
+    FinancialParameter,
+    FinancialScenario,
+    ScenarioBuild,
+    ScenarioReview,
+    SensitiveOverride,
+    approval_standing,
+    input_authors,
+    parameter_set_anchor,
+)
+from .models import latest_review as _latest_review
+
+#: The environment variable that switches the review gate, read in code only.
+REVIEW_GATE_ENV = "ATHENA_ECONOMICS_RECEIPT_REVIEW"
+REVIEW_REQUIRED = "required"
+REVIEW_OFF = "off"
+#: How far a parameter-set figure moves, either way, before it is a sensitive change.
+MATERIAL_FACTOR = Decimal(2)
+
+#: What each code of the gates means.
+REFUSALS = {
+    "scenario_not_reviewed": (
+        "a signed receipt is human-reviewed before it is delivered: the latest review of the run's scenario version "
+        "is approved by a person who authored no version of it (POST .../reviews/ with verdict approved)"
+    ),
+    "material_change_unapproved": (
+        "a figure of the run's customer parameter-set version moved materially against its anchor -- the latest "
+        "version that passed an approved non-author review, else the version before it (by a "
+        "factor of 2 or more, added, removed, or its distribution changed): each such change needs a sensitive "
+        "override naming it that is IN FORCE -- approved by two people other than its requester, not expired and "
+        "not revoked -- before a receipt is signed"
+    ),
+}
+
+
+def review_gate() -> str:
+    """:data:`REVIEW_OFF` only where :data:`REVIEW_GATE_ENV` is exactly ``off``;
+    :data:`REVIEW_REQUIRED` otherwise (unset, ``required``, or anything unknown)."""
+    return REVIEW_OFF if os.environ.get(REVIEW_GATE_ENV) == REVIEW_OFF else REVIEW_REQUIRED
+
+
+def latest_review(scenario_id) -> ScenarioReview | None:
+    """The scenario version's latest review, the one that stands (as
+    :func:`assurance.economics.builder.review_status` orders them)."""
+    return _latest_review(scenario_id)
+
+
+def review_refusal(scenario_id) -> tuple[str, str] | None:
+    """``("scenario_not_reviewed", detail)`` unless the gate is off or the latest
+    review of the scenario version ``scenario_id`` is an approval that counts now
+    (:func:`~assurance.economics.models.approval_standing`): ``approved``, by someone
+    who authored no version of it and recorded none of the parameter-set versions it
+    rests on, whose account is still an active admin or analyst -- read from the rows
+    now; ``None`` otherwise."""
+    if review_gate() == REVIEW_OFF:
+        return None
+    refused = approval_standing(
+        latest_review(scenario_id), FinancialScenario.authors_of(scenario_id), input_authors(scenario_id)
+    )
+    if refused is not None:
+        return "scenario_not_reviewed", refused
+    return None
+
+
+# ------------------------------------------------------------------ sensitive changes
+
+
+def _material(before: str, after: str) -> bool:
+    """Whether a figure moved materially: by :data:`MATERIAL_FACTOR` or more either
+    way, to or from zero, or across zero. Text that is not a decimal moved."""
+    try:
+        a, b = Decimal(before), Decimal(after)
+    except (InvalidOperation, TypeError, ValueError):
+        return before != after
+    if not (a.is_finite() and b.is_finite()):
+        return before != after
+    if a == b:
+        return False
+    if a == 0 or b == 0 or (a < 0) != (b < 0):
+        return True
+    small, large = sorted((abs(a), abs(b)))
+    return large >= small * MATERIAL_FACTOR
+
+
+def _distribution_change(before, after) -> str | None:
+    if before == after:
+        return None
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return "its stated distribution was added or removed"
+    held, now = before.get("params") or {}, after.get("params") or {}
+    if (before.get("id"), before.get("version"), sorted(held)) != (after.get("id"), after.get("version"), sorted(now)):
+        return f"its stated distribution changed from {before.get('id')} to {after.get('id')}"
+    for name in sorted(held):
+        if _material(str(held[name]), str(now[name])):
+            return f"its stated distribution's {name} moved from {held[name]} to {now[name]}"
+    return None
+
+
+def _change(before: FinancialParameter, after: FinancialParameter) -> str | None:
+    if (before.unit, before.currency) != (after.unit, after.currency):
+        return f"its unit or currency changed ({before.unit} {before.currency} to {after.unit} {after.currency})"
+    for field, held, now in (
+        ("low", before.low, after.low), ("base", before.base, after.base), ("high", before.high, after.high)
+    ):
+        if _material(held, now):
+            return f"its {field} moved from {held} to {now}"
+    return _distribution_change(before.distribution, after.distribution)
+
+
+def subject(version: CustomerParameterSet, name: str) -> str:
+    """The override subject a change of ``name`` in ``version`` is approved under."""
+    return f"parameter-set:{version.set_key}:v{version.version}:{name}"
+
+
+def _compare(version: CustomerParameterSet, against: CustomerParameterSet, *, shared_only: bool) -> list[dict]:
+    """What moved in ``version`` against ``against``, each as ``{"subject", "change"}``.
+    ``shared_only``: ``against`` is another set's version, so only the variables both
+    state are compared (a set's other variables and its exclusions are its own)."""
+    named = f"against {against.set_key} v{against.version}"
+    before = {row.name: row for row in against.parameter_rows()}
+    after = {row.name: row for row in version.parameter_rows()}
+    names = set(before) & set(after) if shared_only else set(before) | set(after)
+    changes = []
+    for name in sorted(names):
+        if name not in after:
+            what = f"removed ({against.set_key} v{against.version} stated it)"
+        elif name not in before:
+            what = f"added ({against.set_key} v{against.version} did not state it)"
+        else:
+            what = _change(before[name], after[name])
+            what = None if what is None else f"{what} ({named})"
+        if what is not None:
+            changes.append({"subject": subject(version, name), "change": what})
+    if not shared_only and sorted(against.insurance_exclusions or []) != sorted(version.insurance_exclusions or []):
+        changes.append(
+            {
+                "subject": subject(version, "insurance_exclusions"),
+                "change": f"the insurance exclusions changed from {against.insurance_exclusions} to "
+                f"{version.insurance_exclusions} ({named})",
+            }
+        )
+    return changes
+
+
+def sensitive_changes(scenario_id) -> list[dict]:
+    """What moved in the parameter-set version the scenario version's build names,
+    each as ``{"subject", "change"}``, sorted by subject (see the module's rules):
+    against its own set's ANCHOR (:func:`~assurance.economics.models.parameter_set_anchor`)
+    where it has one; otherwise against the version before it of the same set and --
+    on the variables both state -- against the deployment's anchor, of any set, so a
+    new set is measured too. Empty for a version with no build, or a first version
+    with no anchor anywhere."""
+    build = ScenarioBuild._base_manager.filter(scenario_id=scenario_id).first()
+    if build is None:
+        return []
+    version = CustomerParameterSet._base_manager.filter(pk=build.parameter_set_id).first()
+    if version is None:
+        return []
+    own = parameter_set_anchor(version)
+    if own is not None:
+        return sorted(_compare(version, own, shared_only=False), key=lambda change: change["subject"])
+    changes: dict[str, dict] = {}
+    previous = (
+        CustomerParameterSet._base_manager.filter(
+            deployment_id=version.deployment_id, set_key=version.set_key, version__lt=version.version
+        )
+        .order_by("-version")
+        .first()
+    )
+    if previous is not None:
+        for change in _compare(version, previous, shared_only=False):
+            changes.setdefault(change["subject"], change)
+    other = parameter_set_anchor(version, same_set=False)
+    if other is not None:
+        for change in _compare(version, other, shared_only=True):
+            changes.setdefault(change["subject"], change)
+    return sorted(changes.values(), key=lambda change: change["subject"])
+
+
+def in_force_subjects(scenario_id) -> set[str]:
+    """The subjects of the scenario version's overrides that are in force now."""
+    return {
+        override.subject
+        for override in SensitiveOverride._base_manager.filter(scenario_id=scenario_id).order_by("id")
+        if SensitiveOverride.standing_refusal(override.pk) is None
+    }
+
+
+def override_refusal(scenario_id) -> tuple[str, str] | None:
+    """``("material_change_unapproved", detail)`` naming each sensitive change of the
+    scenario version that no override in force names; ``None`` otherwise."""
+    changes = sensitive_changes(scenario_id)
+    if not changes:
+        return None
+    approved = in_force_subjects(scenario_id)
+    missing = [change["subject"] for change in changes if change["subject"] not in approved]
+    if missing:
+        return "material_change_unapproved", f"no override in force names {missing}"
+    return None
+
+
+def gate_refusal(scenario_id) -> tuple[str, str] | None:
+    """The first refusal of the two gates, the review's first, or ``None``."""
+    return review_refusal(scenario_id) or override_refusal(scenario_id)
+
+
+__all__ = [
+    "MATERIAL_FACTOR",
+    "REFUSALS",
+    "REVIEW_GATE_ENV",
+    "REVIEW_OFF",
+    "REVIEW_REQUIRED",
+    "gate_refusal",
+    "in_force_subjects",
+    "latest_review",
+    "override_refusal",
+    "review_gate",
+    "review_refusal",
+    "sensitive_changes",
+    "subject",
+]
