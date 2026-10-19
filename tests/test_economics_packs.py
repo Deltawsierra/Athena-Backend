@@ -140,9 +140,9 @@ PACK_DIGESTS = {
     "mythos.economics.insurance-pack/v1": "sha256:4e1700e81775337c1c21474d582daad8a8730a87805def937ea7ee481c7ba19a",
     "mythos.economics.healthcare-pack/v1": "sha256:9ebc335e1c902db504afa4cbcad4c45c9a3c64584fcf02804156ea55054667d9",
     "mythos.economics.saas-pack/v1": "sha256:a7e9242a22206623f3bce6b7b567998544109985a5c70c80e8303c8956b6d6eb",
-    "mythos.economics.regulated-enterprise-pack/v1": "sha256:607753f32755fd5f50a783cd98e98c0e5add8b2c5922f220d23560970a6c32e3",
+    "mythos.economics.regulated-enterprise-pack/v1": "sha256:c0b35e526d26a9f9c04e9e34d7f6297f797570d5316e18e7dbe08096e35d4903",
     "mythos.economics.government-pack/v1": "sha256:8b6247641ce46caf8c4d8922ce7543d83b902017c5f5a5addc07f4a26f957915",
-    "mythos.economics.manufacturing-pack/v1": "sha256:2d13d4d6226290f1455687fa0c1e55f3fb2927f75d5b69c25f3e5cc8bb5cc0b2",
+    "mythos.economics.manufacturing-pack/v1": "sha256:64530894de42cbcfe75119c38ae600840638f7e6deae290b616a1adcd8aa533f",
     "mythos.economics.mobility-pack/v1": "sha256:ef790093d9d98c778496b2813fee1fc7605e3223f9c737a843edf00405e61198",
 }
 
@@ -613,6 +613,13 @@ def closed_form_components(chosen) -> dict[str, tuple[Decimal, Decimal, Decimal]
 #:   production-loss  200 x 2 h x 0.1 x 30 = 1,200; 200 x 8 h x 0.25 x 40 = 16,000; 200 x 24 h x 0.5 x 55 = 132,000
 #:   idle-cost        2 h x 5,000 = 10,000; 8 h x 8,000 = 64,000; 24 h x 15,000 = 360,000
 #:   gross 41,200 / 368,000 / 4,092,000
+#: regulated_enterprise_document_exposure gains the control obligations (the lead's decision on F3):
+#:   control-obligations 400 x 0.01 x 5,000 = 20,000; 400 x 0.03 x 15,000 = 180,000;
+#:                       400 x 0.10 x 40,000 = 1,600,000
+#:   gross 162,500 + 20,000 = 182,500; 610,000 + 180,000 = 790,000; 2,605,000 + 1,600,000 = 4,205,000
+#: manufacturing_safety_system_compromise gains the equipment damage (the lead's decision on F3):
+#:   equipment-damage 30,000 / 288,000 / 3,600,000, as manufacturing_equipment_impact's above
+#:   gross 54,800 + 30,000 = 84,800; 268,000 + 288,000 = 556,000; 1,096,000 + 3,600,000 = 4,696,000
 #: mobility_fleet_downtime is the owner's worked example C (section 32; see its own test below).
 KNOWN_GROSS = {
     "insurance_claims_overpayment": ("70960", "172500", "644000"),
@@ -631,7 +638,7 @@ KNOWN_GROSS = {
     "saas_agent_tool_misuse": ("78000", "242750", "973000"),
     "saas_api_abuse": ("66600", "163400", "555400"),
     "saas_platform_outage": ("32000", "169000", "1613000"),
-    "regulated_enterprise_document_exposure": ("162500", "610000", "2605000"),
+    "regulated_enterprise_document_exposure": ("182500", "790000", "4205000"),
     "regulated_enterprise_workflow_manipulation": ("36000", "305750", "2440000"),
     "regulated_enterprise_agent_permissions": ("92000", "453750", "2648000"),
     "regulated_enterprise_vendor_ai_failure": ("29000", "299000", "1819000"),
@@ -639,7 +646,7 @@ KNOWN_GROSS = {
     "government_mission_interruption": ("54800", "319200", "1796000"),
     "government_supply_chain_compromise": ("92000", "358000", "2022000"),
     "government_autonomous_agent_effect": ("46800", "212950", "1004000"),
-    "manufacturing_safety_system_compromise": ("54800", "268000", "1096000"),
+    "manufacturing_safety_system_compromise": ("84800", "556000", "4696000"),
     "manufacturing_equipment_impact": ("41200", "368000", "4092000"),
     "manufacturing_production_interruption": ("27200", "129000", "617000"),
     "manufacturing_supply_chain_disruption": ("21200", "126000", "532000"),
@@ -831,13 +838,12 @@ ACCEPTED_GAPS = {
     ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "finance"): {"incident_response"},
     ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "procurement"):
         {"incident_response"},
-    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "hr"):
-        {"direct_financial", "regulatory_compliance"},
-    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "legal"):
-        {"direct_financial", "regulatory_compliance"},
+    # The lead's decision on F3: an exposure on hr or legal prices the control obligations
+    # (regulatory_compliance) as the permissions template does; direct_financial stays.
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "hr"): {"direct_financial"},
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "legal"): {"direct_financial"},
     ("mythos.economics.government-pack/v1", "autonomous_action_unapproved", "mission_operations"):
         {"direct_financial"},
-    ("mythos.economics.manufacturing-pack/v1", "equipment_damaged", "safety_systems"): {"physical_operational"},
     ("mythos.economics.mobility-pack/v1", "rider_service_interrupted", "dispatch"): {"customer_restitution"},
 }
 
@@ -867,6 +873,39 @@ def test_a_saas_cross_tenant_exposure_prices_legal_and_regulatory():
     legal, regulatory = (closed_form_components(chosen)[k] for k in ("legal", "regulatory"))
     assert legal == (Decimal(47500), Decimal(140000), Decimal(420000))
     assert regulatory == (Decimal(0), Decimal(100000), Decimal(400000))
+
+
+@pytest.mark.parametrize("process", ["hr", "legal"])
+def test_a_regulated_enterprise_exposure_on_hr_or_legal_prices_the_control_obligations(process):
+    """The lead's decision on F3: an agent beyond its permissions on the HR or legal
+    process is taken by the document-exposure template, which prices the control
+    obligations it breaches (regulatory_compliance) as the permissions template does,
+    from the same sources. Only direct_financial stays an accepted gap."""
+    pack = PACKS["mythos.economics.regulated-enterprise-pack/v1"]
+    chosen = pack.select("agent_permission_exceeded", process).template
+    assert chosen.template_id == "regulated_enterprise_document_exposure"
+    permissions = pack.catalogue[("regulated_enterprise_agent_permissions", 1)]
+    mine = next(c for c in chosen.components if c.component_key == "control-obligations")
+    theirs = next(c for c in permissions.components if c.component_key == "control-obligations")
+    assert mine == theirs and mine.family == "regulatory_compliance"
+    lost = {c.family for c in permissions.components} - {c.family for c in chosen.components}
+    assert lost == {"direct_financial"}
+    assert closed_form_components(chosen)["control-obligations"] == (Decimal(20000), Decimal(180000), Decimal(1600000))
+
+
+def test_equipment_damaged_on_the_safety_systems_prices_the_damage():
+    """The lead's decision on F3: equipment damaged on the safety systems is taken by the
+    safety-system template, which prices the damage itself (physical_operational) as the
+    equipment-impact template does, from the same sources: no family is dropped."""
+    pack = PACKS["mythos.economics.manufacturing-pack/v1"]
+    chosen = pack.select("equipment_damaged", "safety_systems").template
+    assert chosen.template_id == "manufacturing_safety_system_compromise"
+    impact = pack.catalogue[("manufacturing_equipment_impact", 1)]
+    mine = next(c for c in chosen.components if c.component_key == "equipment-damage")
+    theirs = next(c for c in impact.components if c.component_key == "equipment-damage")
+    assert mine == theirs and mine.family == "physical_operational"
+    assert {c.family for c in impact.components} <= {c.family for c in chosen.components}
+    assert closed_form_components(chosen)["equipment-damage"] == (Decimal(30000), Decimal(288000), Decimal(3600000))
 
 
 @pytest.mark.parametrize("case", sorted(c for c, found in OVERLAPS.items() if len(found) > 1),

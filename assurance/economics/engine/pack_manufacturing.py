@@ -134,6 +134,18 @@ def _templates() -> tuple[Template, ...]:
         1,
         {"interruption_hours": A("interruption_hours"), "value_per_hour": I("downtime_cost_per_hour")},
     )
+    damage = ComponentSpec(
+        "equipment-damage",
+        F.PHYSICAL_OPERATIONAL,
+        "share_of_units_value",
+        1,
+        {
+            "units": I("equipment_count"),
+            "affected_share": A("damaged_equipment_share"),
+            "amount_per_unit": I("equipment_value"),
+            "value_share": A("damage_ratio"),
+        },
+    )
     caution = (PHYSICAL_WORLD_CAUTION,)
     return (
         Template(
@@ -159,9 +171,13 @@ def _templates() -> tuple[Template, ...]:
                     1,
                     {"amount": A("regulatory_response_cost")},
                 ),
+                damage,
             ),
             (
                 "the safety response is the customer's own cost of one: shutdown, inspection, recertification",
+                "equipment damaged on the safety systems is taken here by precedence, and the damage itself is "
+                "priced here as manufacturing_equipment_impact prices it, from the same sources (the lead's "
+                "decision on F3): taking the effect drops no physical-operational family that template prices",
                 _THROUGHPUT,
                 _NO_HARM,
                 _REMEDIATION,
@@ -176,18 +192,7 @@ def _templates() -> tuple[Template, ...]:
             2,
             (Scope(E.EQUIPMENT_DAMAGED),),
             (
-                ComponentSpec(
-                    "equipment-damage",
-                    F.PHYSICAL_OPERATIONAL,
-                    "share_of_units_value",
-                    1,
-                    {
-                        "units": I("equipment_count"),
-                        "affected_share": A("damaged_equipment_share"),
-                        "amount_per_unit": I("equipment_value"),
-                        "value_share": A("damage_ratio"),
-                    },
-                ),
+                damage,
                 _production("interruption_hours"),
                 idle,
             ),

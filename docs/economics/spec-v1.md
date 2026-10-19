@@ -8500,14 +8500,22 @@ a business process or an attribute is that pack's.
   reviewed: insurance `approval_bypassed` on `underwriting` or `pricing`
   (`incident_response`); healthcare `record_access_unauthorised` on `patient_records`
   (`recovery`); regulated enterprise `agent_permission_exceeded` on `finance` or
-  `procurement` (`incident_response`) and on `hr` or `legal` (`direct_financial`,
-  `regulatory_compliance`); government `autonomous_action_unapproved` on
-  `mission_operations` (`direct_financial`); manufacturing `equipment_damaged` on
-  `safety_systems` (`physical_operational`); mobility `rider_service_interrupted` on
-  `dispatch` (`customer_restitution`). A SaaS cross-tenant exposure drops none: its
+  `procurement` (`incident_response`) and on `hr` or `legal` (`direct_financial`);
+  government `autonomous_action_unapproved` on `mission_operations`
+  (`direct_financial`); mobility `rider_service_interrupted` on `dispatch`
+  (`customer_restitution`). A SaaS cross-tenant exposure drops none: its
   isolation-breach template prices legal and regulatory, as worked example B does.
-  The regulated-enterprise `regulatory_compliance` gap and the manufacturing
-  `physical_operational` gap are of that kind, and are open for the lead's review.
+  Two more were of that kind and are closed by the lead's decision (F3), each
+  winner carrying the loser's component as it is, from the same sources: a
+  regulated-enterprise `agent_permission_exceeded` on `hr` or `legal` prices
+  `regulatory_compliance` (`regulated_enterprise_document_exposure` gains the
+  permissions template's `control-obligations`, so it now reads
+  `control_obligation_count`), and a manufacturing `equipment_damaged` on
+  `safety_systems` prices `physical_operational` (`manufacturing_safety_system_compromise`
+  gains the equipment template's `equipment-damage`, the damage itself, so it now
+  reads `equipment_count` and `equipment_value`). Their known answers are re-pinned
+  (`KNOWN_GROSS`: 182,500 / 790,000 / 4,205,000 and 84,800 / 556,000 / 4,696,000), and
+  both packs' released digests with them, before either pack is released.
 - **Migration order**: `0077_parameter_set_pack` depends on #170's
   `0076_figure_normalizations`, which depends on #169's `0075_section_28_row_macs`.
 
@@ -8530,7 +8538,7 @@ Its customer-input schema (`pack_inputs.SCHEMAS`):
 
 | Input | Unit | Required at build by | Special data (section 23) | Meaning |
 |---|---|---|---|---|
-| `control_obligation_count` | `count` | `regulated_enterprise_workflow_manipulation`, `regulated_enterprise_agent_permissions` | control obligations | the control obligations -- regulatory, contractual and policy -- the business processes answer to |
+| `control_obligation_count` | `count` | `regulated_enterprise_document_exposure`, `regulated_enterprise_workflow_manipulation`, `regulated_enterprise_agent_permissions` | control obligations | the control obligations -- regulatory, contractual and policy -- the business processes answer to |
 | `contract_count` | `count` | `regulated_enterprise_document_exposure`, `regulated_enterprise_vendor_ai_failure` | contracts | customer and partner contracts carrying data or service obligations the processes serve |
 | `process_margin_per_hour` | `money_per_hour` | `regulated_enterprise_workflow_manipulation`, `regulated_enterprise_vendor_ai_failure` | business processes | the margin the affected business process yields per hour |
 
@@ -8563,10 +8571,12 @@ Covers `document_exposure` on any process; `agent_permission_exceeded` on `hr`, 
 | `contract-obligations` | `contractual` | `share_of_units` v1 | `units` (+) from the pack's inputs: `contract_count`; `affected_share` (+) from the effect: `affected_contract_share`; `amount_per_unit` (+) from the effect: `response_cost_per_contract` |
 | `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
 | `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `control-obligations` | `regulatory_compliance` | `share_of_units` v1 | `units` (+) from the pack's inputs: `control_obligation_count`; `affected_share` (+) from the effect: `affected_obligation_share`; `amount_per_unit` (+) from the effect: `compliance_response_per_obligation` |
 
 Direction notes:
 
 - the people reached drive notification; the contracts breached drive the counterparties' remedies
+- an agent beyond its permissions on the legal or HR process is taken here by precedence, and the control obligations it breaches are priced here as regulated_enterprise_agent_permissions prices them, from the same sources (the lead's decision on F3): taking the effect drops no regulatory family that template prices
 - the breached share is of the customer's own control obligations and contracts, each answered at the effect's stated cost: a count of its own, never a weight by size
 - remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
 
@@ -8748,8 +8758,8 @@ Its customer-input schema (`pack_inputs.SCHEMAS`):
 | `units_per_day` | `count_per_day` | `manufacturing_safety_system_compromise`, `manufacturing_equipment_impact`, `manufacturing_production_interruption`, `manufacturing_supply_chain_disruption` | units/hour | units produced per day (units an hour, stated per day: the engine has no per-hour count and converts none) |
 | `margin_per_unit` | `money_per_unit` | `manufacturing_safety_system_compromise`, `manufacturing_equipment_impact`, `manufacturing_production_interruption`, `manufacturing_supply_chain_disruption` | units/hour | contribution margin per unit produced |
 | `downtime_cost_per_hour` | `money_per_hour` | `manufacturing_equipment_impact`, `manufacturing_production_interruption` | downtime cost | the plant's cost of one idle hour beyond the margin lost: idle labour, restart, standing charges |
-| `equipment_count` | `count` | `manufacturing_equipment_impact` | equipment value | production equipment units: lines, robots, controllers |
-| `equipment_value` | `money_per_unit` | `manufacturing_equipment_impact` | equipment value | the replacement value of one equipment unit |
+| `equipment_count` | `count` | `manufacturing_safety_system_compromise`, `manufacturing_equipment_impact` | equipment value | production equipment units: lines, robots, controllers |
+| `equipment_value` | `money_per_unit` | `manufacturing_safety_system_compromise`, `manufacturing_equipment_impact` | equipment value | the replacement value of one equipment unit |
 | `safety_response_cost` | `money` | `manufacturing_safety_system_compromise` | safety response | the customer's own cost of one safety response: shutdown, inspection, recertification (never harm to a person) |
 
 The attributes an effect of the pack may state:
@@ -8776,10 +8786,12 @@ Covers `safety_system_compromised` on any process; `equipment_damaged` on `safet
 | `safety-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the pack's inputs: `safety_response_cost` |
 | `production-loss` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `units_per_day`; `hours` (+) from the effect: `shutdown_hours`; `affected_share` (+) from the effect: `affected_line_share`; `amount_per_unit` (+) from the pack's inputs: `margin_per_unit` |
 | `recertification` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+| `equipment-damage` | `physical_operational` | `share_of_units_value` v1 | `units` (+) from the pack's inputs: `equipment_count`; `affected_share` (+) from the effect: `damaged_equipment_share`; `amount_per_unit` (+) from the pack's inputs: `equipment_value`; `value_share` (+) from the effect: `damage_ratio` |
 
 Direction notes:
 
 - the safety response is the customer's own cost of one: shutdown, inspection, recertification
+- equipment damaged on the safety systems is taken here by precedence, and the damage itself is priced here as manufacturing_equipment_impact prices it, from the same sources (the lead's decision on F3): taking the effect drops no physical-operational family that template prices
 - the production lost is the customer's own units a day, over the hours stopped, at the share of production stopped and its own margin per unit, never its revenue
 - harm to a person is never priced (safety_monetisation_refused): the template prices the response, the equipment and the production, and the harm is excluded
 - remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)

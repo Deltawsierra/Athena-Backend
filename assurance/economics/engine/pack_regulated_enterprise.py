@@ -190,9 +190,14 @@ def _templates() -> tuple[Template, ...]:
                         "hours": A("counsel_hours"),
                     },
                 ),
+                obligations,
             ),
             (
                 "the people reached drive notification; the contracts breached drive the counterparties' remedies",
+                "an agent beyond its permissions on the legal or HR process is taken here by precedence, and the "
+                "control obligations it breaches are priced here as regulated_enterprise_agent_permissions prices "
+                "them, from the same sources (the lead's decision on F3): taking the effect drops no regulatory "
+                "family that template prices",
                 _OBLIGATIONS,
                 _REMEDIATION,
             ),
