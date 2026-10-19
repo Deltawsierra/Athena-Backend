@@ -4101,7 +4101,8 @@ def test_a_hold_nobody_lets_go_is_withdrawn_at_its_limit(collector, monkeypatch)
     again, on the next request of any kind; the withdrawn hold lets go of
     nothing, and the next stop holds it afresh."""
     clock = [1000.0]
-    monkeypatch.setattr(collector.time, "monotonic", lambda: clock[0])
+    # The module's own clock only: time.monotonic stays as it is for everything else.
+    monkeypatch.setattr(collector, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
     stuck = collector.hold_for_a_stop()
     collector.withdraw_if_held_too_long()
     assert not gc.isenabled()
@@ -4113,6 +4114,53 @@ def test_a_hold_nobody_lets_go_is_withdrawn_at_its_limit(collector, monkeypatch)
     stuck()
     assert not gc.isenabled(), "a withdrawn hold let go of a later one"
     fresh()
+    assert gc.isenabled()
+
+
+#: Each fault injected into the hold on the stop path: the name(s) made to raise.
+COLLECTOR_FAULTS = {
+    "taking the hold": ("hold_for_a_stop",),
+    "attaching its release": ("let_go_when_answered",),
+    "letting go": ("_Hold.__call__",),
+    "attaching its release, then letting go": ("let_go_when_answered", "_Hold.__call__"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("fault", list(COLLECTOR_FAULTS))
+def test_a_fault_in_the_collector_hold_never_keeps_a_stop_from_being_served(
+    saturated, operator_key, collector, monkeypatch, fault
+):
+    """THE SAFETY RULE: no control may block or drop a stop, and the hold on the
+    garbage collector sits on the stop path, in the gateway. If taking the hold
+    or attaching its release raised, a stop that had already landed answered
+    500 (or was never served). With each raising in turn -- and the release
+    itself raising when the gateway falls back to letting go at once -- every
+    stop in EVERY_STOP is served with its usual status, by an operator's JWT
+    and by the service token, and the collector ends switched on: at once
+    where the hold was never taken or was let go, and, where letting go itself
+    fails, at HOLD_LIMIT, on the next request (the bound that exists for a hold
+    nobody lets go)."""
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(f"injected fault: {fault}")
+
+    for name in COLLECTOR_FAULTS[fault]:
+        if name == "_Hold.__call__":
+            monkeypatch.setattr(collector._Hold, "__call__", broken)
+        else:
+            monkeypatch.setattr(collector, name, broken)
+    saturated(GATEWAY_ANSWERS["allow"][0])
+    operator = _admin()
+    assert _every_stop(_wsgi_bearer_client(operator), operator, operator_key, anonymous=_WsgiClient) == SERVED
+    service = _service_account()
+    with override_settings(FAILSAFE_SERVICE_TOKEN=SERVICE_TOKEN, FAILSAFE_SERVICE_USER=service.username):
+        assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
+    if "_Hold.__call__" not in COLLECTOR_FAULTS[fault]:
+        assert gc.isenabled(), "a hold outlived the stop it was taken for"
+    later = time.monotonic() + collector.HOLD_LIMIT
+    monkeypatch.setattr(collector, "time", types.SimpleNamespace(monotonic=lambda: later))
+    collector.withdraw_if_held_too_long()
     assert gc.isenabled()
 
 
