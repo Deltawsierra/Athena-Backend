@@ -519,8 +519,8 @@ insurance, healthcare and life-sciences, and AI-heavy SaaS packs, each with its 
 templates (the same precedence model), the loss families they price and its
 customer-input schema: the special data of the owner's section 23 (claims volume, loss
 ratio and policy count; patient records, care disruption and OCR breach data; tenants,
-recurring margin, SLA terms and cloud spend), each a parameter the customer states with
-its provenance.
+recurring and usage margin, SLA terms and the API-abuse cap, read from cloud spend), each
+a parameter the customer states with its provenance.
 
 - Each pack version is held with the digest it was released with
   (`pack_registry.RELEASED`): a released version never changes under its id, and a

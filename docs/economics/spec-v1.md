@@ -7661,6 +7661,14 @@ a business process or an attribute is that pack's.
   baseline spend (a denial of wallet ten times the baseline is a cap of ten times it),
   so nothing holds the abuse at the platform's baseline spend. It is the special data
   "cloud spend" of the owner's section 23, read as that cap.
+- **Precedence drops a family in some overlaps.** Where two templates of a pack cover
+  one effect, the one of lower precedence takes it (section 24.4), and a family only
+  the other prices is not priced for that effect. Each such gap is pinned
+  (`ACCEPTED_GAPS` in `tests/test_economics_packs.py`), so a new one fails until it is
+  reviewed: insurance `approval_bypassed` on `underwriting` or `pricing`
+  (`incident_response`); healthcare `record_access_unauthorised` on `patient_records`
+  (`recovery`). A SaaS cross-tenant exposure drops none: its isolation-breach template
+  prices legal and regulatory, as worked example B does.
 - **Migration order**: `0076_parameter_set_pack` depends on `0073_exposure_assurance`
   until #169 (`0074`) and #170 (`0075`) merge; it is then re-pointed at
   `0075_figure_normalizations`.

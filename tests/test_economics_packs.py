@@ -179,6 +179,40 @@ def test_a_new_version_stands_beside_the_old_one():
     assert v2.catalogue[shared.key].as_dict() == {**shared.as_dict(), "pack": v2.pack_id}
 
 
+def _winning_pair(pack, chosen):
+    """An effect type and process ``chosen`` takes in ``pack``, by precedence."""
+    return next(
+        (t, p) for t in pack.effect_type_codes for p in pack.business_process_codes
+        if pack.select(t, p).template is chosen
+    )
+
+
+@pytest.mark.parametrize("chosen", VERTICAL_TEMPLATES, ids=lambda t: t.template_id)
+def test_a_build_records_the_digest_and_the_statements_of_its_pack(chosen):
+    """F1 and F5, for every template of every industry pack: the build document of an
+    effect the template takes records the digest the pack was released with and what
+    its figures are read with -- the template's cautions and what the pack never
+    prices -- so a report and a card state them from the build; a banking build's
+    document records neither."""
+    from assurance.economics import builder
+
+    pack = PACKS[chosen.pack]
+    effect_type, process = _winning_pair(pack, chosen)
+    effect = builder.EffectInput(
+        key="e", origin=tpl.Origin.HYPOTHETICAL, effect_type=effect_type,
+        asset="a" * 8 + "-0000-4000-8000-" + "0" * 12, business_process=process,
+    )
+    common = {"deployment_uuid": "d" * 8 + "-0000-4000-8000-" + "0" * 12,
+              "parameter_set": {"set_key": "s", "version": 1}, "currency": "USD", "as_of": AS_OF,
+              "effects": [effect], "links": []}
+    document = builder.build_document(**common, pack=pack)
+    assert document["pack"] == pack.pack_id
+    assert document["pack_digest"] == pack.digest == pack_registry.RELEASED[pack.pack_id]
+    assert document["pack_statements"] == {"cautions": list(chosen.cautions), "excluded": list(pack.excluded)}
+    banking = builder.build_document(**{**common, "effects": []})
+    assert "pack_digest" not in banking and "pack_statements" not in banking
+
+
 def test_a_released_version_changed_in_place_is_refused():
     """An edit of a released version under its own id -- a template's name, an input's
     meaning -- is refused when the registry is built, whatever else agrees with it."""
