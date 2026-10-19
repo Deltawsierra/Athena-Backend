@@ -369,9 +369,11 @@ class ParameterSetContent:
         """The pack's inputs as its schema gives them (spec, section 37): only a
         version that names a pack holds any (``field_unrecognised``); each is an input
         of its schema (``pack_input_unrecognised``), named for it and in its unit
-        (``unit_mismatch``); none names harm to a person
-        (``safety_monetisation_refused``); and every input the pack requires is
-        stated (``pack_input_missing``): never defaulted, never read as zero."""
+        (``unit_mismatch``); and none names harm to a person
+        (``safety_monetisation_refused``). No input is required here: a build requires
+        every input a template it uses reads, never defaulted and never read as zero
+        (``pack_input_missing``; choice 2), so a version is never pushed to state a
+        zero for an input none of its builds reads."""
         if not self.pack:
             if self.pack_inputs:
                 raise ParameterRefused("field_unrecognised", "pack_inputs: a version that names no pack holds none")
@@ -386,9 +388,6 @@ class ParameterSetContent:
                 raise ParameterRefused(
                     "unit_mismatch", f"the {self.pack} input {name} is {entry.unit}, named {packs.PACK_INPUT_PREFIX}{name}"
                 )
-        missing = [name for name in schema.required if name not in self.pack_inputs]
-        if missing:
-            raise ParameterRefused("pack_input_missing", f"pack_inputs: {missing} (required by {self.pack})")
 
     def parameters(self) -> list[Parameter]:
         """Every parameter of the version, variables, then sublimits, then the pack's

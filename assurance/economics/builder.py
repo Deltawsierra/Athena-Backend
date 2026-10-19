@@ -485,9 +485,14 @@ def build_document(
     they name the draft and do not change its events. The pack is the build's ONE
     pack, its id and version and every template of it (the banking pack's unless an
     industry pack is given): a banking build's document is the one it was before E7,
-    byte for byte (spec, section 37)."""
+    byte for byte (spec, section 37). An industry pack's build also records the pack's
+    digest (``pack_digest``: the content it was built under) and what its figures are
+    read with (``pack_statements``: the cautions of the templates its effects are
+    assigned to and what the pack never prices), so its report and card state them
+    even when a later release no longer holds the pack (section 37.3)."""
     pack = pack_registry.BANKING if pack is None else pack
-    return {
+    effects = tuple(effects)
+    document = {
         "builder": BUILDER_VERSION,
         "grouping": GROUPING_VERSION,
         "grouping_window_hours": int(GROUPING_WINDOW.total_seconds() // 3600),
@@ -500,6 +505,11 @@ def build_document(
         "effects": [e.canonical() for e in sorted(effects, key=lambda e: e.key)],
         "findings": sorted(link.canonical() for link in links),
     }
+    if not pack.banking:
+        chosen = [pack.select(e.effect_type, e.business_process).template for e in sorted(effects, key=lambda e: e.key)]
+        document["pack_digest"] = pack.digest
+        document["pack_statements"] = pack.statements(chosen)
+    return document
 
 
 def build_digest(document: Mapping) -> str:
@@ -731,14 +741,13 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
     rows = version.parameter_rows()
     if not version.intact(rows):
         raise tpl.BuildRefused("parameter_set_not_found", f"{request.set_key} version {request.set_version} is not intact")
-    # One pack per build: the version answers the build's pack, and states every input
-    # the pack requires (spec, section 37).
+    # One pack per build: the version answers the build's pack (spec, section 37); the
+    # inputs a template the build uses reads are checked once its effects are known.
     request.pack.check_set(version.pack)
     check_set_distributions(rows)
     content = version.content(rows)
     variables = content.variables
     inputs = content.pack_inputs
-    request.pack.check_inputs(inputs)
 
     wanted = {e.asset for e in request.effects}
     found = {str(u) for u in Asset.objects.filter(deployment=deployment, uuid__in=wanted).values_list("uuid", flat=True)}
@@ -1158,7 +1167,12 @@ def describe(scenario: FinancialScenario) -> dict:
             str(f.uuid): f
             for f in Finding.objects.filter(deployment_id=scenario.deployment_id, uuid__in={x.finding for x in links})
         }
-        chosen = pack_registry.template(first.template_id, first.template_version) if first else None
+        # The template as the build's own pack version holds it (spec, section 37.1).
+        chosen = (
+            pack_registry.template(first.template_id, first.template_version, build_row.pack if build_row else None)
+            if first
+            else None
+        )
         specs = {c.component_key: c for c in chosen.components} if chosen else {}
         component_rows = list(LossComponent.objects.filter(loss_event=event).order_by("id"))
         cited = {

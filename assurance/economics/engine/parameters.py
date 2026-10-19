@@ -108,11 +108,16 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         ),
         "pack_input_unrecognised": "a parameter set states only its pack's inputs, each in its unit",
         "pack_input_missing": (
-            "every input the pack requires, and every input a template the build uses reads, is stated in the "
-            "parameter set: a missing input is refused, never defaulted and never read as zero"
+            "every input a template the build uses reads is stated in the parameter set: a missing input is refused "
+            "at build, never defaulted and never read as zero (no input is required at record time)"
         ),
         "pack_mismatch": (
             "a scenario builds under exactly one pack: the build's pack is the pack its parameter-set version answers"
+        ),
+        "set_pack_changed": (
+            "a parameter set answers one pack in every version: a new version names the pack its earlier versions "
+            "name (no pack for the banking pack's), so every scenario built on the set can be refreshed against its "
+            "latest version; a set for another pack is recorded under another set key"
         ),
         "safety_monetisation_refused": (
             "harm to a person -- an injury, a death, a patient's or the public's safety -- is never priced: no "
