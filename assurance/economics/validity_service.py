@@ -32,7 +32,11 @@ stored card exactly (:func:`reproduces`), under the release the card records
 
 A failure that the stored rows do not decide (the engine will not import, the
 draws are not reproduced on this platform, the time budget, memory, a fault) is
-returned with its code and never recorded. **Never raises.** Nothing here is on a
+returned with its code and never recorded. A result whose stored rows no longer
+give their digests -- or, for a card already recorded, whose card fails a check or
+whose recorded receipt no longer binds them (:func:`assurance.economics.report.receipt_binds`)
+-- is ``stored_row_unverified``: never carded, and the card recorded is not returned
+(section 28 hardening, T5; spec, section 35). **Never raises.** Nothing here is on a
 stop path; nothing Django loads at start imports it, and it imports the engine,
 and numpy, only when called. No route serves it: step 6 serves reports.
 """
@@ -793,9 +797,25 @@ def issue_card(result: SimulationResult, *, time_budget: float = TIME_BUDGET_SEC
         return CardOutcome(None, False, "card_failed", f"{type(error).__name__}: {error}")
 
 
+def _unverified(failed: list[str]) -> CardOutcome:
+    return CardOutcome(
+        None, False, "stored_row_unverified",
+        f"the stored rows fail {', '.join(failed)}: a row rewritten past the records' rules is never carded",
+    )
+
+
 def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
+    from . import report
+
     found = FinancialValidityCard.objects.filter(simulation=result).first()
     if found is not None:
+        # The card recorded is returned only where the stored rows verify, and where a
+        # receipt is recorded, it still binds them (section 28 hardening, T5; spec,
+        # section 35): a result or card rewritten past the ORM is never carded.
+        scenario = FinancialScenario.objects.get(pk=result.scenario_id)
+        failed = report.stored_row_failures(result, found, None, scenario)
+        if failed:
+            return _unverified(failed)
         return CardOutcome(found, False)
     # Before the card takes anything from the stored inputs: they still give the run's
     # input digest, or nothing is graded (review round 1 of #170, MEDIUM-2).
@@ -838,6 +858,11 @@ def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
             return CardOutcome(None, False, *_code(refused))
         except (sim.InvariantBroken, AssertionError) as broken:
             return CardOutcome(None, False, "invariant_broken", f"{type(broken).__name__}: {broken}")
+    # The record the card states is the one recorded: its digest is checked before
+    # the card is built from it (T5). The analysis above checked the draws.
+    failed = report.stored_row_failures(result, None, None, scenario, receipt=None)
+    if failed:
+        return _unverified(failed)
     issued = issued_context(result, scenario)
     card = build_card(result, sensitivity=sensitivity, issued=issued)
     row = FinancialValidityCard(

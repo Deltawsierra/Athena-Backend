@@ -554,6 +554,36 @@ release it was made under, refusing a tampered card, result, source snapshot,
 signature or row with its code. Neither raises, and nothing Django loads at start imports
 either; step 6's simulate route (below) calls both.
 
+### Before a receipt: a review, overrides in force, and rows bound to it
+
+Section 28's hardening (spec-v1, section 35). A receipt is signed only once the
+scenario version's latest review is approved by a person who authored no version of
+it and recorded none of the parameter-set versions it rests on, and who still holds
+an admin or analyst role on an active account (`scenario_not_reviewed`;
+`POST .../scenarios/<uuid>/reviews/`), ON unless the environment variable
+`ATHENA_ECONOMICS_RECEIPT_REVIEW` is exactly `off`; and only once every material
+change of its customer parameter-set version against its anchor -- the latest version
+of the deployment that passed an approved non-author review, else the version before
+it (a figure moved 2x or more, added, removed, a distribution changed) -- is named by
+a sensitive override in force: two approvers other than the requester and the
+change's authors, not expired (30 days), not revoked (`material_change_unapproved`;
+`.../overrides/`, `.../economics/overrides/<uuid>/approve/`). An approver an author or
+requester promoted, anywhere up the chain of grants, who promoted themselves, or who
+was promoted after the request, is refused (`approver_role_not_independent`), and a
+demotion is never refused. `.../economics/overrides/<uuid>/revoke/` is a STOP
+(`safety.stops`; its own module, `assurance/economics/revoke_api.py`): no body,
+gateway, throttle, rule or lock holds it back, and it is one insert. A result and its
+card are bound by a MAC under `ATHENA_ECONOMICS_ROW_KEY` (read in code, never stored;
+without it no receipt is signed, `row_key_unavailable`, and rows recorded meanwhile
+are bound later by `manage.py bind_economics_rows`), and where a receipt is recorded,
+every served path checks that its signed document still binds the stored rows
+(`receipt_binding`). A snapshot file registers `unverified` at the feed registry's
+licence whatever it states; a rewritten observation row, or a blanked digest,
+demotes its version (`snapshot_rows_mismatch`). A refresh (E6) rebuilds into a new,
+unreviewed version: its receipt waits for that version's review, the obligations stay
+open meanwhile, and the refresh of the rebuilt version then issues the receipt and
+closes them.
+
 ### The scenario endpoints and the report
 
 A third route module (`assurance/economics/report_api.py`), imported guarded in a
@@ -604,8 +634,9 @@ route (above) applies the same rule to the version's latest result. One 120 s de
 bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and
-records nothing. None of the five is a stop, and a fault in this module leaves only
-these routes unserved. A residual run under a remediation option (below) is never the
+records nothing. None of its routes (the review and override routes above
+included) is a stop -- the override revoke, which is, is served from a module of its
+own -- and a fault in this module leaves only these routes unserved. A residual run under a remediation option (below) is never the
 scenario's exposure: `results/`, the scenario list and the scenario document serve only
 its own runs. The list and the receipt read their query strictly (an unknown key is
 400), answer `Cache-Control: no-store` (as `results/` and the ROI route now do too),
@@ -791,7 +822,7 @@ figure's effective date, the cost index to the valuation date, FX at the valuati
 the source versions a run of the deployment may use), each of its low, base and high,
 BEFORE the build's transaction, which still only inserts. The build reads the normalized
 figure (`normalized:<figure>`, in its currency) and stores the per-figure record
-(`FigureNormalization`, migration `0075_figure_normalizations.py`): the native and
+(`FigureNormalization`, migration `0076_figure_normalizations.py`): the native and
 normalized figures, each point's chain with every rate and index value, its source and
 version, the downgrades, the conflicts and the fallbacks; every record is checked again
 whenever it is read, and one that no longer holds is never used or served; and the FX

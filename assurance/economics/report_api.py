@@ -74,6 +74,34 @@ bytes it serves unchanged (``X-Exposure-Freshness``, ``X-Exposure-Stale-Reasons`
 ``X-Exposure-Superseded-By-Run``, ``X-Exposure-Superseded-By-Receipt``); the report,
 the list and the events route say it in their banner (:mod:`.report`).
 
+The review and override routes a signed receipt needs (section 28 hardening, T9a and
+T1/T4; spec, section 35), each answered ``no-store``:
+
+- ``GET deployments/<uuid>/economics/scenarios/<scenario uuid>/reviews/``: the scenario
+  version's reviews, its review status, and the receipt gate as it stands now: whether
+  a review is required (``ATHENA_ECONOMICS_RECEIPT_REVIEW``), the review's and the
+  overrides' refusal (or none), and the sensitive changes with whether an override in
+  force names each.
+- ``POST`` the same: a review, ``{"verdict": "approved" | "returned", "note": "..."}``
+  (``note`` optional), by an admin or an analyst who authored no version of the
+  scenario (``author_reviews_own_scenario``, 403) and, for an approval, whose role was
+  not granted by an author, by themselves, or after the version was recorded
+  (``approver_role_not_independent``, 403). 201 with the review and the gate.
+- ``GET deployments/<uuid>/economics/scenarios/<scenario uuid>/overrides/``: the
+  version's sensitive changes (each with the exact ``subject`` an override names) and
+  its overrides, each with its approvals, revocations, expiry and standing.
+- ``POST`` the same: request an override, ``{"subject": "...", "reason": "..."}``, by an
+  admin or an analyst. 201, pending: it is in force only once two others approve it.
+- ``POST deployments/<uuid>/economics/overrides/<override uuid>/approve/`` (no body, or
+  ``{}``): an approval by an admin or an analyst other than the requester and the
+  earlier approver (403 with the rule's code), whose role was not granted by the
+  requester, by themselves, or after the request; a revoked or expired override is
+  approved no more (409).
+- ``POST deployments/<uuid>/economics/overrides/<override uuid>/revoke/`` is NOT served
+  here: it is a STOP (review round 1 of #169, H1), in a module of its own
+  (:mod:`.revoke_api`) that imports none of this module's dependencies, so a fault in
+  the report, the services or the engine never takes it down.
+
 Access is the parameter-set routes' (:mod:`assurance.economics.api`): a signed-in
 account; a deployment the caller cannot see, or a scenario or result of another
 deployment, is 404; only an admin or an analyst simulates, and a viewer reads. The
@@ -97,6 +125,7 @@ import time
 import uuid as _uuid
 from decimal import Decimal
 
+from django.db import IntegrityError, OperationalError
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import get_object_or_404
 from django.urls import path, reverse
@@ -118,7 +147,17 @@ from .engine import currency as _currency
 from .engine import parameter_set as pset
 from .engine.money import MoneyRefused
 from .engine.parameters import ParameterRefused
-from .models import SIMULATION_COMPLETED, FinancialExposureReceipt, FinancialScenario, SimulationResult
+from .models import (
+    SIMULATION_COMPLETED,
+    EconomicsRefused,
+    FinancialExposureReceipt,
+    FinancialScenario,
+    ReviewVerdict,
+    ScenarioReview,
+    SensitiveOverride,
+    SeparationOfDutiesRefused,
+    SimulationResult,
+)
 
 #: The simulation policies a run is made under: the draws, and the percentile its
 #: severe-but-plausible figure is (section 23.12). Named as the owner's
@@ -524,6 +563,12 @@ class ReceiptView(APIView):
 
 # ------------------------------------------------------------------ continuous financial assurance (E6)
 
+#: The receipt refusals that wait on a person (spec, section 35: the review gate and
+#: the override gate) or on the owner (the row key, section 35.9). A refresh whose
+#: receipt one of them holds back leaves the obligations open, for the receipt that
+#: will close them.
+_RECEIPT_GATES = frozenset({"scenario_not_reviewed", "material_change_unapproved", "row_key_unavailable"})
+
 
 class ScenarioFreshnessView(APIView):
     """One run's freshness in full: its dependency map, its state and reasons, its
@@ -725,6 +770,23 @@ class ScenarioRefreshView(APIView):
             )
         elif overrun:
             closures, why_open = [], "the request's deadline ran out before the new run was carded"
+        elif want_receipt and receipt_row is None and receipt_part.get("code") in _RECEIPT_GATES:
+            # The receipt asked for waits on a person (spec, section 35): the rebuilt
+            # version is reviewed, and any material change approved, first. The
+            # obligations stay open so the receipt that supersedes the old one is the
+            # one they close with; the same refresh of the rebuilt version then issues
+            # it and closes them, running nothing again.
+            waits_on = (
+                "the service's row key (ATHENA_ECONOMICS_ROW_KEY; once it is set, bind the rows recorded without it: "
+                "manage.py bind_economics_rows)"
+                if receipt_part["code"] == "row_key_unavailable"
+                else f"approval of scenario version {rebuilt.uuid} (POST its reviews/, and an override in force for "
+                "each material change)"
+            )
+            closures, why_open = [], (
+                f"the receipt waits on {receipt_part['code']}: {waits_on}; then send the refresh of scenario version "
+                f"{rebuilt.uuid} again: it issues the receipt and closes the obligations, and nothing is run again"
+            )
         else:
             closures, why_open = continuous_service.close_obligations(
                 result, card.card, receipt_row, author=request.user
@@ -776,6 +838,239 @@ class ScenarioRefreshView(APIView):
         return Response(served, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+# ------------------------------------------------------------------ the review and override routes (section 35)
+
+#: The fields a review is posted with, and a request for an override.
+_REVIEW_REQUIRED, _REVIEW_OPTIONAL = frozenset({"verdict"}), frozenset({"note"})
+_OVERRIDE_FIELDS = frozenset({"subject", "reason"})
+#: How long a caller waits before sending a write again that met a lock.
+REVIEW_RETRY_AFTER_SECONDS = 1
+
+
+def _body(request) -> dict:
+    """The JSON object a review or override route was sent: read strictly, at most
+    :data:`MAX_BODY_BYTES` (413 on the declared length); none reads as ``{}``."""
+    try:
+        declared = int(request.META.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+        raise ValidationError({"detail": "Content-Length is not a number"}) from None
+    if declared > MAX_BODY_BYTES:
+        raise BodyTooLarge()
+    body = request.data
+    if isinstance(body, QueryDict):
+        if body:
+            raise UnsupportedMediaType(request.content_type)
+        return {}
+    if not isinstance(body, dict):
+        raise _refused("field_malformed", "send a JSON object")
+    return body
+
+
+def _fields(body: dict, required: frozenset, optional: frozenset = frozenset()) -> dict:
+    unknown = sorted(set(body) - required - optional)
+    if unknown:
+        raise _refused("field_unrecognised", f"{unknown}: this route reads only {sorted(required | optional)}")
+    missing = sorted(required - set(body))
+    if missing:
+        raise _refused("field_missing", f"{missing}")
+    for name, value in body.items():
+        if not isinstance(value, str):
+            raise _refused("field_malformed", f"{name} is text")
+    return body
+
+
+def _writer(request) -> None:
+    if not _may_write(request.user):
+        raise PermissionDenied("Reviews and overrides are written by an admin or an analyst.")
+
+
+def _separation(refused: EconomicsRefused) -> Response:
+    """A separation-of-duties refusal is the person's (403); a revoked or expired
+    override is a state (409); anything else the body's (400)."""
+    if refused.code in ("override_revoked", "override_expired"):
+        code = status.HTTP_409_CONFLICT
+    elif isinstance(refused, SeparationOfDutiesRefused):
+        code = status.HTTP_403_FORBIDDEN
+    else:
+        code = status.HTTP_400_BAD_REQUEST
+    return Response({"code": refused.code, "detail": refused.detail or str(refused)}, status=code)
+
+
+def _busy() -> Response:
+    """A write that met a lock it could not get: nothing was written."""
+    return Response(
+        {"code": "economics_busy", "detail": "The database was busy and nothing was recorded; send it again."},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={"Retry-After": str(REVIEW_RETRY_AFTER_SECONDS)},
+    )
+
+
+def _no_store(response: Response) -> Response:
+    response["Cache-Control"] = NO_STORE
+    return response
+
+
+def _review(row: ScenarioReview) -> dict:
+    return {
+        "uuid": str(row.uuid),
+        "reviewer": row.reviewer_username or None,
+        "verdict": row.verdict,
+        "note": row.note,
+        "reviewed_at": row.reviewed_at.isoformat(),
+    }
+
+
+def _override(row: SensitiveOverride) -> dict:
+    standing = SensitiveOverride.standing_refusal(row.pk)
+    return {
+        "uuid": str(row.uuid),
+        "subject": row.subject,
+        "reason": row.reason,
+        "requested_by": row.requested_by_username or None,
+        "requested_at": row.requested_at.isoformat(),
+        "expires_at": row.expires_at.isoformat(),
+        "approvals": [
+            {"approver": a.approver_username or None, "approved_at": a.approved_at.isoformat()}
+            for a in row.approvals.order_by("id")
+        ],
+        "revocations": [
+            {"revoked_by": r.revoked_by_username or None, "revoked_at": r.revoked_at.isoformat(), "reason": r.reason}
+            for r in row.revocations.order_by("id")
+        ],
+        "in_force": standing is None,
+        "not_in_force_because": standing,
+    }
+
+
+def receipt_gate(scenario: FinancialScenario) -> dict:
+    """The receipt gate of ``scenario`` as it stands now (spec, section 35)."""
+    from . import review_service
+
+    review = review_service.review_refusal(scenario.pk)
+    overrides = review_service.override_refusal(scenario.pk)
+    approved = review_service.in_force_subjects(scenario.pk)
+    return {
+        "review": review_service.review_gate(),
+        "review_refusal": None if review is None else {"code": review[0], "detail": review[1]},
+        "override_refusal": None if overrides is None else {"code": overrides[0], "detail": overrides[1]},
+        "sensitive_changes": [
+            {**change, "override_in_force": change["subject"] in approved}
+            for change in review_service.sensitive_changes(scenario.pk)
+        ],
+        "satisfied": review is None and overrides is None,
+    }
+
+
+class ScenarioReviewsView(APIView):
+    """A scenario version's reviews, and recording the next (spec, section 35)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    def _served(self, deployment, found) -> dict:
+        from .builder import review_status
+
+        return {
+            "deployment": str(deployment.uuid),
+            "scenario": str(found.uuid),
+            "review_status": review_status(found),
+            "reviews": [_review(row) for row in ScenarioReview.objects.filter(scenario=found).order_by("id")],
+            "receipt_gate": receipt_gate(found),
+        }
+
+    def get(self, request, uuid, scenario):
+        deployment = _deployment(request, uuid)
+        found = _scenario(deployment, scenario)
+        return _no_store(Response(self._served(deployment, found)))
+
+    def post(self, request, uuid, scenario):
+        deployment = _deployment(request, uuid)
+        _writer(request)
+        found = _scenario(deployment, scenario)
+        body = _fields(_body(request), _REVIEW_REQUIRED, _REVIEW_OPTIONAL)
+        if body["verdict"] not in ReviewVerdict.values:
+            raise _refused("code_unrecognised", f"verdict is one of {sorted(ReviewVerdict.values)}")
+        try:
+            row = ScenarioReview.objects.create(
+                scenario=found, reviewer=request.user, verdict=body["verdict"], note=body.get("note", "")
+            )
+        except EconomicsRefused as refused:
+            return _separation(refused)
+        except OperationalError:
+            return _busy()
+        return _no_store(
+            Response({**self._served(deployment, found), "review": _review(row)}, status=status.HTTP_201_CREATED)
+        )
+
+
+class ScenarioOverridesView(APIView):
+    """A scenario version's sensitive changes and overrides, and requesting one."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    def _served(self, deployment, found) -> dict:
+        return {
+            "deployment": str(deployment.uuid),
+            "scenario": str(found.uuid),
+            "receipt_gate": receipt_gate(found),
+            "overrides": [
+                _override(row) for row in SensitiveOverride.objects.filter(scenario=found).order_by("id")
+            ],
+        }
+
+    def get(self, request, uuid, scenario):
+        deployment = _deployment(request, uuid)
+        found = _scenario(deployment, scenario)
+        return _no_store(Response(self._served(deployment, found)))
+
+    def post(self, request, uuid, scenario):
+        deployment = _deployment(request, uuid)
+        _writer(request)
+        found = _scenario(deployment, scenario)
+        body = _fields(_body(request), _OVERRIDE_FIELDS)
+        try:
+            row = SensitiveOverride.objects.create(
+                scenario=found, subject=body["subject"], reason=body["reason"], requested_by=request.user
+            )
+        except EconomicsRefused as refused:
+            return _separation(refused)
+        except OperationalError:
+            return _busy()
+        return _no_store(Response({"override": _override(row)}, status=status.HTTP_201_CREATED))
+
+
+def _visible_override(deployment, override_uuid) -> SensitiveOverride:
+    return get_object_or_404(SensitiveOverride.objects.filter(scenario__deployment=deployment), uuid=override_uuid)
+
+
+class OverrideApproveView(APIView):
+    """One approval of a sensitive override."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    def post(self, request, uuid, override):
+        deployment = _deployment(request, uuid)
+        _writer(request)
+        found = _visible_override(deployment, override)
+        _fields(_body(request), frozenset())
+        from .models import OverrideApproval
+
+        try:
+            OverrideApproval.objects.create(override=found, approver=request.user)
+        except EconomicsRefused as refused:
+            return _separation(refused)
+        except IntegrityError:
+            return Response(
+                {"code": "approver_already_approved", "detail": "this person has already approved this override"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        except OperationalError:
+            return _busy()
+        return _no_store(Response({"override": _override(SensitiveOverride.objects.get(pk=found.pk))}))
+
+
 urlpatterns = [
     path(
         "deployments/<uuid:uuid>/economics/scenarios/",
@@ -817,5 +1112,20 @@ urlpatterns = [
         "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/refresh/",
         ScenarioRefreshView.as_view(),
         name="deployment-economics-scenario-refresh",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/reviews/",
+        ScenarioReviewsView.as_view(),
+        name="deployment-economics-scenario-reviews",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/overrides/",
+        ScenarioOverridesView.as_view(),
+        name="deployment-economics-scenario-overrides",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/overrides/<uuid:override>/approve/",
+        OverrideApproveView.as_view(),
+        name="deployment-economics-override-approve",
     ),
 ]

@@ -40,6 +40,8 @@ import hashlib
 import json
 import re
 import uuid
+from datetime import datetime
+from datetime import timezone as dt_timezone
 from decimal import Context as DecimalContext
 from decimal import Decimal, DecimalException
 
@@ -48,6 +50,7 @@ from django.db import models, transaction
 from django.db.models import F, Max, Q
 from django.utils import timezone
 
+from . import row_mac as _row_mac
 from .engine import cost_index, figure_normalization, formulas, fx, governance, money, parameters
 from .engine import parameter_set as pset
 from .engine import loss as engine_loss
@@ -328,6 +331,45 @@ def _require_text(**fields) -> None:
         _refuse(governance.required_text_refusal(value), detail=name)
 
 
+def _role_grant(account_id, at=None) -> governance.RoleGrant | None:
+    """Who granted the account ``account_id`` the role it holds, and when: its latest
+    recorded promotion (``accounts.RoleGrant``; spec, section 35.6) -- where ``at`` is
+    given, its latest at or before ``at`` -- read from the stored rows, never from an
+    object in hand. ``None`` for no account, or one given its role before grants were
+    recorded."""
+    from accounts.models import RoleGrant
+
+    grant = RoleGrant.latest_for(account_id, at=at)
+    if grant is None:
+        return None
+    by = governance.Person(id=grant.granted_by_pk, username=grant.granted_by_username or "")
+    return governance.RoleGrant(at=grant.granted_at, by=by)
+
+
+def _role_grant_refusal(account_id, *, asked_by, approver, asked_at) -> str | None:
+    """The T9b rule (:func:`~assurance.economics.engine.governance.role_grant_refusal`)
+    for the account ``account_id`` with its WHOLE promotion chain (review round 1 of
+    #169, M2): its latest grant, then the grant its granter held when they granted it,
+    and so on up, each read from the stored rows; the walk ends at a granter with no
+    recorded grant or none named, never visits an account twice, and is cut past
+    :data:`~assurance.economics.engine.governance.ROLE_GRANT_CHAIN_MAX` grants."""
+    grant = _role_grant(account_id)
+    upstream: list[governance.RoleGrant] = []
+    seen = {account_id}
+    step, cut = grant, False
+    while step is not None and step.by is not None and step.by.id is not None and step.by.id not in seen:
+        if len(upstream) >= governance.ROLE_GRANT_CHAIN_MAX:
+            cut = True
+            break
+        seen.add(step.by.id)
+        step = _role_grant(step.by.id, at=step.at)
+        if step is not None:
+            upstream.append(step)
+    return governance.role_grant_refusal(
+        grant, asked_by=asked_by, approver=approver, asked_at=asked_at, upstream=upstream, chain_cut=cut
+    )
+
+
 # ---------------------------------------------------------------------------
 # FinancialSource -- one version of one data source a figure rests on
 # ---------------------------------------------------------------------------
@@ -426,7 +468,9 @@ class FinancialSource(_AppendOnly):
     spec, section 36.2). No version is recorded at
     ``authoritative`` without the marker that approval sets
     (``second_person_required``): not a plain save, and not the snapshot loader,
-    which refuses a file stating it and records any lower tier as stated.
+    which refuses a file stating it, and registers any other file that is not
+    synthetic at ``unverified`` and at the licence class the feed registry gives its
+    key, whatever the file states (spec, section 35.2).
 
     ``synthetic`` marks made-up test data, such as the committed fixture snapshot
     (set by :func:`assurance.economics.snapshots.register_snapshot` from the
@@ -469,6 +513,13 @@ class FinancialSource(_AppendOnly):
     schema_version = models.CharField(max_length=64)
     # Made-up test data: never used by a production run, never trusted above unverified.
     synthetic = models.BooleanField(default=False)
+    # "sha256:" + 64 hex over the sorted row digests of the observations the loader
+    # registered with this snapshot (:func:`observation_rows_digest`; spec, section 35):
+    # a row rewritten, added or removed past the records' rules no longer gives it,
+    # and the version is demoted (``snapshot_rows_mismatch``). A raise copies it. Empty
+    # on a version no loader registered (one written directly): its rows are still
+    # each checked against their own digest.
+    observations_digest = models.CharField(max_length=71, blank=True, default="")
     recorded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -533,7 +584,11 @@ class FinancialSource(_AppendOnly):
                 "POST /api/assurance/economics/trust-raises/<uuid>/approve/",
             )
         _refuse(governance.snapshot_hash_refusal(self.snapshot_hash), detail="snapshot_hash")
+        # Three digests over the version's observation rows, each with its own job and
+        # each checked here for its form: the rows' digests (section 35, T2c) and the
+        # FX and the cost-index observations as the engine reads them (section 36.2).
         for name, digest in (
+            ("observations_digest", self.observations_digest),
             ("fx_observations_digest", self.fx_observations_digest),
             ("index_observations_digest", self.index_observations_digest),
         ):
@@ -566,8 +621,14 @@ class FinancialSource(_AppendOnly):
         refused (``cross_tenant_reference``), as :func:`snapshots._tenant_sources`
         refuses one. A run that :func:`runs_in_production` also never relies on a
         version still trusted as ``unverified`` (``source_unverified``): only a new
-        version at a tier above it is usable."""
-        return self._refusal(self._stored_for_the_gate(), deployment)
+        version at a tier above it is usable. A version whose stored observation rows
+        no longer give the digests recorded when it was registered is demoted
+        (``snapshot_rows_mismatch``; spec, section 35), whatever its tier."""
+        refusal = self._refusal(self._stored_for_the_gate(), deployment)
+        if refusal is not None:
+            return refusal
+        rows = observation_rows_refusal([self.pk])
+        return None if rows is None else rows[0]
 
     @staticmethod
     def _refusal(stored: tuple | None, deployment) -> str | None:
@@ -594,6 +655,12 @@ class FinancialSource(_AppendOnly):
         else:
             detail = f"source {stored[4]} v{stored[5]}, trust tier {stored[3]}"
         _refuse(self._refusal(stored, deployment), SourceNotUsableForProduction, detail)
+        # Demoted when its stored rows no longer give the digests recorded at
+        # registration (spec, section 35): read from the rows, never stored, so the
+        # demotion is never refused or held back by anything.
+        rows = observation_rows_refusal([self.pk])
+        if rows is not None:
+            raise SourceNotUsableForProduction(*rows)
 
     def __str__(self) -> str:
         return f"{self.source_key} v{self.version} ({self.license_class})"
@@ -675,7 +742,7 @@ def _stored_source(pk) -> dict | None:
         .values(
             "pk", "deployment_id", "source_key", "version", "provider", "dataset", "url", "license_class",
             "trust_tier", "retrieved_at", "snapshot_hash", "fx_observations_digest", "index_observations_digest",
-            "schema_version", "synthetic",
+            "schema_version", "synthetic", "observations_digest",
         )
         .first()
     )
@@ -742,6 +809,7 @@ def _raised_version(stored: dict, to_tier: str, by, *, second_admin: bool = Fals
         index_observations_digest=stored["index_observations_digest"],
         schema_version=stored["schema_version"],
         synthetic=stored["synthetic"],
+        observations_digest=stored["observations_digest"],
         recorded_by=by,
     )
     if second_admin:
@@ -1040,6 +1108,13 @@ class FinancialSourceTrustRaise(_AppendOnly):
         one transition to ``done``."""
         requester = governance.Person(id=row.requested_by_id, username=row.requested_by_username)
         _refuse(governance.trust_raise_approval_refusal(requester, approver))
+        # The second admin is someone who held the role independently: not promoted by
+        # the requester or by themselves, nor after the request (T9b; spec, section 35).
+        _refuse(
+            _role_grant_refusal(
+                getattr(by, "pk", None), asked_by=[requester], approver=approver, asked_at=row.requested_at
+            )
+        )
         _refuse(governance.trust_raise_requester_refusal(_requester_is_admin(row)))
         stored = _stored_source(row.from_version_id)
         if stored is None:
@@ -1387,10 +1462,138 @@ class ScenarioReview(_AppendOnly):
         reviewer = _signed_in(self.reviewer)
         self.reviewer_username = reviewer.username
         authors = FinancialScenario.authors_of(self.scenario_id)
-        _refuse(governance.review_refusal(authors, reviewer), SeparationOfDutiesRefused)
+        # Whoever recorded the parameter-set versions the run rests on is an author
+        # too (review round 1 of #169, M3; spec, section 35.4).
+        inputs = input_authors(self.scenario_id)
+        _refuse(
+            governance.review_refusal(authors, reviewer) or governance.input_author_refusal(inputs, reviewer),
+            SeparationOfDutiesRefused,
+        )
+        if self.verdict == ReviewVerdict.APPROVED:
+            # An APPROVAL is refused from someone an author promoted -- anywhere up
+            # the chain of grants (M2) -- who promoted themselves, or who was promoted
+            # after the version was recorded (T9b; spec, section 35). Returning a
+            # scenario takes approval away and is never refused by it.
+            versions = FinancialScenario._base_manager.filter(pk=self.scenario_id)
+            recorded = versions.values_list("recorded_at", flat=True).first()
+            _refuse(
+                _role_grant_refusal(self.reviewer_id, asked_by=[*authors, *inputs], approver=reviewer, asked_at=recorded),
+                SeparationOfDutiesRefused,
+            )
+        # When it was written is the service's clock, never a time the caller put on
+        # the row: the latest review is the one that stands.
+        self.reviewed_at = timezone.now()
 
     def __str__(self) -> str:
         return f"{self.verdict} review of scenario {self.scenario_id}"
+
+
+# ---------------------------------------------------------------------------
+# Who authored what a receipt delivers, whether an approval still counts, and the
+# version a parameter set's figures are measured against (review round 1 of #169,
+# M3, L1 and M4; spec, section 35)
+# ---------------------------------------------------------------------------
+
+
+def latest_review(scenario_id) -> ScenarioReview | None:
+    """The scenario version's latest review, the one that stands (as
+    :func:`assurance.economics.builder.review_status` orders them)."""
+    return ScenarioReview._base_manager.filter(scenario_id=scenario_id).order_by("-reviewed_at", "-id").first()
+
+
+def _still_writes(account_id) -> bool:
+    """Whether the account ``account_id`` still exists, is active, and writes
+    economics records (an admin, an analyst or a superuser), read from its row now."""
+    if account_id is None:
+        return False
+    from django.contrib.auth import get_user_model
+
+    model = get_user_model()
+    row = model._base_manager.filter(pk=account_id).values_list("is_active", "role", "is_superuser").first()
+    if row is None:
+        return False
+    active, role, superuser = row
+    return active is True and (superuser is True or role in (model.Roles.ADMIN, model.Roles.ANALYST))
+
+
+def approval_standing(review: ScenarioReview | None, authors, inputs=()) -> str | None:
+    """``None`` where ``review`` is an approval that counts NOW; otherwise why not, in
+    words: no review, a verdict that is not ``approved``, a reviewer who is one of
+    ``authors`` (the scenario's) or ``inputs`` (the parameter-set versions'; M3), or
+    -- read from the account's row now (review round 1 of #169, L1) -- a reviewer
+    whose account is removed, deactivated, or no longer an admin or an analyst. A
+    read, never a write; it is on no stop path."""
+    if review is None:
+        return "no review is recorded for this scenario version"
+    who = review.reviewer_username or "nobody"
+    if review.verdict != ReviewVerdict.APPROVED:
+        return f"its latest review, by {who}, is {review.verdict}"
+    reviewer = governance.Person(id=review.reviewer_id, username=review.reviewer_username)
+    refused = governance.review_refusal(authors, reviewer) or governance.input_author_refusal(inputs, reviewer)
+    if refused is not None:
+        return f"its approving review is not a second person's ({refused})"
+    if not _still_writes(review.reviewer_id):
+        return (
+            f"its approving reviewer, {who}, no longer holds an admin or analyst role on an active account: the "
+            "approval no longer counts"
+        )
+    return None
+
+
+def parameter_set_anchor(version, *, same_set: bool = True) -> CustomerParameterSet | None:
+    """The version ``version`` is measured against (review round 1 of #169, M4: the
+    lead's INTERIM default, which the owner may change; spec, section 35.5): the most
+    recently recorded customer parameter-set version recorded before ``version``, that
+    PASSED an approved non-author review -- a scenario version built on it whose
+    latest review is an approval that counts (:func:`approval_standing`) by a person
+    who authored neither that scenario nor that parameter-set version. ``same_set``:
+    one of ``version``'s own set (its anchor); otherwise one of the deployment's, of
+    any set (what a set with no anchor of its own, a new one, is measured against).
+    ``None`` where none has passed. Stepwise cuts accumulate against it until a
+    review passes one of them."""
+    builds = ScenarioBuild._base_manager.filter(deployment_id=version.deployment_id, parameter_set_id__lt=version.pk)
+    if same_set:
+        builds = builds.filter(parameter_set__set_key=version.set_key)
+    builds = builds.order_by("-parameter_set_id", "-id").values_list("scenario_id", "parameter_set_id")
+    for scenario_id, parameter_set_id in builds:
+        review = latest_review(scenario_id)
+        if review is None or review.verdict != ReviewVerdict.APPROVED:
+            continue
+        author = (
+            CustomerParameterSet._base_manager.filter(pk=parameter_set_id)
+            .values_list("author_id", "author_username")
+            .first()
+        )
+        recorded = [governance.Person(id=author[0], username=author[1])] if author else []
+        if approval_standing(review, FinancialScenario.authors_of(scenario_id), recorded) is None:
+            return CustomerParameterSet._base_manager.filter(pk=parameter_set_id).first()
+    return None
+
+
+def input_authors(scenario_id) -> list[governance.Person]:
+    """Who recorded the customer parameter-set versions the scenario version
+    ``scenario_id``'s figures rest on (review round 1 of #169, M3): the version its
+    build reads, and every earlier version of the same set recorded after that
+    version's anchor (:func:`parameter_set_anchor`; every earlier one of the set where
+    it has none) -- the versions whose figures the build carries and no independent
+    review has passed. Each is an author of everything built on them. Empty for a
+    version with no build."""
+    parameter_set_id = (
+        ScenarioBuild._base_manager.filter(scenario_id=scenario_id).values_list("parameter_set_id", flat=True).first()
+    )
+    version = CustomerParameterSet._base_manager.filter(pk=parameter_set_id).first() if parameter_set_id else None
+    if version is None:
+        return []
+    anchor = parameter_set_anchor(version)
+    versions = CustomerParameterSet._base_manager.filter(
+        deployment_id=version.deployment_id, set_key=version.set_key, pk__lte=version.pk
+    )
+    if anchor is not None:
+        versions = versions.filter(pk__gt=anchor.pk)
+    return [
+        governance.Person(id=author_id, username=username)
+        for author_id, username in versions.order_by("pk").values_list("author_id", "author_username")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1407,6 +1610,13 @@ class SensitiveOverride(_AppendOnly):
     different people, neither of them the requester, have approved it
     (:meth:`approval_refusal`, ``override_needs_two_approvers``), and that is read
     from the stored rows each time it is asked, never stored.
+
+    And it counts only WHILE in force (section 28 hardening, T1/T4; spec, section
+    35): for :data:`~assurance.economics.engine.governance.OVERRIDE_EXPIRES_AFTER`
+    from its request, by the service's clock (``override_expired``), and never once
+    it is revoked (``override_revoked``; :class:`OverrideRevocation`, which nothing
+    refuses). Its ``requested_at`` is the service's clock at insert, never a time the
+    caller put on the row, which could postpone its expiry.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -1449,10 +1659,49 @@ class SensitiveOverride(_AppendOnly):
     def approvers(self) -> list[governance.Person]:
         return self.approvers_of(self.pk)
 
+    @classmethod
+    def input_authors_of(cls, override_id) -> list[governance.Person]:
+        """Who recorded the parameter-set versions the override's scenario version
+        rests on (:func:`input_authors`; review round 1 of #169, M3)."""
+        scenario_id = cls._base_manager.filter(pk=override_id).values_list("scenario_id", flat=True).first()
+        return input_authors(scenario_id) if scenario_id is not None else []
+
+    @classmethod
+    def standing_refusal(cls, override_id, now=None) -> str | None:
+        """``None`` when the override ``override_id`` is in force at ``now`` (the
+        service's clock); otherwise why not: revoked, expired, or short of its two
+        approvers. Read from the stored rows. An approval by an author of the change
+        (:meth:`input_authors_of`; M3) does not count, whenever it was recorded."""
+        requested_at = cls._base_manager.filter(pk=override_id).values_list("requested_at", flat=True).first()
+        inputs = [author for author in cls.input_authors_of(override_id) if author.named]
+        approvers = [
+            person
+            for person in cls.approvers_of(override_id)
+            if not any(governance.same_person(person, author) for author in inputs)
+        ]
+        return governance.override_in_force_refusal(
+            cls.requester_of(override_id),
+            approvers,
+            requested_at=requested_at,
+            revoked=OverrideRevocation._base_manager.filter(override_id=override_id).exists(),
+            now=now or timezone.now(),
+        )
+
     def approval_refusal(self) -> str | None:
         """``None`` when the override is in force; otherwise why it is not. Read
         from the stored rows, never from this instance's fields."""
-        return governance.override_refusal(self.requester_of(self.pk), self.approvers_of(self.pk))
+        return self.standing_refusal(self.pk)
+
+    @property
+    def expires_at(self):
+        """When the override stops counting, approved or not: its request time and
+        :data:`~assurance.economics.engine.governance.OVERRIDE_EXPIRES_AFTER`."""
+        return self.requested_at + governance.OVERRIDE_EXPIRES_AFTER
+
+    def revoke(self, *, by, reason: str = "") -> OverrideRevocation:
+        """Revoke this override as ``by``. Never refused (:class:`OverrideRevocation`):
+        it takes approval away, and nothing may hold a revoke back."""
+        return OverrideRevocation.objects.create(override_id=self.pk, revoked_by=by, reason=reason or "")
 
     @property
     def in_force(self) -> bool:
@@ -1470,6 +1719,8 @@ class SensitiveOverride(_AppendOnly):
             governance.override_request_refusal(requester, self.subject, self.reason),
             SeparationOfDutiesRefused,
         )
+        # Its expiry counts from here, by the service's clock (spec, section 35).
+        self.requested_at = timezone.now()
 
     def __str__(self) -> str:
         return f"sensitive override of {self.subject} on scenario {self.scenario_id}"
@@ -1507,17 +1758,75 @@ class OverrideApproval(_AppendOnly):
     def check_new(self) -> None:
         approver = _signed_in(self.approver)
         self.approver_username = approver.username
+        requester = SensitiveOverride.requester_of(self.override_id)
         _refuse(
-            governance.approval_refusal(
-                SensitiveOverride.requester_of(self.override_id),
-                SensitiveOverride.approvers_of(self.override_id),
-                approver,
-            ),
+            governance.approval_refusal(requester, SensitiveOverride.approvers_of(self.override_id), approver),
             SeparationOfDutiesRefused,
         )
+        # Whoever recorded the parameter-set versions behind the change is its author,
+        # never its second person (review round 1 of #169, M3).
+        inputs = SensitiveOverride.input_authors_of(self.override_id)
+        _refuse(
+            governance.change_author_refusal(inputs, approver),
+            SeparationOfDutiesRefused,
+        )
+        # A revoked or expired override is approved no more (spec, section 35).
+        standing = SensitiveOverride.standing_refusal(self.override_id)
+        if standing in ("override_revoked", "override_expired"):
+            raise SeparationOfDutiesRefused(standing)
+        # An approver promoted by the requester or an author of the change -- anywhere
+        # up the chain of grants (M2) -- by themselves, or after the request, is not a
+        # second person (T9b).
+        requested_at = (
+            SensitiveOverride._base_manager.filter(pk=self.override_id).values_list("requested_at", flat=True).first()
+        )
+        _refuse(
+            _role_grant_refusal(self.approver_id, asked_by=[requester, *inputs], approver=approver, asked_at=requested_at),
+            SeparationOfDutiesRefused,
+        )
+        self.approved_at = timezone.now()
 
     def __str__(self) -> str:
         return f"approval of override {self.override_id}"
+
+
+class OverrideRevocation(_AppendOnly):
+    """One revocation of one sensitive override (section 28 hardening, T1/T4; spec,
+    section 35): from it on, the override is not in force (``override_revoked``), and
+    never again.
+
+    A revocation is a REVOKE, and is NEVER refused: not for who records it (the
+    route lets anyone revoke who may write economics records; the record names the
+    account, or nobody), not for the override's state (one not yet in force, one
+    expired, one already revoked: each revocation is recorded), and not by a second
+    person, an expiry or a lock: its check reads nothing, and it is one insert. Two
+    revocations racing are both recorded; the first one counts."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    override = models.ForeignKey(SensitiveOverride, on_delete=models.CASCADE, related_name="revocations")
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_override_revocations",
+    )
+    revoked_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    reason = models.TextField(blank=True, default="")
+    revoked_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["override", "id"]
+
+    def check_new(self) -> None:
+        # Nothing is refused here: the revoker is named as the account says, and the
+        # time is the service's clock.
+        self.revoked_by_username = _signed_in(self.revoked_by).username
+        self.revoked_at = timezone.now()
+
+    def __str__(self) -> str:
+        return f"revocation of override {self.override_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -1597,6 +1906,10 @@ class FXObservation(_AppendOnly):
     effective_date = models.DateField()
     # "sha256:" + 64 hex: the snapshot the rate was read from, equal to its source's.
     source_snapshot_hash = models.CharField(max_length=71)
+    # "sha256:" + 64 hex over the row's own stored fields (:meth:`computed_digest`),
+    # written on save and checked on every read (spec, section 35): a row rewritten
+    # past the records' rules no longer gives it (``snapshot_rows_mismatch``).
+    row_digest = models.CharField(max_length=71, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1634,6 +1947,23 @@ class FXObservation(_AppendOnly):
             observations_version=held_by,
         )
 
+    def computed_digest(self) -> str:
+        """The digest of the row's stored fields, as they read back from the column:
+        the rate at the column's places, the instant in UTC (spec, section 35)."""
+        return canonical_digest(
+            {
+                "kind": "fx",
+                "base": self.base_currency,
+                "quote": self.quote_currency,
+                "rate": _column_decimal(self.rate, RATE_PLACES),
+                "rate_type": self.rate_type,
+                "provider": self.provider,
+                "observed_at": _column_instant(self.observed_at),
+                "effective_date": _column_date(self.effective_date),
+                "source_snapshot_hash": self.source_snapshot_hash,
+            }
+        )
+
     def check_new(self) -> None:
         _engine_refusal(self.as_engine)
         if not _fits(self.rate, RATE_DIGITS, RATE_PLACES):
@@ -1641,6 +1971,7 @@ class FXObservation(_AppendOnly):
         stored = FinancialSource._base_manager.filter(pk=self.source_id).values_list("snapshot_hash", flat=True)
         if list(stored) != [self.source_snapshot_hash]:
             raise EconomicsRefused("snapshot_hash_mismatch")
+        self.row_digest = self.computed_digest()
 
     def __str__(self) -> str:
         return f"{self.base_currency}/{self.quote_currency} {self.rate} {self.rate_type} on {self.effective_date}"
@@ -1671,6 +2002,8 @@ class CostIndexObservation(_AppendOnly):
     period = models.CharField(max_length=7)
     value = models.DecimalField(max_digits=INDEX_DIGITS, decimal_places=INDEX_PLACES)
     vintage_date = models.DateField()
+    # The row's own digest, as an FX observation's (spec, section 35).
+    row_digest = models.CharField(max_length=71, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1702,6 +2035,22 @@ class CostIndexObservation(_AppendOnly):
             provider=source.provider if source else "",
         )
 
+    def computed_digest(self) -> str:
+        """The digest of the row's stored fields, as they read back from the column
+        (spec, section 35)."""
+        return canonical_digest(
+            {
+                "kind": "cost_index",
+                "series_id": self.series_id,
+                "geography": self.geography,
+                "category": self.category,
+                "base": self.base,
+                "period": self.period,
+                "value": _column_decimal(self.value, INDEX_PLACES),
+                "vintage_date": _column_date(self.vintage_date),
+            }
+        )
+
     def check_new(self) -> None:
         _engine_refusal(self.as_engine)
         if not _fits(self.value, INDEX_DIGITS, INDEX_PLACES):
@@ -1713,9 +2062,93 @@ class CostIndexObservation(_AppendOnly):
         )
         if other:
             raise EconomicsRefused("index_series_mismatch", self.series_id)
+        self.row_digest = self.computed_digest()
 
     def __str__(self) -> str:
         return f"{self.series_id} {self.period} = {self.value} (vintage {self.vintage_date})"
+
+
+def _column_decimal(value, places: int) -> str:
+    """A decimal column's value as it reads back: at the column's places, in plain
+    notation."""
+    return format(Decimal(value).quantize(Decimal(1).scaleb(-places)), "f")
+
+
+def _column_instant(value) -> str:
+    """An instant as it reads back: in UTC, ISO 8601."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.astimezone(dt_timezone.utc).isoformat()
+
+
+def _column_date(value) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def observation_rows_digest(row_digests) -> str:
+    """The digest a source version records over its observation rows (spec, section
+    35): ``sha256:`` over the canonical JSON of their row digests, sorted. A version
+    that holds none records the digest of none."""
+    return canonical_digest(sorted(row_digests))
+
+
+def observation_rows_refusal(version_ids) -> tuple[str, str] | None:
+    """``("snapshot_rows_mismatch", detail)`` where a stored observation row of the
+    source versions ``version_ids`` no longer gives its own digest, or the rows the
+    version reads (its own, or for a raised version those of the version of the same
+    tenant, key and snapshot hash the loader registered) no longer give the digest
+    recorded at registration on the version or on that holder -- a row rewritten,
+    added or removed past the records' rules (spec, section 35). ``None`` when every
+    row is as registered. Reads the rows; writes nothing, holds no lock."""
+    ids = [getattr(version, "pk", version) for version in version_ids]
+    asked = list(
+        FinancialSource._base_manager.filter(pk__in=ids).values(
+            "pk", "deployment_id", "source_key", "version", "snapshot_hash", "observations_digest"
+        )
+    )
+    if not asked:
+        return None
+    shared = Q()
+    for version in asked:
+        shared |= Q(
+            deployment_id=version["deployment_id"], source_key=version["source_key"],
+            snapshot_hash=version["snapshot_hash"],
+        )
+    holders: dict[tuple, dict] = {}
+    for row in FinancialSource._base_manager.filter(shared).order_by("version").values(
+        "pk", "deployment_id", "source_key", "version", "snapshot_hash", "observations_digest"
+    ):
+        holders.setdefault((row["deployment_id"], row["source_key"], row["snapshot_hash"]), row)
+    holder_ids = {holder["pk"] for holder in holders.values()}
+    digests: dict[int, list[str]] = {pk: [] for pk in holder_ids}
+    try:
+        for model in (FXObservation, CostIndexObservation):
+            for row in model._base_manager.filter(source_id__in=holder_ids).order_by("id"):
+                computed = row.computed_digest()
+                refused = governance.observation_rows_refusal(row.row_digest == computed, "", ())
+                if refused is not None:
+                    holder = next(h for h in holders.values() if h["pk"] == row.source_id)
+                    return refused, (
+                        f"source {holder['source_key']} v{holder['version']}: a {model._meta.verbose_name} no longer "
+                        "gives its own digest"
+                    )
+                digests[row.source_id].append(computed)
+    except (ArithmeticError, TypeError, ValueError, AttributeError) as unreadable:
+        refused = governance.observation_rows_refusal(False, "", ())
+        return refused, f"an observation row cannot be read back: {type(unreadable).__name__}"
+    for version in asked:
+        holder = holders[(version["deployment_id"], version["source_key"], version["snapshot_hash"])]
+        found = observation_rows_digest(digests[holder["pk"]])
+        refused = governance.observation_rows_refusal(
+            True, found, (holder["observations_digest"], version["observations_digest"]),
+            holds_rows=bool(digests[holder["pk"]]),
+        )
+        if refused is not None:
+            return refused, (
+                f"source {version['source_key']} v{version['version']}: its observation rows no longer give the "
+                "digest recorded when it was registered"
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3117,6 +3550,10 @@ class SimulationResult(_AppendOnly):
     remediation = models.ForeignKey(
         "RemediationOption", on_delete=models.CASCADE, null=True, blank=True, related_name="+"
     )
+    # The row's MAC under the row key, which the database never holds (review round 1
+    # of #169, M1; spec, section 35.9; :mod:`.row_mac`): set at insert, empty where
+    # there was no key. Checked on every read, card and receipt (``result_mac``).
+    row_mac = models.CharField(max_length=80, blank=True, default="")
 
     class Meta:
         ordering = ["scenario", "id"]
@@ -3193,6 +3630,9 @@ class SimulationResult(_AppendOnly):
             scenario_id=self.scenario_id, input_digest=self.input_digest, seed=self.seed, draws=self.draws
         ).exists():
             raise EconomicsRefused("duplicate_id", "a result of the same inputs, seed and draws is recorded")
+        # Bound by the row key, where there is one (M1): never anything the caller set.
+        key = _row_mac.row_key()
+        self.row_mac = "" if key is None else _row_mac.result_mac(self, key)
         self._result_checked = _checked_state(self)
 
     def insert_checked(self) -> None:
@@ -3260,6 +3700,8 @@ class FinancialValidityCard(_AppendOnly):
     sensitivity_digest = models.CharField(max_length=71, blank=True)
     issued_at = models.DateTimeField()
     recorded_at = models.DateTimeField(default=timezone.now)
+    # The row's MAC under the row key (M1; as SimulationResult.row_mac): ``card_mac``.
+    row_mac = models.CharField(max_length=80, blank=True, default="")
 
     class Meta:
         ordering = ["scenario", "id"]
@@ -3299,6 +3741,8 @@ class FinancialValidityCard(_AppendOnly):
             raise EconomicsRefused("card_record_malformed", "the card says when it was issued")
         if FinancialValidityCard._base_manager.filter(simulation_id=self.simulation_id).exists():
             raise EconomicsRefused("duplicate_id", "a card of this simulation result is recorded")
+        key = _row_mac.row_key()
+        self.row_mac = "" if key is None else _row_mac.card_mac(self, key)
         self._card_checked = _checked_state(self)
 
     def insert_checked(self) -> None:

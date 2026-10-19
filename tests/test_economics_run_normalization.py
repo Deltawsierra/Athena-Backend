@@ -43,10 +43,12 @@ from assurance.economics.models import (
     FinancialNormalizationPolicy,
     FinancialParameter,
     FinancialScenario,
+    FinancialSource,
     ScenarioBuild,
     SimulationResult,
 )
 from assurance.models import Asset, Deployment, Finding
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_scenarios import _entry
 
 pytestmark = pytest.mark.django_db
@@ -627,6 +629,9 @@ def test_the_receipt_covers_the_bridge(deployment, people):
     assert named[f"scenario-normalizations:{scenario.uuid}"] == canonical_digest(held)
     key, other = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
     keyring = core.receipt_keyring([_raw(key)], other_roles={"engine-outcome": [_raw(other)]})
+    # A signed receipt needs the row key (set for every test by tests/conftest.py, section
+    # 35.9) and an approved review by a colleague who authored nothing it rests on (35.4).
+    approve_for_receipt(result)
     outcome = receipt_service.issue_receipt(
         result, signer=lambda document: core.sign_receipt(document, key), keyring=keyring)
     assert outcome.receipt is not None, (outcome.code, outcome.detail)
@@ -709,12 +714,21 @@ def test_nit3_an_observation_changed_past_the_model_after_registration_is_never_
     """Review round 1, NIT-3: the loader records the digests of the FX and the
     cost-index observations it writes with a version, and every book read checks the
     rows against them. A rate or an index value changed past the model after
-    registration, or a row removed, refuses the build (``source_observations_changed``,
-    400 through the route, nothing written): no figure is normalized from it, so none is
-    pinned by a record. Put back, the rows read as before."""
+    registration, or a row removed, refuses the build (400 through the route, nothing
+    written): no figure is normalized from it, so none is pinned by a record. Put back,
+    the rows read as before.
+
+    Two checks guard these rows, each with its own job (spec, section 36.2 beside
+    35.3). Section 35.3's row digests find a plain rewrite first: the version is
+    demoted (``snapshot_rows_mismatch`` on a book read of it), so a run passes it over
+    (``feeds.used_version``) and the build, left with no rate, is refused. The same
+    rewrite with every ``row_digest`` and the version's ``observations_digest``
+    recomputed (:func:`row_digests_recomputed`) passes that check, and these observation
+    digests still refuse it (``source_observations_changed``)."""
     from django.db.models import F
 
-    from assurance.economics.models import CostIndexObservation, FXObservation
+    from assurance.economics import normalization_service
+    from assurance.economics.models import CostIndexObservation, FXObservation, observation_rows_digest
 
     version = books()
     rates = [row.as_engine() for row in FXObservation.objects.filter(source=version)]
@@ -722,39 +736,72 @@ def test_nit3_an_observation_changed_past_the_model_after_registration_is_never_
     assert rates and points
     assert (version.fx_observations_digest, version.index_observations_digest) == snapshots.observations_digests(
         rates, points)
+    registered_rows_digest = version.observations_digest
+    assert registered_rows_digest
     asset, finding = world(deployment, people["analyst"])
     client = APIClient()
     client.force_authenticate(user=people["analyst"])
     url = f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/"
 
-    def refused_everywhere(kind):
+    def row_digests_recomputed():
+        """Past the model, as one who knows section 35.3's digests: every row's own
+        digest and the version's digest over them recomputed from the rows as they now
+        stand, so only the observation digests still tell."""
+        digests = []
+        for model in (FXObservation, CostIndexObservation):
+            for row in model._base_manager.filter(source=version):
+                model._base_manager.filter(pk=row.pk).update(row_digest=row.computed_digest())
+                digests.append(row.computed_digest())
+        FinancialSource._base_manager.filter(pk=version.pk).update(observations_digest=observation_rows_digest(digests))
+
+    def refused_everywhere(code, kind=None):
         before = _counts()
-        with pytest.raises(EconomicsRefused) as refused:
+        with pytest.raises((EconomicsRefused, MoneyRefused)) as refused:
             builder.build(deployment, body(asset, finding), author=people["analyst"])
-        assert refused.value.code == "source_observations_changed"
-        assert f"{kind} observations of {REF} version 1" in refused.value.detail
+        assert refused.value.code == code
+        if kind is not None:
+            assert f"{kind} observations of {REF} version 1" in refused.value.detail
         answer = client.post(url, data=json.dumps(body(asset, finding)), content_type="application/json")
-        assert answer.status_code == 400 and answer.json()["code"] == "source_observations_changed", answer.content
+        assert answer.status_code == 400 and answer.json()["code"] == code, answer.content
         assert _counts() == before
+
+    def refused_by_both(kind):
+        # The rows' own digests find it first (section 35.3): the version is demoted, a
+        # book read of it refused, a run passes it over, and the build has no rate.
+        assert version.pk not in {v.pk for v in normalization_service.usable_versions(
+            deployment, date.fromisoformat(VALUATION))}
+        with pytest.raises(EconomicsRefused) as demoted:
+            snapshots.fx_book([version], deployment=deployment)
+        assert demoted.value.code == "snapshot_rows_mismatch"
+        refused_everywhere("rate_missing")
+        # Every row digest and the version's recomputed: the observation digests still find it.
+        row_digests_recomputed()
+        assert version.pk in {v.pk for v in normalization_service.usable_versions(
+            deployment, date.fromisoformat(VALUATION))}
+        refused_everywhere("source_observations_changed", kind)
 
     used = FXObservation._base_manager.filter(source=version, base_currency="EUR", quote_currency="USD",
                                               effective_date=EVENT)
     held = used.get().rate
     used.update(rate=Decimal("1.2"))
-    refused_everywhere("FX")
+    refused_by_both("FX")
     used.update(rate=held)
+    row_digests_recomputed()
     index = CostIndexObservation._base_manager.filter(source=version)
     index.update(value=F("value") + 1)
-    refused_everywhere("cost-index")
+    refused_by_both("cost-index")
     index.update(value=F("value") - 1)
+    row_digests_recomputed()
     # A row nothing reads, removed: the version's rows are not the ones registered.
     gone = FXObservation._base_manager.filter(source=version).exclude(pk=used.get().pk).order_by("pk").first()
     FXObservation._base_manager.filter(pk=gone.pk).delete()
-    refused_everywhere("FX")
+    refused_by_both("FX")
     # Every row as registered again (the removed one written back as it was): the
-    # version builds as before.
+    # version builds as before, every digest the one recorded at registration.
     gone.pk = None
     FXObservation._base_manager.bulk_create([gone])
+    row_digests_recomputed()
+    assert FinancialSource._base_manager.get(pk=version.pk).observations_digest == registered_rows_digest
     scenario, _ = builder.build(deployment, body(asset, finding), author=people["analyst"])
     assert FigureNormalization.objects.filter(scenario=scenario).exists()
 
@@ -796,7 +843,7 @@ def test_the_builds_transaction_only_writes_with_normalized_figures(deployment, 
 def test_the_spec_and_the_readme_say_it():
     text = " ".join(SPEC.read_text(encoding="utf-8").split())
     assert "## 36. Figures normalized into a run's reporting currency" in SPEC.read_text(encoding="utf-8")
-    for needle in ("`FigureNormalization`", "`0075_figure_normalizations.py`", "`distribution_not_normalizable`",
+    for needle in ("`FigureNormalization`", "`0076_figure_normalizations.py`", "`distribution_not_normalizable`",
                    "`mythos.economics.confidence-grade/v4`", "`scenario-normalizations:<scenario>`",
                    "`run_normalization.source_dependencies`", "`normalization_record_malformed`",
                    "`mythos.economics.run-normalization/v1`"):

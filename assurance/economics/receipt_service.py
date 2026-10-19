@@ -21,6 +21,16 @@ first where none is recorded), and binds them in one document:
   rounded to the currency's minor unit as shown;
 - the Validity Card's digest and grade.
 
+Before anything is built (section 28 hardening; spec, section 35): the stored rows
+must be as recorded (``stored_row_unverified``: a result's inputs or record, or its
+card, rewritten past the records' rules, are never signed); the run's scenario
+version must be reviewed, its latest review approved by someone who authored no
+version of it (``scenario_not_reviewed``; :mod:`.review_service`, ON unless the
+environment variable ``ATHENA_ECONOMICS_RECEIPT_REVIEW`` is exactly ``off``); and
+every material change of its customer parameter-set version against the version
+before it must be named by a sensitive override IN FORCE
+(``material_change_unapproved``).
+
 It is SIGNED on the path the backend's signed assurance receipts take: the
 backend holds no signing key, and asks the engine (``CyberEngineClient``) to
 sign. The envelope that comes back must be exactly one signature over exactly the
@@ -64,7 +74,7 @@ from datetime import date
 
 from django.db import IntegrityError, transaction
 
-from . import validity_service
+from . import review_service, row_mac, validity_service
 from .engine.money import Money
 from .models import (
     SIMULATION_COMPLETED,
@@ -156,6 +166,18 @@ REFUSALS = {
         "a figure's evidence reads as a citation of a feed source but is not one exactly ('financial-source:<key>' "
         "at its start, once): it fails closed, and nothing is signed"
     ),
+    # Section 28 hardening (spec, section 35).
+    "stored_row_unverified": (
+        "the result's stored rows no longer give their digests or their MACs (its inputs, its record, its card): a "
+        "row rewritten past the records' rules is never signed"
+    ),
+    # Review round 1 of #169, M1 (spec, section 35.9).
+    "row_key_unavailable": (
+        "no receipt is signed without the row key (ATHENA_ECONOMICS_ROW_KEY, read in code, never stored): the "
+        "result and card rows a receipt delivers are bound by a MAC under it, and without it that binding cannot "
+        "be checked"
+    ),
+    **review_service.REFUSALS,
 }
 
 
@@ -277,7 +299,11 @@ def spine_evidence(scenario: FinancialScenario) -> dict:
     return {"nodes": sorted({e.asset for e in effects}), "effects": sorted(spine), "claims": []}
 
 
-def _figures(result: SimulationResult) -> dict:
+def receipt_figures(result: SimulationResult) -> dict:
+    """The receipt's six figures of ``result``'s record, at the currency's minor
+    unit, as the receipt states them (``receipt_figure_unavailable`` where one is
+    not reported). The report binds the served rows to the signed document with it
+    (:func:`assurance.economics.report.receipt_binds`)."""
     record = result.record
     block = record["scenario"][record["scenario"]["headline"]]
     currency = record["reporting_currency"]
@@ -323,7 +349,7 @@ def _fields(result: SimulationResult, card: FinancialValidityCard) -> dict:
         "evidence": spine_evidence(scenario),
         "reporting_currency": result.record["reporting_currency"],
         "valuation_date": _valuation_date(result, scenario),
-        "figures": _figures(result),
+        "figures": receipt_figures(result),
         "validity_card": card.card,
     }
 
@@ -466,10 +492,34 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
         return ReceiptOutcome(found, False)
     if result.status != SIMULATION_COMPLETED:
         return ReceiptOutcome(None, False, "result_not_completed", f"refused: {result.refusal_code}")
+    # Without the row key nothing binds the rows a receipt would deliver (M1): no
+    # receipt is signed. Read before anything else is read, run or signed.
+    if row_mac.row_key() is None:
+        return ReceiptOutcome(
+            None, False, "row_key_unavailable",
+            f"{row_mac.ROW_KEY_ENV} is not set, or shorter than {row_mac.ROW_KEY_MIN_CHARS} characters",
+        )
+    from . import report
+
+    # The stored result is as recorded (T5): a record or inputs rewritten past the
+    # records' rules are never signed.
+    scenario = FinancialScenario.objects.get(pk=result.scenario_id)
+    failed = report.stored_row_failures(result, None, None, scenario, receipt=None)
+    if failed:
+        return ReceiptOutcome(None, False, "stored_row_unverified", f"the stored rows fail {', '.join(failed)}")
+    # A person other than its authors approved the scenario version, and every
+    # material change of its inputs is approved by an override in force (spec,
+    # section 35). Read before the card's analysis runs or anything is signed.
+    gated = review_service.gate_refusal(result.scenario_id)
+    if gated is not None:
+        return ReceiptOutcome(None, False, *gated)
     issued = validity_service.issue_card(result)
     if issued.card is None:
         return ReceiptOutcome(None, False, issued.code or "card_unavailable", issued.detail)
     card = issued.card
+    failed = report.stored_row_failures(result, card, None, scenario, receipt=None)
+    if failed:
+        return ReceiptOutcome(None, False, "stored_row_unverified", f"the stored rows fail {', '.join(failed)}")
     refused = feed_refusal(result, card)
     if refused is not None:
         return ReceiptOutcome(None, False, *refused)
@@ -669,7 +719,7 @@ def _verify(receipt: FinancialExposureReceipt, keyring) -> ReceiptCheck:
     if held != stored:
         return _refused("result_mismatch", "a digest, the seed or the draws are not the stored result's")
     try:
-        figures = _figures(result)
+        figures = receipt_figures(result)
     except ReceiptRefused:
         return _refused("result_mismatch", "the stored result has no figure the receipt names")
     if {name: document["result"][name]["amount"] for name in FIGURES} != figures:
@@ -738,6 +788,7 @@ __all__ = [
     "issue_receipt",
     "engine_keyring",
     "keyring_from_published",
+    "receipt_figures",
     "source_snapshots",
     "spine_evidence",
     "verify_stored_receipt",

@@ -17,9 +17,11 @@
 # which holds no rows of its own, keeps its row as it is and is read as it was. Nothing
 # is backfilled, and no column a cascade or a SET_NULL writes is touched.
 #
-# Numbered 0075 behind #168 (E6, 0073_exposure_assurance, merged) and the section-28
-# hardening (0074, in the merge queue); it depends on master's latest, 0073, until 0074
-# merges.
+# Numbered 0076 behind #168 (E6, 0073_exposure_assurance) and #169 (the section-28
+# hardening, 0074_section_28_hardening and 0075_section_28_row_macs), all merged; it
+# depends on master's latest, 0075_section_28_row_macs. Its two digest columns sit
+# beside 0074's FinancialSource.observations_digest and the rows' row_digest: each
+# set has its own job (spec, sections 35.3 and 36.2), and no column is shared.
 
 import django.db.models.deletion
 import django.utils.timezone
@@ -31,7 +33,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0073_exposure_assurance"),
+        ("assurance", "0075_section_28_row_macs"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

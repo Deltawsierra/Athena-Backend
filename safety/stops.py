@@ -168,6 +168,29 @@ def _cancel(request, read):
     return action in _START_ACTIONS
 
 
+def _remark_only(request, read):
+    """A revoke whose body is a remark at most: no body, ``{}``, or only a text
+    ``note`` and/or ``reason``, in canonical form. Any other field, a remark that is
+    not text, or a body not in canonical form is not a stop: it goes through the
+    gateway and the throttles like any other request -- and the view still records
+    the revoke, since it refuses no body."""
+    data = read()
+    if not isinstance(data, dict):
+        return False
+    return all(name in _REMARKS and isinstance(value, str) for name, value in data.items())
+
+
+def canonical_body(request):
+    """The body of ``request`` (a Django ``HttpRequest``) as a stop is judged in: a
+    dict, or :data:`NOT_CANONICAL`. Reads at most :data:`STOP_BODY_LIMIT` bytes and
+    never raises. A stop view whose body is a remark at most reads it through this
+    rather than a parser, so it reads the body it was judged by and refuses none."""
+    try:
+        return _body(request)
+    except Exception:  # noqa: BLE001 - a body that cannot be read is no remark, never a refusal
+        return NOT_CANONICAL
+
+
 def _signature(request, read):
     """A signature on a pause, stand-down or terminate brings the stop nearer:
     a stop. A signature on a resume or release is start-direction, and is not.
@@ -362,6 +385,13 @@ STOP_ROUTES = {
     # An operator's access taken away: demoted, or removed.
     "accounts:user-set-role": {"PATCH": _demotion},
     "accounts:user-detail": {"DELETE": always},
+    # A sensitive override of an Economic Exposure input revoked (assurance.economics.
+    # revoke_api; docs/economics/spec-v1.md, section 35.5): the approval a receipt would
+    # be signed on taken away, as a claim's revoke takes a claim down. It only ever
+    # takes authority away. Its body is a remark at most: none, or a text note or
+    # reason. The view refuses no body, records the revocation as one insert, and
+    # reads only the override it names.
+    "deployment-economics-override-revoke": {"POST": _remark_only},
 }
 
 #: Not stops, but what an operator needs in order to make one, exempt the same
@@ -555,6 +585,27 @@ NOT_STOPS = {
         "taken without waiting (assurance.economics.capacity), and is answered 503 economics_capacity at once when "
         "none is free; no stop takes a slot",
     },
+    # The review and override routes a signed receipt needs (assurance.economics.
+    # report_api, spec section 35): economics records, append-only. A receipt is
+    # refused until a person other than the scenario's authors approves it, and until
+    # every material change of its inputs is approved by an override in force. None
+    # starts or stops work, an engine or an authority to act; nothing a stop or the
+    # decision reads.
+    "deployment-economics-scenario-reviews": {
+        "GET": _READ,
+        "POST": "records a person's review of an Economic Exposure scenario version: economics records, "
+        "append-only; it starts and stops nothing",
+    },
+    "deployment-economics-scenario-overrides": {
+        "GET": _READ,
+        "POST": "requests a sensitive override of a scenario version's input: economics records, append-only; it "
+        "starts and stops nothing",
+    },
+    "deployment-economics-override-approve": {
+        "POST": "approves a sensitive override: economics records, append-only; it starts and stops nothing",
+    },
+    # Revoking an override (deployment-economics-override-revoke) is a STOP: see
+    # STOP_ROUTES.
     # The remediation option and its ROI (assurance.economics.remediation_api, step
     # 13): one option recorded, its current and residual runs simulated, its
     # economics read. Economics records only.

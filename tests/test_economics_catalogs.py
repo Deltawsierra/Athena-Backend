@@ -75,6 +75,7 @@ from assurance.economics.models import (
     ScenarioBuild,
 )
 from assurance.models import Asset, Deployment, Finding
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_feeds import guard  # noqa: F401 - the socket guard, autouse here too
 from tests.test_economics_scenarios import _entry
 from tests.test_economics_validity_card import _raw, _signer, simulated
@@ -1330,6 +1331,9 @@ def test_a_figure_written_past_the_model_that_rests_on_enforcement_never_gets_a_
 
 
 def _issue(result):
+    # The human review a signed receipt needs (spec, section 35.4), by a colleague the
+    # fixtures made before the version was recorded.
+    approve_for_receipt(result)
     key = Ed25519PrivateKey.generate()
     ring = core.receipt_keyring([_raw(key)], other_roles={})
     return receipt_service.issue_receipt(result, signer=_signer(key), keyring=ring)

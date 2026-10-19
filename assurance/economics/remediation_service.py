@@ -715,7 +715,7 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
         "excluded_from_totals": why is not None,
         "banner_reason": why,
         "integrity": {"verified": not failed, "checks": list(ROI_CHECKS) + [
-            f"{side}:{check}" for side in ("current", "residual") for check in report.INTEGRITY_CHECKS
+            f"{side}:{check}" for side in ("current", "residual") for check in report.integrity_checks()
         ], "failed": failed},
         "limitations": list(ROI_LIMITATIONS),
     }
