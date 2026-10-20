@@ -1749,6 +1749,12 @@ class AssuranceClaim(models.Model):
         indexes = [
             models.Index(fields=["deployment", "status"]),
             models.Index(fields=["deployment", "claim_type"]),
+            # A deployment's CURRENT versions (``current()``: neither column set),
+            # found by key. Through the deployment index alone every read of the
+            # current claims -- the decision's, the re-derive's staleness pass --
+            # walked every version the deployment ever had, so its cost grew with
+            # the claims' history rather than with the claims (Phase 5 item 3).
+            models.Index(fields=["deployment", "valid_to", "effective_to"], name="assurance_claim_current"),
         ]
 
     def __str__(self) -> str:
