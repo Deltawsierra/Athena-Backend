@@ -3886,15 +3886,19 @@ stored rows:
 
 It is **signed on the path the backend's signed assurance receipts take**: the
 backend holds no signing key and asks the engine
-(`CyberEngineClient.sign_exposure_receipt`, `POST /api/economics/exposure-receipt/sign`,
-the operator credential, as `sign_assurance_receipt`). The envelope that comes back
+(`CyberEngineClient.sign_exposure_receipt`, `POST /api/economics/exposure-receipt/sign`).
+It presents the engine's receipt-signer credential, `CYBERENGINE_ECONOMICS_SIGNER_KEY`
+(`CyberEngineClient.for_receipt_signing`), which the engine accepts on that route
+alone, and never the operator credential (s28 audit, T10): with no signer key the
+receipt is `signer_unavailable` and nothing is sent. The envelope that comes back
 must be one signature over exactly the document's canonical bytes under the
 receipt's payload type (`envelope_not_over_receipt` otherwise), and it must VERIFY
 with core's verifier against the caller's `ReceiptKeyring` before anything is
 recorded (core's code otherwise): **no signature nobody has checked is ever recorded**
 (review round 1, M2). The keyring is required: it is built from the keyring the
 engine publishes at `GET /api/assurance/keyring` (athena-engine #88,
-`receipt_service.keyring_from_published`, or `engine_keyring` to fetch it): its
+`receipt_service.keyring_from_published`, or `engine_keyring` to fetch it, with the
+receipt-signer credential too): its
 `keys` are the artifact role's (evidence packs and assurance receipts) and its
 `roles` hold each other signing role's keyring in the same form (`keys` by key id,
 each a base64 `public_key` and a `status`), `economics-receipt` among them. That
@@ -4013,7 +4017,7 @@ returned as theirs, with their meaning, and none is published twice with another
 | `receipt_figure_unavailable` | one of the six figures does not exist for the run |
 | `system_fingerprint_unavailable` | the card names no fingerprint to bind |
 | `source_snapshot_mismatch` | a source snapshot's rows no longer give its content hash |
-| `signer_unavailable` | nothing could sign: the engine was not reached or timed out, has no key in the role (503), or serves no signing route |
+| `signer_unavailable` | nothing could sign: no receipt-signer key is configured here (`CYBERENGINE_ECONOMICS_SIGNER_KEY`; the operator key is never sent instead), the engine was not reached or timed out, has no key in the role or its signing sidecar is not running (503), or serves no signing route |
 | `receipt_refused_by_signer` | the signer read the receipt and refused it: core's code is carried beside (`signer_code`) where it is one of core's `MALFORMED_CODES`; any other code is shown in the detail, never carried as core's |
 | `envelope_not_over_receipt` | the signer returned something other than one signature over exactly the receipt |
 | `card_unavailable` | no card, and none could be issued |
@@ -4075,6 +4079,12 @@ why, as a code, and never raises out of a service.
   `ENGINE_ECONOMICS_RECEIPT_KEYRING`); an engine without them answers 503 and the
   receipt is `signer_unavailable`, recording nothing. Step 6's simulate route calls
   `issue_receipt` with `engine_keyring()` when the request asks for a receipt.
+- **The backend's signer credential (s28 audit, T10).** Both calls present
+  `CYBERENGINE_ECONOMICS_SIGNER_KEY`, a receipt-signer key the engine issues
+  (`start_engine.py --signer-key`) and accepts on the sign route alone. The owner
+  issues it on the engine and adds one settings line reading it from the
+  environment; until then every receipt is `signer_unavailable`. The operator key
+  is never sent for a receipt, and keeps every other call.
 - **No receipt for a run without a frequency**: core's schema requires an expected
   annual exposure, which such a run does not have (section 25.5), and none is
   estimated. Since step 6 a parameter-set version states the frequency (section

@@ -433,6 +433,32 @@ class CyberEngineClient:
             api_key=settings.CYBERENGINE_OPERATOR_KEY,
         )
 
+    @classmethod
+    def for_receipt_signing(cls):
+        """A client holding the engine's receipt-signer key, and never the operator key.
+
+        The engine issues that key for one route, ``POST
+        /api/economics/exposure-receipt/sign`` (athena-engine ``start_engine.py
+        --signer-key``), and refuses it on every other: it cannot scan, stop, pause,
+        approve or read anything but the public keyring. The receipt service signs
+        and fetches the keyring with this client alone (``receipt_service.engine_signer``
+        and ``engine_keyring``), so an analyst asking for a receipt no longer puts the
+        operator key in play. Every other call, the stop path's among them, keeps
+        :meth:`from_settings` and the operator key, unchanged.
+
+        Read by its literal setting name. With none configured this raises
+        ``RuntimeError``, as :meth:`from_settings` does for its own key, and the
+        receipt service answers that as it always has (``signer_unavailable``): it
+        never falls back to the operator key."""
+        signer_key = getattr(settings, "CYBERENGINE_ECONOMICS_SIGNER_KEY", "")
+        if not signer_key:
+            raise RuntimeError("CYBERENGINE_ECONOMICS_SIGNER_KEY is not configured")
+
+        if not settings.CYBERENGINE_URL:
+            raise RuntimeError("CYBERENGINE_URL is not configured")
+
+        return cls(base_url=settings.CYBERENGINE_URL, api_key=signer_key)
+
     def _read_json(self, resp: requests.Response, path: str, *, max_body: int | None = None) -> dict:
         """
         The body of a successful engine response, as the object it must be.
