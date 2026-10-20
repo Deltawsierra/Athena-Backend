@@ -499,9 +499,13 @@ def accepted_risk_signal(deployment: Deployment, *, now) -> dict:
     recorded with the decision so the first read after it recomputes
     (:func:`current_decision`). ``None`` when nothing here expires.
     """
+    # `deployment` is among the columns read. Read through the related manager, each
+    # row is handed the deployment it was read from by its `deployment_id`; deferred,
+    # that column was fetched back one query per accepted finding (Phase 5 item 3:
+    # 74 extra queries in one recompute of a deployment carrying 88 accepted risks).
     accepted = list(
         deployment.findings.filter(status=Finding.Status.ACCEPTED).only(
-            "uuid", "title", "severity", "risk_accepted_until", "risk_accepted_severity"
+            "uuid", "title", "severity", "risk_accepted_until", "risk_accepted_severity", "deployment"
         )
     )
     standing = [
@@ -1272,7 +1276,7 @@ def recompute_decision(
         # and no rule, as a pause does not.
         reads = not hold_pause and unrecomputed is None
         pin = _current_policy_pin() if reads else None
-        parts = read_decision_parts(locked, keyring=keyring) if reads else None
+        parts = _read_inputs_once(locked, keyring) if reads else None
         if unrecomputed is not None:
             decision = Deployment.Decision.PAUSED if hold_pause else _worse(in_force.decision, UNRECOMPUTED_HOLD)
         else:
@@ -1309,6 +1313,38 @@ def recompute_decision(
     # reading -- so publishing this instance next asks the log nothing.
     deployment.logged_revision = deployment.decision_revision
     return decision
+
+
+def _read_inputs_once(locked: Deployment, keyring) -> DecisionParts:
+    """:func:`read_decision_parts` for a recompute, with ``locked``'s component graph
+    read once for every reader of it.
+
+    Each reader -- the coverage manifest, the tool contracts in force, the route map,
+    effective access, the authority chains' graph, the effects that need a chain --
+    reads ``deployment.assets.all()`` and asks its caller to prefetch, and nothing
+    did; the authority chains and the chain outcomes each read the asset table again
+    for the route serving now. One recompute read that table nine times and fetched
+    each provider the route map named one query at a time (Phase 5 item 3). Read here
+    once -- the components with their providers, and the declared architecture --
+    under the row lock and inside the recompute's transaction, every reader reads one
+    moment of the graph, as :class:`DecisionParts` reads one moment of everything
+    else, and the route serving now is computed from it
+    (:func:`assurance.served_route.route_held`). ``locked`` is the recompute's own
+    row, read in this transaction, so no caller's earlier prefetch is read or left
+    behind. Only a recompute that reads inputs calls this: a pause, or a decision held
+    where no recompute could reach, reads nothing and costs nothing more."""
+    from django.db.models import Prefetch, prefetch_related_objects
+
+    from .models import Asset
+    from .served_route import route_held
+
+    prefetch_related_objects(
+        [locked],
+        Prefetch("assets", queryset=Asset.objects.select_related("provider")),
+        "declared_components",
+    )
+    with route_held(locked):
+        return read_decision_parts(locked, keyring=keyring)
 
 
 def hold_unrecomputed(deployment: Deployment, *, reason: str) -> str | None:
@@ -1436,7 +1472,15 @@ def _watches_read_since(deployment_id, since) -> bool:
     from django.db.models import Exists, OuterRef
 
     pending = LatentCondition.objects.filter(deployment_id=deployment_id, state=LatentCondition.State.PENDING)
-    left_behind = pending.filter(claim__in=AssuranceClaim.objects.closed()).filter(
+    # The claim versions are this deployment's (a condition's deployment is its
+    # claim's: assurance.latent.declare_condition), read through its index. Unscoped,
+    # `claim__in=AssuranceClaim.objects.closed()` and `.current()` were lists SQLite
+    # built by scanning every claim version of every deployment -- a refresh whose
+    # work grew with the whole database rather than with its own deployment (Phase 5
+    # item 3). The same scoping of the same kind of list in
+    # `conditions_the_decision_reads` is #176's, not this change's.
+    claims = AssuranceClaim.objects.filter(deployment_id=deployment_id)
+    left_behind = pending.filter(claim__in=claims.closed()).filter(
         Exists(
             AssuranceClaim.objects.current().filter(
                 deployment_id=OuterRef("deployment_id"), fingerprint=OuterRef("claim__fingerprint")
@@ -1446,7 +1490,7 @@ def _watches_read_since(deployment_id, since) -> bool:
     if left_behind.exists():
         return False
     return not (
-        pending.filter(claim__in=AssuranceClaim.objects.current())
+        pending.filter(claim__in=claims.current())
         .exclude(claim__status=AssuranceClaim.ClaimStatus.REVOKED)
         .filter(Q(last_evaluated_at__isnull=True) | Q(last_evaluated_at__lt=since))
         .exists()

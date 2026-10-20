@@ -1167,6 +1167,21 @@ overrides only the database, mail and throttling. The engine contract tests in
 The frontend's tests run with `npm test` (`node --test`, Node 22.6 or later):
 `frontend/src/lib/refresh-token.test.ts` and `frontend/src/lib/idempotency.test.ts`.
 
+### SPINE's query paths: the golden output and the database-size guard
+
+Claim derivation, the ripple traversal and the decision recompute were measured
+against a seeded corpus and made faster with identical outputs (Phase 5 item 3;
+`docs/performance/spine-queries.md` has the table and the method).
+`tests/test_spine_paths_publish_what_they_published.py` compares everything those
+paths publish and store -- and every set of decision inputs a recompute reads -- byte
+for byte with `tests/fixtures/spine_golden.json`, recorded from master before the
+change. `tests/test_spine_queries_follow_their_own_deployment.py` holds each path to
+its own deployment: the same statements with other deployments' data beside it, no
+`SCAN` of a deployment-owned table, and no read that visits another deployment's
+rows. `pytest tests/spine_measure.py::test_measure` repeats the measurements; its
+`test_record_golden` rewrites the fixture, so run it only on the code before an
+optimization.
+
 ## What a span carries, and the advisories this service tracks
 
 A span (`assurance/observability.py`) carries the deployment's primary key and
