@@ -89,7 +89,7 @@ from .models import (
 )
 from .legal import ruling_for_next_version
 from .receipt import build_assurance_receipt
-from .served_route import served_route_fingerprint
+from .served_route import route_held, served_route_fingerprint
 from . import evidence_audit as ea
 
 Status = AssuranceClaim.ClaimStatus
@@ -1191,7 +1191,11 @@ def _plan_derive(deployment, now) -> _Plan:
     plan.system_fp = compute_system_fingerprint(dep)
     plan.input_fps = claim_input_fingerprints(dep)
     plan.pol_version = policy_version(dep)
-    plan.receipt_digest = build_assurance_receipt(dep)["digest"]
+    # The route serving now, from the graph just prefetched, for the receipt's
+    # authority chains and chain outcomes: each read the asset table again for it
+    # (Phase 5 item 3). The same value, of the same moment as the rest of the plan.
+    with route_held(dep):
+        plan.receipt_digest = build_assurance_receipt(dep)["digest"]
     # Read once, before anything moves: a supersede below carries each fired
     # condition to the claim's new version, and the identity it holds is the same.
     plan.held = held_by_fired_conditions(dep)

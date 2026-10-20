@@ -530,6 +530,10 @@ _NOT_RULES = {
     ("assurance.consequential", "REASONS"): "the words shown beside an effect's code; nothing decides on them",
     ("assurance.consequential", "EFFECT_SCHEMA"): "the name of the document an effect's digest is taken over; "
     "no status is computed from it",
+    ("assurance.served_route", "_HELD"): "a per-reading memo (a contextvar, like assurance.latent's) that "
+    "holds the route serving now for the one instance a route_held block reads it from -- the same value "
+    "served_route_fingerprint computes from that instance's graph; nothing is decided from it, and changing "
+    "it changes no route, no fingerprint and no decision",
 }
 #: A spelling of one value -- a status, a basis, a kind, a route reading, a decision
 #: state. Renaming one renames a value; the sets, tables and orders that hold it --

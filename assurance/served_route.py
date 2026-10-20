@@ -78,6 +78,8 @@ often as discovery runs.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 
 from .receipt import ALGORITHM, _digest
@@ -353,11 +355,48 @@ def served_route_fingerprint(deployment, assets=None) -> str:
     return deployment_route_fingerprint(routes)
 
 
+#: ``(instance, route)`` for each deployment instance whose route a reading computed
+#: from the graph that instance holds -- set only for the length of that reading
+#: (:func:`route_held`).
+_HELD: contextvars.ContextVar[tuple] = contextvars.ContextVar("assurance_serving_route_held", default=())
+
+
 def serving_route_now(deployment) -> str:
     """:func:`served_route_fingerprint` in one query, providers joined -- the same
     value, for the reads that compare against it and the notes that record it,
-    which must never read it two different ways."""
+    which must never read it two different ways.
+
+    For the very instance a :func:`route_held` block holds, the route that block
+    computed from the graph the instance holds -- the same value, read once."""
+    for instance, route in _HELD.get():
+        if instance is deployment:
+            return route
     return served_route_fingerprint(deployment, deployment.assets.select_related("provider"))
+
+
+@contextlib.contextmanager
+def route_held(deployment):
+    """Answer :func:`serving_route_now` for this ``deployment`` instance from the graph
+    it already holds (its prefetched assets, providers with them), for the length of
+    the block.
+
+    For a reading that has the graph in hand at one moment -- a recompute's decision
+    inputs, read under its row lock from the graph it read once in that transaction;
+    a re-derive's plan, read from the deployment it prefetched -- and whose readers
+    each read the route again: the authority chains and the chain outcomes each
+    queried the whole asset table for it (Phase 5 item 3). The value is the one
+    :func:`serving_route_now` computes (:func:`served_route_fingerprint` over the same
+    rows), so nothing that compares with it reads it two ways.
+
+    Held for the INSTANCE, never for the deployment: any other instance of it --
+    the one a refresh this reading sets off reads, after another writer may have
+    committed, and notes the route of -- reads the route afresh. Only for an instance
+    whose prefetch is of the moment the block reads."""
+    token = _HELD.set(((deployment, served_route_fingerprint(deployment)), *_HELD.get()))
+    try:
+        yield
+    finally:
+        _HELD.reset(token)
 
 
 def note_route(deployment, *, now, fingerprint=None):
