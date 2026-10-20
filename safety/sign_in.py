@@ -43,6 +43,10 @@ with ``DEFENDER_TRUSTED_PROXY_COUNT`` unset is everyone's address). A stop does
 not need a password sign-in when its client presents the failsafe service token
 (safety.service_token); an operator already signed in keeps their session by
 refreshing (safety.refresh). The gateway still sees every sign-in.
+
+A successful sign-in is also emitted, once it commits, as a signed sign-in record an
+authority chain's ``authenticated_as`` hop is proven by (assurance.identity_emitter,
+authority chain short 2). A record that cannot be made never refuses the sign-in.
 """
 
 from __future__ import annotations
@@ -209,4 +213,23 @@ class SignInView(TokenObtainPairView):
                 address.give_back()
             except Exception:  # noqa: BLE001 - the sign-in succeeded; a count left over only expires
                 logger.exception("a successful sign-in's attempt could not be given back")
+            emit_sign_in_record(response)
         return response
+
+
+def emit_sign_in_record(response):
+    """Have the sign-in ``response`` answers emitted as a signed sign-in record
+    (:mod:`assurance.identity_emitter`, authority chain short 2), once it commits. The
+    sign-in is answered exactly as before whatever happens here: a record that cannot
+    be made is a record missing -- the chain hop it would prove reads unproven -- never
+    a sign-in refused (a stop client needs none: it presents the failsafe service
+    token on the stop itself)."""
+    try:
+        refresh = response.data.get("refresh") if isinstance(response.data, dict) else None
+        if not isinstance(refresh, str):
+            return
+        from assurance import identity_emitter
+
+        identity_emitter.after_commit(lambda: identity_emitter.emit_sign_in(refresh))
+    except Exception:  # noqa: BLE001 - the sign-in succeeded; only its record is missing
+        logger.exception("a successful sign-in's record could not be scheduled")

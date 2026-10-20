@@ -1,6 +1,10 @@
+import logging
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 
 class CustomUser(AbstractUser):
@@ -87,7 +91,11 @@ class RoleGrant(models.Model):
     username, never a foreign key, so removing an operator (a stop) neither cascades
     here nor writes anything. Written only on a promotion, never on a demotion, a
     deactivation or a removal; append-only. An account given its role before grants
-    were recorded has none, and no approval is refused for it by this rule."""
+    were recorded has none, and no approval is refused for it by this rule.
+
+    A grant that names its granter is also emitted, once it commits, as a signed
+    delegation record (assurance.identity_emitter, authority chain short 2); a record
+    that cannot be made never refuses the promotion."""
 
     id = models.BigAutoField(primary_key=True)
     account_pk = models.BigIntegerField(db_index=True)
@@ -104,7 +112,7 @@ class RoleGrant(models.Model):
     @classmethod
     def record(cls, account, granter) -> "RoleGrant":
         named = granter is not None and getattr(granter, "pk", None) is not None
-        return cls.objects.create(
+        grant = cls.objects.create(
             account_pk=account.pk,
             account_username=(account.get_username() or "")[:150],
             role=account.role,
@@ -113,6 +121,18 @@ class RoleGrant(models.Model):
             granted_by_username=(granter.get_username() or "")[:150] if named else "",
             granted_at=timezone.now(),
         )
+        # Signed, once the promotion commits, as a delegation record of the grant
+        # (assurance.identity_emitter, authority chain short 2). Only a promotion
+        # reaches here; the promotion stands whatever happens to its record. A grant
+        # that names nobody was delegated by nobody, and has no delegation record.
+        if named:
+            try:
+                from assurance import identity_emitter
+
+                identity_emitter.after_commit(lambda: identity_emitter.emit_role_grant(grant.pk))
+            except Exception:  # noqa: BLE001 - the promotion stands; only its record is missing
+                logger.exception("role grant %s's record could not be scheduled", grant.pk)
+        return grant
 
     @classmethod
     def latest_for(cls, account_id, at=None) -> "RoleGrant | None":

@@ -226,6 +226,56 @@ one hop of an authority chain that starts at a person:
 Both collectors are Mythos-run today (`witness: mythos`, the owner's 5 Oct scope
 call); a customer-run or third-party collector is planned.
 
+This backend emits both kinds itself (authority chain short 2, the owner's decision
+10; `assurance/identity_emitter.py`): until an identity provider is added as a second
+source, behind the same record format, the identity provider of record is this
+backend.
+
+- Each successful sign-in at `/api/token/` emits an `authentication` record on every
+  deployment: `person` and `principal` are the account, named
+  `athena-backend:<username>` (this backend knows the person only by the account they
+  proved they hold, and the prefix keeps the account from being read as a same-named
+  user of another identity provider -- a chain names it the same way),
+  `identity_provider` is `{issuer: athena-backend, protocol: password}`, the session
+  is the issued refresh token's `iat` to `exp`, and `assertion_digest` is `sha256:`
+  over the deployment and a digest of that refresh token. No password, token or key
+  is in a record. An account's sign-in is recorded on a deployment at most once a
+  minute (`SIGN_IN_RECORD_INTERVAL_SECONDS`): every record schedules its deployment's
+  decision refresh, which runs under the row lock a pause takes, and a successful
+  sign-in is counted against no attempt budget, so a burst of them adds one record
+  and one refresh per deployment per minute. A sign-in inside the minute is logged,
+  not recorded; a dispatch that presents its assertion reads unproven.
+- Each role promotion that names who granted it (`RoleGrant.record`) emits a
+  `delegation` record of the grant on every deployment: the granter delegated the
+  account (both named `athena-backend:<username>`) the scope
+  `athena-backend:role:<role>`, from the instant it was granted, with no end. A role
+  of this backend's, so named, is not an action a customer's tool performs: a
+  `delegates_to` hop over an effect's action is not proven by it
+  (`delegation_out_of_scope`). A promotion that names nobody emits none; a
+  demotion, a deactivation and a removal emit nothing (they are revokes), and the
+  token refresh emits nothing (it is how an operator keeps the session they press
+  stop from).
+- Each record is signed with a key of this backend's, a PEM (PKCS#8) Ed25519 private
+  key named by `ATHENA_SIGNIN_RECORD_KEY_FILE` (signed as `mythos-signin-collector`)
+  or `ATHENA_GRANT_RECORD_KEY_FILE` (as `mythos-grant-collector`), and is taken in
+  through the collectors' own intake, so it is recorded only if the outcome keyring
+  trusts that key under that name. To provision one:
+
+  ```sh
+  openssl genpkey -algorithm ed25519 -out signin-record.pem
+  chmod 600 signin-record.pem
+  openssl pkey -in signin-record.pem -pubout -outform DER | tail -c 32 | base64
+  ```
+
+  and add `{"engine": "mythos-signin-collector", "public_key": "<that base64>"}` to
+  the keyring file `ASSURANCE_OUTCOME_KEYRING` names (the same for the grant key,
+  under `mythos-grant-collector`). Two keys: the keyring refuses one key under two
+  engines.
+- A record that cannot be signed or recorded -- a key unset or unreadable, a key the
+  keyring does not trust, no keyring, a database fault -- never refuses the sign-in
+  or the promotion. It is logged (unset: INFO; anything else: ERROR) and the hop it
+  would have proven reads `unproven`, as with no record at all.
+
 A held Achilles signed still counts as demonstrated: the composition's own rule
 reads `ready`. What the chains contribute to the deployment decision is less.
 Where an approved workflow holds on an authorization check alone, or on a `held`
