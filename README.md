@@ -64,6 +64,15 @@ refresh token verifies, for an account that exists and is active, and has not
 been spent is exempt the same way; a refresh spends its token exactly once,
 however many refreshes of it arrive together (`safety/refresh.py`), so a used
 one is judged like any other bad token.
+A sign-out is a stop too: `POST /api/token/revoke/` with `{"refresh": ...}`
+revokes that refresh token for good (`safety/revoke.py`). It only takes access
+away, so for a token that verifies it is exempt the same way, and it is never
+refused: revoking a token already spent or revoked, or one of an operator since
+removed, is the same answer. It authenticates nothing else (a stale bearer header
+beside it cannot refuse it), and the failsafe service token is not taken on it.
+A token that does not verify is answered 401, writes nothing, and is not exempt.
+The athena-dashboard server sends it when a person's session ends: it signs each
+person in to this backend as themselves (T6), and so it holds their refresh tokens.
 A stop is recognised only in its canonical form: JSON or a URL-encoded form in
 UTF-8 or ASCII, at most 64 KiB, carrying only the stop's own fields and an
 optional `note` or `reason`. Anything else on those routes is not a stop. So the

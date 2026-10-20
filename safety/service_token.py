@@ -11,8 +11,8 @@ So a stop no longer needs a password sign-in. ``FAILSAFE_SERVICE_TOKEN`` is a
 pre-shared secret, like the engines' poll token, presented in the
 ``X-Failsafe-Service-Token`` header. It is accepted ONLY on a request that is a
 stop (safety.stops.is_stop) on a route a stop client relays stops on
-(:data:`SERVICE_ROUTES`: every stop route but the engines' poll and the two
-account routes), the three stop-lane reads included (failsafe:state, the
+(:data:`SERVICE_ROUTES`: every stop route but the engines' poll, the two
+account routes and the sign-out), the three stop-lane reads included (failsafe:state, the
 failsafe:commands list and a command's detail), and it authenticates as the
 account named by ``FAILSAFE_SERVICE_USER``, whose role the views check as they check any
 operator's. It is tried before any other authentication, so a stale bearer
@@ -75,10 +75,14 @@ MIN_TOKEN_LENGTH = 32
 
 #: The stop routes the token is accepted on: every one a stop client relays
 #: stops or reads the stop lane on. Not the engines' poll, which has its own
-#: token; and not the two account routes -- demoting or removing an operator is
+#: token; not the two account routes -- demoting or removing an operator is
 #: an admin's own act, made with their own session, and a stolen service token
-#: must not be able to remove every operator who could stop anything.
-SERVICE_ROUTES = frozenset(STOP_ROUTES) - {"failsafe:pending", "accounts:user-set-role", "accounts:user-detail"}
+#: must not be able to remove every operator who could stop anything; and not
+#: the sign-out (safety.revoke), which authenticates nobody: the refresh token
+#: it revokes is its only credential.
+SERVICE_ROUTES = frozenset(STOP_ROUTES) - {
+    "failsafe:pending", "accounts:user-set-role", "accounts:user-detail", "token_revoke",
+}
 
 #: A per-process key for the digests: it only makes the two sides one length,
 #: so it never needs to be shared or kept.
