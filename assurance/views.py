@@ -34,7 +34,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import achilles_results, gate_approval, identity_evidence, observability, observed_effects, observed_outcomes
+from . import gate_approval, identity_evidence, observability, observed_effects, observed_outcomes
 from .approval_history import note_approvals
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
@@ -2108,6 +2108,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         here is Achilles' signature, not who posted it. Evidence: it stops nothing.
 
         GET: the results recorded and the refusals, newest first, a page of each."""
+        # Imported here, not with this module: the URLconf loads on whatever request
+        # comes first, a stop included, and nothing of this route is loaded before it.
+        from . import achilles_results
+
         deployment = self.get_object()
         if request.method == "GET":
             return Response(achilles_results.listing(deployment, page_size=self.ACHILLES_RESULT_PAGE_SIZE))
@@ -2180,6 +2184,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         """Record ``refusal`` and answer it. The record is written in its own short
         write, after the refused one: a refusal is never undone with the write it
         refused."""
+        from . import achilles_results
+
         recorded = achilles_results.record_refusal(deployment, body, refusal)
         return Response(
             {

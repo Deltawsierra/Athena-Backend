@@ -614,3 +614,11 @@ def test_nothing_on_a_stop_path_imports_the_ingest():
                 elif isinstance(node, ast.ImportFrom):
                     names = [node.module or "", *(alias.name for alias in node.names)]
                 assert not any("achilles_results" in name for name in names), path
+    # Nor does the URLconf load it: the views import it inside its own route, so the
+    # first request -- which may be a stop -- loads nothing of it.
+    views = ast.parse((ROOT / "assurance" / "views.py").read_text(encoding="utf-8"))
+    for node in views.body:
+        if isinstance(node, ast.ImportFrom):
+            assert "achilles_results" not in [node.module or "", *(alias.name for alias in node.names)]
+        elif isinstance(node, ast.Import):
+            assert not any("achilles_results" in alias.name for alias in node.names)
