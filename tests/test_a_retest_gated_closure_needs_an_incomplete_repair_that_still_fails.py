@@ -363,7 +363,8 @@ def test_no_code_path_writes_a_findings_disposition_past_save():
     """A queryset ``update``/``bulk_update`` skips :meth:`Finding.save` and so the
     gate. None writes ``status`` or ``remediation_state`` on findings; the one
     literal CLOSED write is bom_drift's machine close of its own drift findings,
-    which never carry ``retest_required`` (only ingest writes that flag). And the
+    which never carry ``retest_required`` (the flag is written only by the two
+    sanctioned finding sources below, each through the gated save). And the
     save itself is the gate."""
     assert "enforce(" in inspect.getsource(Finding.save)
     assert "enforce(" in inspect.getsource(Finding.clean)
@@ -383,7 +384,15 @@ def test_no_code_path_writes_a_findings_disposition_past_save():
     closers = sorted(p.name for p, t in sources.items() if re.search(r"(?<![=!<>])=\s*Finding\.Status\.CLOSED\b", t))
     assert closers == ["bom_drift.py"]
     flaggers = sorted(p.name for p, t in sources.items() if re.search(r"[\"']retest_required[\"']\s*:|\.retest_required\s*=", t))
-    assert flaggers == ["ingest.py"]
+    # Two sanctioned finding sources write the flag, each only through the gated
+    # save. achilles_results.py (owner freeze exception 22) takes an Achilles scan's
+    # results in as findings, writing retest_required the way ingest.py does -- via
+    # get_or_create(defaults=...) and setattr + finding.save(update_fields=...), both
+    # through Finding.save and its enforce() gate. It closes no finding (it is not in
+    # ``closers``) and lowers the flag through no queryset update (the ``bypass`` scan
+    # above, unchanged, passes). Registering it is awareness of a real writer, not a
+    # relaxation of the close gate.
+    assert flaggers == ["achilles_results.py", "ingest.py"]
 
 
 # ------------------------------------------------ what is not a closure is untouched
