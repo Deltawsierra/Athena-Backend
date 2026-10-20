@@ -3947,3 +3947,113 @@ class IdentityEvidence(models.Model):
 
     def __str__(self) -> str:
         return f"{self.kind} record {self.outcome_id} ({self.principal})"
+
+
+# ---------------------------------------------------------------------------
+# Achilles scan results (owner freeze exception 22, second half)
+# ---------------------------------------------------------------------------
+
+
+class AchillesScanRewriteRefused(ValueError):
+    """A recorded Achilles scan result, or a recorded refusal of one, was asked to
+    change or go away. Both are append-only: a later scan is a new record."""
+
+
+class AchillesScanResult(models.Model):
+    """One Achilles scan result this deployment took in (:mod:`assurance.achilles_results`).
+
+    Written only by the achilles-scan-results route, after the envelope Achilles'
+    scan-result key signed verified against the keyring, named this deployment, and
+    named by its evidence digest the result document posted beside it. Both are kept
+    whole. ``grading`` records, per scenario result, what the ingest made of it: a
+    finding (and which), no finding (a pass), or INFORMATIONAL -- a result whose
+    capability Achilles has not been screened for, which grades nothing.
+
+    APPEND-ONLY. One record per scan per deployment, and one per signed outcome.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="achilles_scan_results")
+    # The signed outcome: unique, so a replay of one outcome is refused here as it is
+    # on every other signed route.
+    outcome_id = models.CharField(max_length=32, unique=True)
+    # The Achilles scan (its job id) and the release that ran it, as signed.
+    scan_id = models.CharField(max_length=200)
+    release = models.CharField(max_length=200)
+    observer_engine = models.CharField(max_length=64)
+    observer_key_id = models.CharField(max_length=64)
+    evidence_digest = models.CharField(max_length=71)
+    # completed / aborted / failed, as the signed document says.
+    scan_status = models.CharField(max_length=16)
+    observed_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+    envelope = models.JSONField()
+    # The mythos.achilles-scan-result/v1 document whose digest the signed outcome names.
+    document = models.JSONField()
+    grading = models.JSONField(default=list)
+
+    class Meta:
+        ordering = ["deployment", "-observed_at", "-id"]
+        constraints = [
+            # A scan is recorded once, whatever outcome id a re-signing gives it.
+            models.UniqueConstraint(fields=["deployment", "scan_id"], name="uq_achilles_scan_per_deployment"),
+        ]
+        indexes = [models.Index(fields=["deployment", "observed_at"], name="assurance_achilles_observed")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise AchillesScanRewriteRefused("A recorded Achilles scan result is never rewritten.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AchillesScanRewriteRefused("A recorded Achilles scan result is never deleted.")
+
+    def __str__(self) -> str:
+        return f"Achilles scan {self.scan_id} ({self.release}) for deployment {self.deployment_id}"
+
+
+class AchillesScanRefusal(models.Model):
+    """One Achilles scan result this deployment REFUSED, and why.
+
+    Written by the achilles-scan-results route for every refusal, outside the write it
+    refused, so nothing of the result is recorded but the reason. What a refused
+    envelope claims is untrusted: its outcome and scan ids are kept only when its
+    signature verified, and the envelope itself only by digest.
+    """
+
+    class Code(models.TextChoices):
+        UNSIGNED = "unsigned", "Unsigned: no signature this deployment can verify"
+        TAMPERED = "tampered", "Tampered: the signature or the signed digest does not match"
+        WRONG_SIGNER = "wrong_signer", "Signed by a key that is not Achilles' scan-result key"
+        WRONG_TENANT = "wrong_tenant", "Signed for another deployment"
+        REPLAYED = "replayed", "Replayed or stale"
+        MALFORMED = "malformed", "Not a scan result this deployment can read"
+        KEYRING_UNAVAILABLE = "keyring_unavailable", "No keyring to verify against"
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="achilles_scan_refusals")
+    received_at = models.DateTimeField(default=timezone.now)
+    code = models.CharField(max_length=32, choices=Code.choices)
+    reason = models.TextField()
+    # sha256 over the posted envelope's canonical JSON; blank when none was posted.
+    envelope_digest = models.CharField(max_length=71, blank=True)
+    # The key id the envelope names, as claimed.
+    key_id = models.CharField(max_length=80, blank=True)
+    # Only when the signature verified.
+    outcome_id = models.CharField(max_length=32, blank=True)
+    scan_id = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["deployment", "-received_at", "-id"]
+        indexes = [models.Index(fields=["deployment", "received_at"], name="assurance_achilles_refused")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise AchillesScanRewriteRefused("A recorded refusal is never rewritten.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AchillesScanRewriteRefused("A recorded refusal is never deleted.")
+
+    def __str__(self) -> str:
+        return f"refused Achilles scan result ({self.code}) for deployment {self.deployment_id}"

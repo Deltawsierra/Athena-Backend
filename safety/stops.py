@@ -504,6 +504,11 @@ NOT_STOPS = {
     "deployment-observed-effects": {
         "POST": "the observed-effect service records a signed observed effect: evidence, and it stops nothing"
     },
+    "deployment-achilles-scan-results": {
+        "GET": _READ,
+        "POST": "records a signed Achilles scan result as findings (assurance.achilles_results): evidence, and it "
+        "starts and stops nothing",
+    },
     "deployment-approval-in-force": {
         "GET": "the Action Gate reads a workflow's approval in force (assurance.gate_approval): a read, and it "
         "starts and stops nothing"

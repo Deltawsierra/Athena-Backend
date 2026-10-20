@@ -184,6 +184,69 @@ def _observe_the_effect_a_chain_cites():
     return dep, write
 
 
+def _record_an_achilles_failure():
+    """Achilles' scan-result key signs a critical failure of a capability screened for
+    the release that found it (assurance.achilles_results): the finding it makes takes
+    a deployment a clean scan left READY to not recommended."""
+    from unittest import mock
+
+    from assurance import achilles_results
+
+    dep = _scanned()
+    observed = datetime.now(dt_timezone.utc) - timedelta(minutes=1)
+    document = {
+        "schema": achilles_results.DOCUMENT_SCHEMA,
+        "deployment": str(dep.uuid),
+        "scan_id": "scan-meta",
+        "release": "1.4.0",
+        "observed_at": observed.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "status": "completed",
+        "evidence_pack": {"pack_head": "ab" * 32, "anchored": True},
+        "results": [
+            {
+                "scenario_id": "goal_hijack.direct",
+                "capability": "goal_hijack",
+                "verdict": "fail",
+                "severity": "critical",
+                "evidence_tier": "authority_violation",
+                "confidence": 0.65,
+                "title": "Direct goal hijack",
+                "implication": "",
+                "recommendation": "",
+            }
+        ],
+    }
+    envelope = oc.sign_outcome(
+        oc.build_outcome(
+            deployment=str(dep.uuid),
+            workflow=achilles_results.WORKFLOW,
+            status=oc.HELD,
+            engine=achilles_results.SIGNER,
+            engine_version="1.4.0",
+            run_id="scan-meta",
+            evidence_digest=oc.evidence_digest_of(document),
+            observed_at=observed,
+        ),
+        ENGINE_KEYS[achilles_results.SIGNER],
+    )
+    screen = {
+        "goal_hijack": achilles_results.Screen(
+            validity_card="sha256:" + "1" * 64,
+            answer_key="sha256:" + "2" * 64,
+            passed=True,
+            releases=frozenset({"1.4.0"}),
+        )
+    }
+
+    def write(caller):
+        with mock.patch.object(achilles_results, "SCREENED", screen):
+            return caller.post(
+                _base(dep) + "achilles-scan-results/", {"envelope": envelope, "result": document}, format="json"
+            )
+
+    return dep, write
+
+
 def _prove_the_person_hop_a_chain_still_lacks(kind):
     """The sign-in (or grant) collector posts the one record a person-started chain
     still lacks: every other hop is proven, the observed effect included, so its
@@ -459,6 +522,9 @@ MOVES = {
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
     ("DeploymentViewSet", "observed_chain_outcomes", "post"): _sign_a_violation,
     ("DeploymentViewSet", "observed_effects", "post"): _observe_the_effect_a_chain_cites,
+    # A signed Achilles scan result's screened failure is a finding (owner freeze
+    # exception 22); the findings and the refresh are one transaction.
+    ("DeploymentViewSet", "achilles_scan_results", "post"): _record_an_achilles_failure,
     ("DeploymentViewSet", "authentications", "post"): lambda: _prove_the_person_hop_a_chain_still_lacks(
         "authentication"
     ),

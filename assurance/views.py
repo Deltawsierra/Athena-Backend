@@ -21,7 +21,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import ParseError, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 
@@ -34,7 +34,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import gate_approval, identity_evidence, observability, observed_effects, observed_outcomes
+from . import achilles_results, gate_approval, identity_evidence, observability, observed_effects, observed_outcomes
 from .approval_history import note_approvals
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
@@ -2082,6 +2082,112 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 "evidence_kind": EVIDENCE_OBSERVED_EFFECT,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+    #: How many recorded results, and how many refusals, one read returns.
+    ACHILLES_RESULT_PAGE_SIZE = 50
+
+    @action(
+        detail=True,
+        methods=["get", "post"],
+        url_path="achilles-scan-results",
+        # JSON only, as on the signed-outcome route: a form body is no signed result.
+        parser_classes=[SafeJSONParser],
+    )
+    def achilles_scan_results(self, request, uuid=None):
+        """Take in one Achilles scan result as findings (:mod:`assurance.achilles_results`).
+
+        ``{"envelope": <DSSE envelope>, "result": <mythos.achilles-scan-result/v1>}``.
+        The envelope must be signed by Achilles' scan-result key for THIS deployment and
+        name the result by its digest. Every refusal (unsigned, tampered, wrong signer,
+        wrong tenant, replayed, malformed, no keyring) is recorded with why and answered
+        400 (503 without a keyring), and nothing else of the result is recorded. A result
+        of a capability Achilles has not been screened for is recorded as informational
+        and makes no finding. The findings, the result row and the decision they move
+        commit together. Admin-only, like the signed-outcome route: what makes a finding
+        here is Achilles' signature, not who posted it. Evidence: it stops nothing.
+
+        GET: the results recorded and the refusals, newest first, a page of each."""
+        deployment = self.get_object()
+        if request.method == "GET":
+            return Response(achilles_results.listing(deployment, page_size=self.ACHILLES_RESULT_PAGE_SIZE))
+        _require_admin(request)
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"body": "Content-Length is not a number"}) from None
+        if declared > achilles_results.MAX_BODY_BYTES:
+            return Response(
+                {"error": "the request is larger than one signed scan result can be"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
+            return Response(
+                {"error": "a signed scan result is posted as application/json"},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
+        try:
+            body = request.data
+        except ParseError as exc:
+            refusal = achilles_results.Refusal(achilles_results.Code.MALFORMED, f"the body is not JSON: {exc}")
+            return self._achilles_refused(deployment, None, refusal, status.HTTP_400_BAD_REQUEST)
+        try:
+            keyring = observed_outcomes.load_keyring()
+        except observed_outcomes.KeyringUnavailable as exc:
+            refusal = achilles_results.Refusal(achilles_results.Code.KEYRING_UNAVAILABLE, str(exc))
+            return self._achilles_refused(deployment, body, refusal, status.HTTP_503_SERVICE_UNAVAILABLE)
+        now = timezone.now()
+        # Every check that needs no row, before any transaction opens: the signature,
+        # the signer, the deployment, the clock, the document and the screen.
+        examined = achilles_results.examine(deployment, body, keyring=keyring, now=now)
+        if isinstance(examined, achilles_results.Refusal):
+            return self._achilles_refused(deployment, body, examined, status.HTTP_400_BAD_REQUEST)
+        refusal = None
+        try:
+            # The findings, the result row and the decision they move commit together,
+            # as on the signed-outcome route: a refresh that fails takes them with it,
+            # and the engine's retry of the same envelope is then no replay.
+            with transaction.atomic():
+                recorded = achilles_results.record(deployment, examined, now=now)
+                if isinstance(recorded, achilles_results.Refusal):
+                    refusal = recorded
+                else:
+                    _refresh_stored_decision(deployment)
+        except achilles_results.RecordRaced as exc:
+            refusal = exc.refusal
+        if refusal is not None:
+            return self._achilles_refused(deployment, body, refusal, status.HTTP_400_BAD_REQUEST)
+        row, findings = recorded
+        return Response(
+            {
+                "recorded": 1,
+                "outcome_id": row.outcome_id,
+                "scan_id": row.scan_id,
+                "release": row.release,
+                "scan_status": row.scan_status,
+                "evidence_digest": row.evidence_digest,
+                "findings": [str(f.uuid) for f in findings],
+                "informational": [
+                    g for g in row.grading if g["disposition"] == achilles_results.DISPOSITION_INFORMATIONAL
+                ],
+                "grading": row.grading,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @staticmethod
+    def _achilles_refused(deployment, body, refusal, answer_status):
+        """Record ``refusal`` and answer it. The record is written in its own short
+        write, after the refused one: a refusal is never undone with the write it
+        refused."""
+        recorded = achilles_results.record_refusal(deployment, body, refusal)
+        return Response(
+            {
+                "recorded": 0,
+                "refused": {"code": str(refusal.code), "reason": refusal.reason},
+                "refusal_recorded": recorded,
+            },
+            status=answer_status,
         )
 
     @action(
