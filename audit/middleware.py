@@ -16,10 +16,22 @@ from django.core.exceptions import RequestDataTooBig
 from django.http import JsonResponse, UnreadablePostError
 from urllib3.exceptions import HTTPError as Urllib3Error
 
-from safety import outbound
+from assurance.oplog import log_later
+from safety import collection, outbound
 from safety.stops import is_stop
 
 logger = logging.getLogger(__name__)
+
+
+def _let_go(hold):
+    """Let a stop's collector hold go, never raising into the stop: what goes
+    wrong is logged from the log thread (a stop's own thread never waits on a
+    log sink), and a hold that stays held is withdrawn at HOLD_LIMIT."""
+    try:
+        hold()
+    except Exception:  # noqa: BLE001 - a stop is answered whatever letting its hold go does
+        log_later(logging.ERROR, "a stop's garbage-collector hold could not be let go; it is withdrawn "
+                  "at safety.collection.HOLD_LIMIT", exc=True, logger_name=__name__)
 
 
 class RequestMetadataMiddleware:
@@ -1170,6 +1182,7 @@ class DefenderMiddleware:
 
     def __call__(self, request):
         if request.path.startswith(SKIP_PREFIXES):
+            collection.withdraw_if_held_too_long()
             return self.get_response(request)
 
         # A stop is never put to the engine, so no engine -- slow, trickling,
@@ -1177,9 +1190,36 @@ class DefenderMiddleware:
         # Judging it is cheap and bounded: it runs before authentication, reads
         # at most 64 KiB of a UTF-8 or ASCII body, and anything else on a stop
         # route is not a stop and comes on here (safety.stops).
+        #
+        # Nor does a stop wait on the garbage collector: a full collection
+        # passes over the whole process heap, and one that started inside a
+        # stop held it 0.23 to 0.31 s (safety.collection). The collector is
+        # held off from here until the stop's response is closed or dropped.
+        # The hold is never a reason a stop is not served: if it cannot be
+        # taken, the stop is served without it; if its release cannot be
+        # attached, it is let go at once; and if letting go fails, the stop is
+        # still answered (HOLD_LIMIT bounds a hold nobody let go).
         if is_stop(request):
-            return self.get_response(request)
+            try:
+                hold = collection.hold_for_a_stop()
+            except Exception:  # noqa: BLE001 - a stop is served without the hold rather than not at all
+                log_later(logging.ERROR, "the garbage-collector hold for a stop could not be taken; "
+                          "the stop is served without it", exc=True, logger_name=__name__)
+                return self.get_response(request)
+            try:
+                response = self.get_response(request)
+            except BaseException:
+                _let_go(hold)
+                raise
+            try:
+                collection.let_go_when_answered(response, hold)
+            except Exception:  # noqa: BLE001 - the stop has its answer; the hold is let go now instead
+                log_later(logging.ERROR, "the release of a stop's garbage-collector hold could not be "
+                          "attached to its response; it is let go now", exc=True, logger_name=__name__)
+                _let_go(hold)
+            return response
 
+        collection.withdraw_if_held_too_long()
         meta = getattr(request, "audit_metadata", {})
         body, body_problem = self._get_body(request)
         # The query string was copied through with no redaction at all, so

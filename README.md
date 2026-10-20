@@ -73,6 +73,14 @@ all, and is allowed without a decision after that. A hostile engine can hold
 all `DEFENDER_MAX_IN_FLIGHT` call slots; every other request then waits out its
 deadline and is allowed, and stops are unaffected.
 
+Nor does a stop wait on Python's garbage collector (`safety/collection.py`). A
+full collection passes over the whole process heap, and one that started inside a
+stop held it 0.23 to 0.31 s. The collector is held off from the moment a request
+is judged a stop until its response is closed (or, never closed, dropped); the
+last stop to let go collects the young generations, and the collector runs
+again. A hold lasts at most `safety.collection.HOLD_LIMIT` (5 s) without a break,
+so overlapping stops or a response nobody closes cannot switch it off for good.
+
 ### The failsafe service token
 
 A stop client should not need a password sign-in to stop: sign-in is not a
