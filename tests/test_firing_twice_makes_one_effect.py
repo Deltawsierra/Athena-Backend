@@ -1496,7 +1496,9 @@ def test_an_exposure_receipt_issued_twice_is_one_row_and_one_signature(engine):
     """Economics step 8: the receipt is signed on the engine's path, as the assurance
     receipt is. An engine that serves no such route signs nothing and nothing is
     recorded; once it signs, the receipt is one row per result, and issuing it
-    again returns that row without asking the engine."""
+    again returns that row without asking the engine. Every request to sign it
+    carries the engine's receipt-signer key (s28 audit, T10), never the operator
+    key (tests/conftest.py sets the synthetic signer key for every test)."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from assurance.economics import receipt_service
@@ -1522,6 +1524,10 @@ def test_an_exposure_receipt_issued_twice_is_one_row_and_one_signature(engine):
     assert first.created and not again.created and again.receipt.pk == first.receipt.pk
     assert engine.count("POST", "/api/economics/exposure-receipt/sign") == 2  # the 404, then the one signature
     assert FinancialExposureReceipt.objects.count() == 1
+    presented = [headers.get("X-API-Key") for method, path, headers in engine.headers
+                 if (method, path) == ("POST", "/api/economics/exposure-receipt/sign")]
+    assert presented == [django_settings.CYBERENGINE_ECONOMICS_SIGNER_KEY] * 2
+    assert django_settings.CYBERENGINE_OPERATOR_KEY not in presented
 
 
 # ===========================================================================

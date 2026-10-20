@@ -236,6 +236,28 @@ def _economics_row_key():
         os.environ["ATHENA_ECONOMICS_ROW_KEY"] = before
 
 
+#: The engine receipt-signer key every test runs with (s28 audit, T10): SYNTHETIC, for
+#: tests only. A deployment that signs receipts sets ``CYBERENGINE_ECONOMICS_SIGNER_KEY``
+#: beside ``CYBERENGINE_OPERATOR_KEY``, and every test runs with the operator key set,
+#: so every test runs with this one set too. A receipt is signed with this key and
+#: never with the operator key. A test of the key-less behaviour overrides it to "".
+TEST_ECONOMICS_SIGNER_KEY = "synthetic-test-receipt-signer-key-for-ci-only-0000"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _economics_signer_key():
+    """``CYBERENGINE_ECONOMICS_SIGNER_KEY`` set for the whole run, as a deployment that
+    signs receipts sets it. It is a Django setting, read by its literal name
+    (``CyberEngineClient.for_receipt_signing``), so it is set as an override of the
+    test settings, under every override a test makes of its own."""
+    from django.test import override_settings
+
+    signer = override_settings(CYBERENGINE_ECONOMICS_SIGNER_KEY=TEST_ECONOMICS_SIGNER_KEY)
+    signer.enable()
+    yield TEST_ECONOMICS_SIGNER_KEY
+    signer.disable()
+
+
 @pytest.fixture
 def engine_keyring(tmp_path, monkeypatch):
     """Configure an outcome keyring that trusts :data:`tests.signed_chains.ENGINE_KEYS`,
