@@ -8,7 +8,9 @@ the table is docs/performance/spine-queries.md):
   the watches read, the decision brought current) asked whether its watches were read
   through ``claim__in=AssuranceClaim.objects.closed()`` and ``.current()`` -- lists
   SQLite built by scanning every claim version of EVERY deployment, so the refresh
-  of one deployment cost more for every other deployment's claims;
+  of one deployment cost more for every other deployment's claims (the same kind of
+  list in ``conditions_the_decision_reads``, on every decision path, is #176's,
+  merged at cf14de0; the database-size test below holds it too);
 - a recompute read the deployment's accepted risks through the related manager with
   ``deployment`` deferred, and Django fetched it back one query per accepted
   finding: 130 statements for a deployment carrying 88 accepted risks, 56 without;
@@ -20,7 +22,8 @@ the table is docs/performance/spine-queries.md):
 
 Each assertion below is deterministic: statement counts, the tables a statement's
 EXPLAIN QUERY PLAN reads whole (``SCAN``), and the exact SQLite VM steps a statement
-takes, compared within one run -- never wall time. Every one fails on a32f63a.
+takes, compared within one run -- never wall time. Every one fails on master
+cf14de0 (and on a32f63a, where this was measured).
 """
 
 from __future__ import annotations
@@ -40,20 +43,13 @@ SMALL = sc.Shape(agents=2, tools=3, data_stores=1, findings=6, versions=1, claim
 #: condition holding its claim, an authority chain, accepted risks, an open retest.
 TARGETS = (3, 4)
 
-#: #176 scopes the list of closed claim versions in
-#: ``assurance.decision.conditions_the_decision_reads`` (still read across every
-#: deployment on a32f63a) -- that change's, not this one's. Every OTHER statement of
-#: the decision paths is held to its own deployment here; once #176 lands this
-#: statement is too, and the exception matches nothing that scans.
-SCOPED_BY_176 = "conditions_the_decision_reads"
-
 #: The VM steps a statement that reads only its own deployment's rows may take more
 #: once other deployments' rows sit beside them in an index: the comparison that ends
 #: its key range now lands on a neighbour's entry instead of the end of the index --
 #: one step per range end. The four deployments built beside the targets add dozens
 #: of rows to every table these statements read; reading even one of them costs more
-#: (a step to move to it, one per column it reads, one to compare it), and the list
-#: #176 scopes costs over a hundred more.
+#: (a step to move to it, one per column it reads, one to compare it), and an
+#: unscoped list of claim versions costs over a hundred more.
 RANGE_END = 2
 
 
@@ -96,7 +92,7 @@ def _shape(sql: str) -> str:
 
 def _read(fn, pk, tables) -> list[dict]:
     fn(pk)  # what a change left is done by the first call; the second is the path's own cost
-    return sc.each_statement(sc.measure(lambda: fn(pk), origins=True), tables)
+    return sc.each_statement(sc.measure(lambda: fn(pk)), tables)
 
 
 # ------------------------------------------------------------------ database size
@@ -117,8 +113,6 @@ def test_no_path_does_more_work_for_other_deployments_data(corpus):
         # The same statements: nothing is read once per other deployment.
         assert [_shape(s["sql"]) for s in after] == [_shape(s["sql"]) for s in before], key
         for b, a in zip(before, after):
-            if SCOPED_BY_176 in a["origins"]:
-                continue
             # No statement reads a table of deployment-owned rows whole...
             assert not a["scans"], (key, a["scans"], a["sql"][:400])
             # ...and no read visits a row of theirs, by any index.

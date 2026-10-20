@@ -7,8 +7,10 @@ recompute improve against a measured baseline **with identical outputs**, a
 golden-output test guarding correctness, and no datastore change without a profile
 that justifies it.
 
-This page is the baseline (master `a32f63a`), what it showed, what changed because
-of it, the same measurements after, and how to repeat them.
+This page is the baseline (master `a32f63a`, where this was measured), what it
+showed, what changed because of it, the same measurements against master `cf14de0`
+(which merged #176, scoping one of the lists the baseline found) and after, and how
+to repeat them.
 
 ## Method
 
@@ -59,9 +61,10 @@ every finding an accepted risk -- the profile the accepted-risk read is sized by
   host load;
 - **CPU** -- `time.process_time` of the path, 15 runs per measurement, three
   measurements per tree, base and head alternating on the same seeds. The host is
-  shared (4 CPUs, load 2.5-4.6 during the runs); `process_time` excludes waiting
-  but not cache and frequency contention. The CPU column is supporting evidence; the
-  deterministic columns are the result.
+  shared (4 CPUs; load 2.5-4.6 during the a32f63a series, 1.8-2.2 during the
+  cf14de0 series); `process_time` excludes waiting but not cache and frequency
+  contention. The CPU column is supporting evidence; the deterministic columns are
+  the result.
 
 **Growth.** *With others*: the same target measured again after 7 more deployments
 of the same shape (9 in all). *With history*: measured again after 30 re-derives
@@ -85,18 +88,24 @@ forth -- 60 more claim versions (24 to 84 claim rows), the current graph unchang
 | all-accepted | refresh (another writer's decision) | **290** | 62,400 | 107.3 |
 | all-accepted | `decision_support` | **125** | 25,700 | 45.1 |
 
-Growth (base / head; statements never grew with other deployments on either):
+Growth, as `a32f63a` / `cf14de0` / head. No path's statement count grew with
+other deployments on any tree; "claims" is a full scan of the claim table (every
+version of every deployment) somewhere on the path. VM-step totals are ±100.
 
 | target | path | +others: VM steps | +others: full scans | +history: VM steps |
 |---|---|---|---|---|
-| critical-open | `derive_claims` | -100 / -100 | none / none | +700 / +600 |
-| critical-open | `assess_ripple` | -200 / -200 | none / none | +0 / +0 |
-| critical-open | `recompute_decision` | +800 / +700 | claims / claims (#176) | +3,200 / +2,600 |
-| critical-open | refresh (backstop) | +1,000 / +1,100 | claims / claims (#176) | +6,300 / +4,200 |
-| critical-open | refresh (another writer's decision) | +2,500 / +1,400 | claims / claims (#176) | +10,500 / +6,900 |
-| all-accepted | `recompute_decision` | +1,200 / +1,100 | claims / claims (#176) | +3,700 / +3,000 |
-| all-accepted | refresh (backstop) | +1,200 / +600 | claims / claims (#176) | +6,900 / +4,600 |
-| all-accepted | refresh (another writer's decision) | +3,100 / +2,100 | claims / claims (#176) | +12,100 / +8,200 |
+| critical-open | `derive_claims` | -100 / -100 / -100 | none / none / none | +700 / +700 / +600 |
+| critical-open | `assess_ripple` | -200 / -200 / -200 | none / none / none | +0 / +0 / +0 |
+| critical-open | `recompute_decision` | +800 / -100 / -200 | claims / none / none | +3,200 / +2,500 / +1,600 |
+| critical-open | refresh (backstop) | +1,000 / +100 / +400 | claims / none / none | +6,300 / +5,400 / +3,200 |
+| critical-open | refresh (another writer's decision) | +2,500 / +700 / -300 | claims / claims / none | +10,500 / +8,900 / +4,900 |
+| critical-open | `decision_support` | +500 / -400 / -100 | claims / none / none | +2,800 / +2,000 / +1,300 |
+| all-accepted | `derive_claims` | +0 / +0 / +0 | none / none / none | +1,200 / +1,200 / +800 |
+| all-accepted | `assess_ripple` | +100 / +100 / +100 | none / none / none | +200 / +200 / +200 |
+| all-accepted | `recompute_decision` | +1,200 / +300 / +100 | claims / none / none | +3,700 / +2,600 / +1,600 |
+| all-accepted | refresh (backstop) | +1,200 / +400 / -200 | claims / none / none | +6,900 / +5,800 / +3,300 |
+| all-accepted | refresh (another writer's decision) | +3,100 / +1,400 / +400 | claims / claims / none | +12,100 / +9,900 / +5,500 |
+| all-accepted | `decision_support` | +900 / +100 / -100 | claims / none / none | +3,300 / +2,300 / +1,600 |
 
 Attributed statement by statement (`tests/spine_corpus.py: each_statement`), the
 baseline showed five things, and only these were changed:
@@ -108,9 +117,10 @@ baseline showed five things, and only these were changed:
    deployment (`LIST SUBQUERY`, `SCAN U0`). With 6 small deployments beside the
    target, those two statements went from 160 and 80 VM steps to 770 and 160 (one
    target and six other deployments of the larger probe shape). A
-   third such list, in `conditions_the_decision_reads`, is scoped by #176 (open), not
-   here -- it is the `claims (#176)` scan left in the table above, and the only
-   statement of these paths whose work still grows with other deployments.
+   third such list, in `conditions_the_decision_reads`, on every decision path, is
+   #176's (merged at `cf14de0`) and is not changed here; it is the scan that
+   disappears from every path but the rollout refresh between `a32f63a` and
+   `cf14de0` in the table above. The database-size test below holds it too.
 2. **An N+1 on accepted risks.** `accepted_risk_signal` read the deployment's accepted
    findings through the related manager with `.only(...)`, which defers
    `deployment_id`; Django reads that column to hand each row its deployment, so it
@@ -153,8 +163,8 @@ Measured and **not** changed, because nothing in them was slow for its inputs:
   only. Applying the graph read once there, on a copy of the instance (as
   `edge_history.edges_now` does), is a follow-up.
 
-**No datastore change.** After this change every statement of these paths, on every
-table, is a keyed search except #176's; roughly a third of a path's CPU is spent
+**No datastore change.** After this change (with #176) every statement of these
+paths, on every table, is a keyed search; roughly a third of a path's CPU is spent
 compiling and issuing SQL (cProfile of `derive_claims` on the realistic deployment:
 `execute_sql` 0.200 s of 0.613 s over five runs); the rest is Python. Nothing here
 points at the store.
@@ -173,7 +183,8 @@ Correctness: `tests/test_spine_paths_publish_what_they_published.py` builds the
 six-deployment corpus, runs derivation, the ripple traversal and the decision
 recompute over every deployment (the writer, the backstop's refresh and the refresh
 of another writer's decision), and compares, byte for byte with
-`tests/fixtures/spine_golden.json` recorded from master `a32f63a`: every claim
+`tests/fixtures/spine_golden.json` recorded from master `a32f63a` (recorded again
+from `cf14de0`, it is byte-identical: #176 changes no output here): every claim
 version, claim event, stored weighing, retest, latent condition, decision
 transition and deployment decision column; the ripple assessment, the
 decision-support payload and the assurance receipt; and every set of decision
@@ -182,35 +193,36 @@ signal). Foreign keys are published as the uuid or username of the row they name
 never as autoincrement ids. A deliberately wrong prefetch (one that hides the tools
 from the recompute's readers) and a wrong held route each fail it; every
 optimization above passes it unchanged, and reverting any one of them turns its own
-test red (nine mutations, each caught by the tests named above).
+test red (nine mutations, each caught by the tests named above). Reverting #176's
+scoping on the merged head turns the database-size test red as well.
 
-## After (head)
+## After: master cf14de0 against the head
 
-| target | path | statements | VM steps | CPU ms (median, min-max of 3) |
+| target | path | statements | VM steps | CPU ms (median; min-max of 3, master / head) |
 |---|---|---|---|---|
-| critical-open | `derive_claims` | 50 → 48 | 26,400 → 21,100 (-20%) | 44.9 → 43.9 (44.9-50.7 / 41.8-52.3) |
-| critical-open | `assess_ripple` | 7 → 7 | 8,200 → 8,200 | 9.1 → 8.4 (8.2-11.6 / 8.1-10.7) |
-| critical-open | `recompute_decision` | 56 → 30 | 28,500 → 14,200 (-50%) | 32.5 → 20.3 (31.9-34.3 / 19.9-24.0) |
-| critical-open | refresh (backstop) | 84 → 58 | 39,100 → 24,300 (-38%) | 49.4 → 36.8 (47.3-50.4 / 35.5-41.1) |
-| critical-open | refresh (another writer's decision) | 142 → 90 | 68,400 → 39,000 (-43%) | 83.2 → 60.6 (82.3-95.0 / 59.7-65.3) |
-| critical-open | `decision_support` | 51 → 38 | 28,700 → 28,400 (-1%) | 33.8 → 29.7 (32.0-47.4 / 29.5-34.3) |
-| all-accepted | `derive_claims` | 50 → 48 | 27,200 → 21,900 (-19%) | 47.7 → 43.5 (45.5-57.1 / 43.1-49.0) |
-| all-accepted | `assess_ripple` | 7 → 7 | 8,500 → 8,500 | 8.7 → 8.5 (8.1-10.3 / 8.3-9.4) |
-| all-accepted | `recompute_decision` | 130 → 29 | 25,200 → 9,900 (-61%) | 44.0 → 18.7 (42.8-51.2 / 18.1-20.1) |
-| all-accepted | refresh (backstop) | 158 → 57 | 36,400 → 20,800 (-43%) | 61.3 → 34.7 (59.4-79.2 / 34.0-38.3) |
-| all-accepted | refresh (another writer's decision) | 290 → 88 | 62,400 → 30,800 (-51%) | 107.3 → 55.5 (106.9-129.1 / 53.9-59.9) |
-| all-accepted | `decision_support` | 125 → 37 | 25,700 → 24,500 (-5%) | 45.1 → 28.1 (44.9-48.8 / 27.9-31.1) |
+| critical-open | `derive_claims` | 50 → 48 | 26,400 → 21,100 (-20%) | 45.4 → 42.4 (-7%; 44.0-48.2 / 42.4-44.1) |
+| critical-open | `assess_ripple` | 7 → 7 | 8,200 → 8,200 | 8.2 → 8.1 (-1%; 8.2-8.4 / 8.0-8.2) |
+| critical-open | `recompute_decision` | 56 → 30 | 28,400 → 14,100 (-50%) | 32.2 → 19.9 (-38%; 31.6-32.9 / 19.7-20.2) |
+| critical-open | refresh (backstop) | 84 → 58 | 39,100 → 24,100 (-38%) | 47.7 → 36.0 (-25%; 46.6-48.1 / 35.9-36.2) |
+| critical-open | refresh (another writer's decision) | 142 → 90 | 68,300 → 38,700 (-43%) | 81.2 → 58.1 (-28%; 80.2-83.6 / 57.3-58.5) |
+| critical-open | `decision_support` | 51 → 38 | 28,700 → 28,200 (-2%) | 31.9 → 29.3 (-8%; 31.9-32.5 / 29.2-29.6) |
+| all-accepted | `derive_claims` | 50 → 48 | 27,200 → 21,900 (-19%) | 45.1 → 43.0 (-5%; 44.7-46.2 / 42.7-43.2) |
+| all-accepted | `assess_ripple` | 7 → 7 | 8,500 → 8,500 | 8.6 → 8.3 (-3%; 8.2-8.6 / 8.3-8.4) |
+| all-accepted | `recompute_decision` | 130 → 29 | 25,100 → 9,800 (-61%) | 42.7 → 18.4 (-57%; 42.4-43.6 / 18.0-18.5) |
+| all-accepted | refresh (backstop) | 158 → 57 | 36,300 → 20,600 (-43%) | 58.7 → 33.7 (-43%; 58.5-59.9 / 33.7-34.3) |
+| all-accepted | refresh (another writer's decision) | 290 → 88 | 62,200 → 30,500 (-51%) | 104.5 → 54.8 (-48%; 103.3-106.5 / 53.8-56.4) |
+| all-accepted | `decision_support` | 125 → 37 | 25,600 → 24,300 (-5%) | 43.4 → 28.7 (-34%; 43.0-44.6 / 27.8-28.7) |
 
 n: statements and VM steps are exact and were identical in all three rounds of
 each tree; CPU is the median of three per-round medians of 15 runs each (45 runs
-per cell per tree), with each tree's range of the three medians. `derive_claims`'
-CPU change is within the noise of this host; its deterministic work fell by a fifth.
+per cell per tree), with each tree's range of the three medians. `derive_claims`' CPU fell 5-7% here and was
+within noise in the busier a32f63a series; its deterministic work fell by a fifth.
 
-What still grows: with other deployments, only #176's statement; with history, the
-reads that are history by design (the closed versions the legal carry reads, the
-edge history, #176's list) -- the current-claims reads no longer do. Once #176
-lands, its list is a keyed search through this index (`SEARCH ... USING COVERING
-INDEX assurance_claim_current (deployment_id=? AND valid_to>?)`).
+What still grows: with other deployments, nothing (the ±100 is the totals'
+resolution; the database-size test holds every statement to two VM steps); with
+history, only the reads that are history by design -- the closed versions the legal
+carry and #176's list read, the edge history -- and the current-claims reads no
+longer do.
 
 ## Repeating it
 

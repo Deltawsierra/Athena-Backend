@@ -30,7 +30,6 @@ import base64
 import hashlib
 import json
 import time
-import traceback
 import uuid as _uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -562,18 +561,13 @@ def build_corpus(clock: Clock, *, deployments: int = 6, shape: Shape | None = No
 
 
 class Statements:
-    """Every statement a block issues, with its parameters, in order -- and, with
-    ``origins``, the names of the functions on the stack that issued it."""
+    """Every statement a block issues, with its parameters, in order."""
 
-    def __init__(self, *, origins: bool = False):
+    def __init__(self):
         self.issued: list[tuple[str, tuple]] = []
-        self.origins: list[frozenset] = []
-        self._with_origins = origins
 
     def __call__(self, execute, sql, params, many, context):
         self.issued.append((sql, tuple(params) if params is not None and not many else ()))
-        if self._with_origins:
-            self.origins.append(frozenset(frame.name for frame in traceback.extract_stack()))
         return execute(sql, params, many, context)
 
 
@@ -583,14 +577,13 @@ class Measured:
     statements: list
     vm_steps: int
     cpu_seconds: float
-    origins: list = field(default_factory=list)
 
 
 #: The VM steps between two calls of the progress handler: the resolution of the count.
 VM_STEP_GRANULE = 100
 
 
-def measure(fn, *, origins: bool = False) -> Measured:
+def measure(fn) -> Measured:
     """Run ``fn`` once, recording its statements and the SQLite VM steps it ran."""
     connection.ensure_connection()
     raw = connection.connection
@@ -600,7 +593,7 @@ def measure(fn, *, origins: bool = False) -> Measured:
         steps[0] += 1
         return 0
 
-    recorder = Statements(origins=origins)
+    recorder = Statements()
     raw.set_progress_handler(tick, VM_STEP_GRANULE)
     try:
         with connection.execute_wrapper(recorder):
@@ -609,10 +602,7 @@ def measure(fn, *, origins: bool = False) -> Measured:
             cpu = time.process_time() - started
     finally:
         raw.set_progress_handler(None, 0)
-    return Measured(
-        result=result, statements=recorder.issued, vm_steps=steps[0] * VM_STEP_GRANULE, cpu_seconds=cpu,
-        origins=recorder.origins,
-    )
+    return Measured(result=result, statements=recorder.issued, vm_steps=steps[0] * VM_STEP_GRANULE, cpu_seconds=cpu)
 
 
 def cpu_seconds(fn, *, repeat: int = 5) -> list[float]:
@@ -917,18 +907,17 @@ def run_paths(corpus: Corpus) -> dict:
 
 
 def each_statement(measured: Measured, tables) -> list[dict]:
-    """Every statement of ``measured``, in order: its SQL, the functions that issued
-    it, the ``tables`` its plan reads whole, and -- for a read -- the exact VM steps
+    """Every statement of ``measured``, in order: its SQL, the ``tables`` its plan
+    reads whole, and -- for a read -- the exact VM steps
     it takes run again on its own now. Taken right after the measurement, so the
     steps are of the database as the path read it."""
     connection.ensure_connection()
     raw = connection.connection
     out = []
     with connection.cursor() as cursor:
-        for index, (sql, params) in enumerate(measured.statements):
+        for sql, params in measured.statements:
             head = sql.lstrip().upper()
-            entry = {"sql": sql, "origins": measured.origins[index] if measured.origins else frozenset(),
-                     "scans": [], "steps": None}
+            entry = {"sql": sql, "scans": [], "steps": None}
             if head.startswith(_EXPLAINABLE):
                 cursor.execute("EXPLAIN QUERY PLAN " + sql, params)
                 aliases = _aliases(sql)
