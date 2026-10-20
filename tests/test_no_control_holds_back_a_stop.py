@@ -133,6 +133,9 @@ EXPECTED_STOPS = {
     # Review round 1 of #169, H1: an economics override revoked takes away the
     # approval a receipt would be signed on, as a claim's revoke takes a claim down.
     "deployment-economics-override-revoke": {"POST"},
+    # T6: sign-out, a person's refresh token revoked (safety.revoke). It only takes
+    # access away, as an operator removed or demoted does.
+    "token_revoke": {"POST"},
 }
 
 #: Not stops, exempt the same way: how an operator stays able to make one.
@@ -218,6 +221,7 @@ STOP_REQUESTS = [
     ("accounts:user-detail", "DELETE", "/api/accounts/users/7/", None, {}),
     ("deployment-economics-override-revoke", "POST", OVERRIDE_REVOKE, {"reason": "approved in error"}, {}),
     ("token_refresh", "POST", "/api/token/refresh/", _fresh_refresh, {}),
+    ("token_revoke", "POST", "/api/token/revoke/", _fresh_refresh, {}),
 ]
 
 MULTIPART = "multipart/form-data; boundary=zz"
@@ -259,6 +263,8 @@ NOT_STOP_REQUESTS = [
     ("engagement deleted", "DELETE", ENGAGEMENT, None, "application/json", {}),
     ("promotion to admin", "PATCH", SET_ROLE, {"role": "admin"}, "application/json", {}),
     ("refresh with a token that does not verify", "POST", "/api/token/refresh/", {"refresh": "x.y.z"}, "application/json", {}),
+    ("sign-out with a token that does not verify", "POST", "/api/token/revoke/", {"refresh": "x.y.z"}, "application/json", {}),
+    ("sign-out with a field beside its token", "POST", "/api/token/revoke/", {"refresh": "x.y.z", "everywhere": True}, "application/json", {}),
     ("audit read", "GET", "/api/failsafe/audit/", None, "application/json", {}),
     ("a scan launched", "POST", "/api/pentest/scan/", {"url": "https://x.test"}, "application/json", {}),
     ("override revoke with a field beside its remark", "POST", OVERRIDE_REVOKE, {"reason": "r", "subject": "s"}, "application/json", {}),
@@ -603,6 +609,7 @@ EXPECTED_STOP_PERMISSIONS = {
     "pentest:stop_pentest_scan": {"accounts.permissions.IsAdminOrAnalyst"},
     "deployment-economics-override-revoke": {"rest_framework.permissions.IsAuthenticated"},
     "token_refresh": set(),
+    "token_revoke": set(),
 }
 #: SHA-256 of the WSGI and ASGI entry points, as reviewed: each wraps Django's
 #: handler to start the owed-dispatch sweeper (#303), and a limit added in
@@ -882,6 +889,7 @@ def test_no_predicate_raises_on_any_json_value():
         ("accounts:user-set-role", "PATCH"): ["role"],
         ("deployment-economics-override-revoke", "POST"): ["note", "reason"],
         ("token_refresh", "POST"): ["refresh"],
+        ("token_revoke", "POST"): ["refresh"],
     }
     paths = {name: path for name, _m, path, *_ in STOP_REQUESTS}
     for (name, method), names in fields.items():
@@ -1649,6 +1657,7 @@ def _every_stop(client, operator, operator_key, anonymous=APIClient):
         "override revoked": client.post(f"{base}/deployments/{held.uuid}/economics/overrides/{override.uuid}/revoke/", {"reason": "approved in error"}, format="json").status_code,
         "poll": _poll(anonymous()).status_code,
         "refresh": anonymous().post("/api/token/refresh/", {"refresh": str(RefreshToken.for_user(operator))}, format="json").status_code,
+        "sign out": anonymous().post("/api/token/revoke/", {"refresh": str(RefreshToken.for_user(operator))}, format="json").status_code,
     }
 
 
@@ -1675,6 +1684,7 @@ EVERY_STOP = {
     "override revoked": ("deployment-economics-override-revoke", "POST", 200),
     "poll": ("failsafe:pending", "GET", 200),
     "refresh": ("token_refresh", "POST", 200),
+    "sign out": ("token_revoke", "POST", 200),
 }
 SERVED = {name: code for name, (_route, _method, code) in EVERY_STOP.items()}
 #: The same, made with the failsafe service token and nothing else. The token
@@ -2450,7 +2460,8 @@ def test_every_service_route_authenticates_by_the_service_token_first():
     from safety import service_token
 
     assert service_token.SERVICE_ROUTES == set(EXPECTED_STOPS) - {
-        "failsafe:pending", "accounts:user-set-role", "accounts:user-detail"
+        # T6: the sign-out authenticates nobody; the refresh token it revokes is its credential.
+        "failsafe:pending", "accounts:user-set-role", "accounts:user-detail", "token_revoke",
     }
     served = walk()
     for name in service_token.SERVICE_ROUTES:

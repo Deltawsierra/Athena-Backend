@@ -1678,6 +1678,8 @@ ROUTES: dict[str, str] = {
     "api-root": _DOCS + "the API's index of routes",
     "token_obtain_pair": _READ,
     "token_refresh": _READ,
+    # Sign-out (T6, safety.revoke): answers only that it revoked the token it was sent.
+    "token_revoke": _DOCS + "revokes the refresh token it is sent (a stop); answers only that it did, from nothing stored",
     "accounts:api-root": _DOCS + "the accounts API's index of routes",
     "accounts:user-list": _READ,
     "accounts:user-detail": _READ,

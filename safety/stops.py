@@ -350,6 +350,19 @@ def _valid_refresh(request, read):
         return False
 
 
+def _valid_revoke(request, read):
+    # A sign-out (safety.revoke): exactly a refresh token, and one that verifies
+    # (signature, expiry, type). Nothing is read: a revoke only takes access away,
+    # and revoking a token already spent or revoked changes nothing, so neither
+    # the account nor the blacklist decides it. A token that does not verify is
+    # not exempt: it stays under the gateway and the anonymous throttle like any
+    # other guess, and the view writes nothing for it.
+    data = read()
+    if not isinstance(data, dict) or set(data) != {"refresh"} or not isinstance(data["refresh"], str):
+        return False
+    return _verified_refresh(data["refresh"]) is not None
+
+
 #: URL name -> {method: predicate}. A method not listed is not a stop.
 STOP_ROUTES = {
     # Pause (`paused` true) of a deployment. A lift is not a stop.
@@ -392,6 +405,10 @@ STOP_ROUTES = {
     # reason. The view refuses no body, records the revocation as one insert, and
     # reads only the override it names.
     "deployment-economics-override-revoke": {"POST": _remark_only},
+    # Sign-out (safety.revoke): a person's refresh token revoked, which only takes
+    # access away -- as an operator removed or demoted does. The dashboard sends it
+    # when a person's session ends (T6: it signs each person in as themselves).
+    "token_revoke": {"POST": _valid_revoke},
 }
 
 #: Not stops, but what an operator needs in order to make one, exempt the same
