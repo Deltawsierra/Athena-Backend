@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0079_legal_review_owed"),
+        ("assurance", "0080_claim_current_index"),
     ]
 
     operations = [
