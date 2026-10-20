@@ -609,7 +609,7 @@ EXPECTED_STOP_PERMISSIONS = {
 #: either would be in front of every stop. Change one, review it against the
 #: stop set, and put its new digest here.
 REVIEWED_ENTRY_POINTS = {
-    "config/wsgi.py": "1baddd7cfccd4ad81f808351bab9d44d35d300dd1ea40de2d3db3138991002cb",
+    "config/wsgi.py": "0925e832361c3cadbf8d6958db0c8a1626b786df62d4da6285641a5cc8856053",
     "config/asgi.py": "e1ed66dc5a469fd49e73b5fa94fdbe732fe71ff3dc8412ce417a725a013e7625",
 }
 
