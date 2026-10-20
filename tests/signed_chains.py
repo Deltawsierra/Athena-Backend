@@ -40,6 +40,10 @@ ENGINE_KEYS = {
     # one for delegation grants and their revocations, each a key of its own.
     "mythos-signin-collector": Ed25519PrivateKey.generate(),
     "mythos-grant-collector": Ed25519PrivateKey.generate(),
+    # Achilles' scan-result key (owner freeze exception 22): a key of its own, under
+    # its own observer name, which signs a scan's result and nothing else
+    # (assurance.achilles_results).
+    "achilles-scan": Ed25519PrivateKey.generate(),
 }
 
 

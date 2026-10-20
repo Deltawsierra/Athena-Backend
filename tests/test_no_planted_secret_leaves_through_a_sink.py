@@ -1770,6 +1770,11 @@ ROUTES.update(
         "assurance-claims",
         "deployment-connector-push": _READ,
         "deployment-observed-chain-outcomes": _DOCS + "records a signed outcome; read as chain-outcomes",
+        # Owner freeze exception 22: a signed Achilles scan result in, its findings read
+        # as finding-list; its own read lists only what was posted to it and why it was
+        # refused, never a stored credential.
+        "deployment-achilles-scan-results": _DOCS + "records a signed Achilles scan result; its findings are "
+        "read as finding-list, and its own read lists only what was posted to it",
         "deployment-observed-effects": _READ,
         "deployment-recompute": _DOCS + "recomputes the decision; read as deployment-detail",
         "deployment-recompute-claims": _DOCS + "re-derives the claims; read as assurance-claims",

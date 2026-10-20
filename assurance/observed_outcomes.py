@@ -350,7 +350,7 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
     Returns ``(recorded_rows, refusals)``; when ``refusals`` is non-empty nothing
     was recorded. Raises :class:`KeyringUnavailable` when nothing can be verified.
     """
-    from . import observed_effects
+    from . import achilles_results, observed_effects
 
     keyring = keyring if keyring is not None else load_keyring()
     now = now or datetime.now(dt_timezone.utc)
@@ -378,6 +378,19 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                     f"an outcome signed by an {identity} key is an {identity} record, recorded with its "
                     f"evidence document on the {identity} route (assurance.identity_evidence); posted here "
                     "it would prove nothing",
+                )
+            )
+            continue
+        if outcome["observer"]["engine"] == achilles_results.SIGNER:
+            # A scan result is no chain outcome either: recorded as one it would be
+            # counted in the composition, as an unclassified signature over a document
+            # this route never reads. Its own route records it, with that document.
+            refusals.append(
+                Refusal(
+                    index,
+                    "an outcome signed by Achilles' scan-result key is a scan result, recorded with the document "
+                    "its digest names on the achilles-scan-results route (assurance.achilles_results); posted "
+                    "here it would prove nothing",
                 )
             )
             continue

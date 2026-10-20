@@ -234,6 +234,51 @@ signed by an engine this platform has not classified, they contribute
 owner default, #278). One such workflow is enough, whatever the others show. A
 `held` signed by Athena is not capped.
 
+## Achilles scan results as findings
+
+Owner freeze exception 22, second half. `POST
+/api/assurance/deployments/<uuid>/achilles-scan-results/` takes one Achilles scan's
+results as findings (`assurance/achilles_results.py`). Admin-only, JSON only:
+
+```
+{"envelope": <DSSE envelope>, "result": <mythos.achilles-scan-result/v1 document>}
+```
+
+The envelope is a `mythos.chain-outcome/v1` signed by Achilles' scan-result key:
+observer `achilles-scan`, a key that signs nothing else, filed under that name in
+`ASSURANCE_OUTCOME_KEYRING`. Its `deployment` is this deployment's uuid (the
+deployment is the tenant), its `workflow` is `achilles-scan`, its status is `held`
+for a completed scan or `incomplete` for an aborted or failed one, its observer
+`version` and `run_id` are the Achilles release and scan id, and its
+`evidence_digest` names the result document. The document repeats those, carries
+the evidence pack's head, and lists each scenario's `scenario_id`, `capability`
+(catalogue slug), `verdict`, `severity`, `evidence_tier`, `confidence`, `title`,
+`implication` and `recommendation`. It carries no transcript and none of the
+target's replies.
+
+Refused and recorded with why (`GET` on the same route lists both): `unsigned`,
+`tampered`, `wrong_signer`, `wrong_tenant`, `replayed` (an outcome or a scan already
+recorded, older than the newest result recorded here, or older than 30 days),
+`malformed`, and `keyring_unavailable` (503). The chain-outcome route refuses a
+scan-result envelope.
+
+What a result becomes, for a capability Achilles has been screened for: a `fail` is
+a finding at its severity with `partially_verified` evidence; an `inconclusive` is an
+info finding with `unknown` evidence (needs more evidence); a `pass` is no finding.
+Each finding carries its provenance (engine, release, scan id, outcome id, evidence
+digest, pack head, signing key). Findings count in the decision by the same rule as
+Athena's. An Achilles result never lifts a decision: a clean scan is not recorded as
+an assessment.
+
+A capability is screened only by an entry in `SCREENED` in
+`assurance/achilles_results.py`. The entry names the capability's Validity Card and
+Minotaur answer key by digest, a passed benchmark screen, and the Achilles releases
+the screen measured. **The registry is empty**: no Achilles capability has a Validity
+Card yet. Until one does, every result is recorded as informational and grades
+nothing. Achilles does not sign scan results yet either. Until its signer ships, no
+`achilles-scan` key is in the keyring, and every post is refused as `unsigned` and
+recorded.
+
 ## Claim confidence
 
 Every assurance claim the API serves (`/api/assurance/claims/`, and each
