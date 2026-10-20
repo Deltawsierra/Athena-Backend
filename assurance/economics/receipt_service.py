@@ -415,19 +415,23 @@ def engine_keyring():
     (``CyberEngineClient.assurance_keyring``). A keyring fetched from the engine that
     signs establishes that the engine signed in the receipt role, not more: an
     auditor verifies against one fetched out of band, as the engine's own caveat
-    says."""
+    says. Fetched with the engine's receipt-signer key
+    (:meth:`CyberEngineClient.for_receipt_signing`), never the operator key."""
     from ai_engine.services.cyberengine_client import CyberEngineClient
 
-    return keyring_from_published(CyberEngineClient.from_settings().assurance_keyring())
+    return keyring_from_published(CyberEngineClient.for_receipt_signing().assurance_keyring())
 
 
 def engine_signer(document: dict) -> dict:
     """Sign ``document`` on the path the backend's signed assurance receipts take:
     the engine holds the key, and this backend asks it
-    (:meth:`CyberEngineClient.sign_exposure_receipt`)."""
+    (:meth:`CyberEngineClient.sign_exposure_receipt`), presenting the engine's
+    receipt-signer key (:meth:`CyberEngineClient.for_receipt_signing`), which the
+    engine accepts on that route alone. Never the operator key: with no signer key
+    configured this raises, and the receipt is not issued (``signer_unavailable``)."""
     from ai_engine.services.cyberengine_client import CyberEngineClient
 
-    return CyberEngineClient.from_settings().sign_exposure_receipt(document)
+    return CyberEngineClient.for_receipt_signing().sign_exposure_receipt(document)
 
 
 def envelope_problem(document: dict, envelope) -> str | None:

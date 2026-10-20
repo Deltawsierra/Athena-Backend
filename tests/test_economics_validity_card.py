@@ -546,11 +546,13 @@ def test_the_engine_signs_on_the_assurance_receipts_path(deployment, people, key
         def sign_exposure_receipt(self, document):
             raise EngineError("Engine refused (404)")
 
-    monkeypatch.setattr(CyberEngineClient, "from_settings", classmethod(lambda cls: Down()))
+    # The receipt-signing client (T10): the engine's receipt-signer key, never the
+    # operator key's `from_settings`.
+    monkeypatch.setattr(CyberEngineClient, "for_receipt_signing", classmethod(lambda cls: Down()))
     outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "signer_unavailable"
     assert not FinancialExposureReceipt.objects.exists()
-    monkeypatch.setattr(CyberEngineClient, "from_settings", classmethod(lambda cls: Engine()))
+    monkeypatch.setattr(CyberEngineClient, "for_receipt_signing", classmethod(lambda cls: Engine()))
     outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])
     assert outcome.created and len(sent) == 1 and outcome.receipt.document == sent[0]
     assert receipt_service.verify_stored_receipt(outcome.receipt, keys["ring"]).verified
@@ -908,8 +910,8 @@ def test_a_document_the_engine_refuses_is_refused_by_the_signer_not_unavailable(
         return answer
 
     monkeypatch.setattr(outbound, "post", engine)
-    monkeypatch.setattr(CyberEngineClient, "from_settings",
-                        classmethod(lambda cls: CyberEngineClient("https://engine.test", "operator-key")))
+    monkeypatch.setattr(CyberEngineClient, "for_receipt_signing",
+                        classmethod(lambda cls: CyberEngineClient("https://engine.test", "signer-key")))
     answers.append(_http(400, {"detail": {"code": "amount_precision", "reason": "result.p50.amount has 3 digits"}}))
     outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "receipt_refused_by_signer"
@@ -1175,8 +1177,8 @@ def test_an_engine_400_with_a_code_that_is_not_cores_is_not_carried_as_cores(dep
     result, _ = carded(deployment, people)
     answers = []
     monkeypatch.setattr(outbound, "post", lambda url, **_kwargs: answers.pop(0))
-    monkeypatch.setattr(CyberEngineClient, "from_settings",
-                        classmethod(lambda cls: CyberEngineClient("https://engine.test", "operator-key")))
+    monkeypatch.setattr(CyberEngineClient, "for_receipt_signing",
+                        classmethod(lambda cls: CyberEngineClient("https://engine.test", "signer-key")))
     for code in ("rate_limited", "signer_not_configured"):
         answers.append(_http(400, {"detail": {"code": code, "reason": "not now"}}))
         outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])

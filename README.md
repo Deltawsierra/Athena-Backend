@@ -34,6 +34,17 @@ The backend calls the engine with an operator key and enforces its decisions in
 `audit/middleware.py`. Set `CYBERENGINE_URL` and `CYBERENGINE_OPERATOR_KEY`.
 Without a key the gateway allows every request and says so in the log.
 
+Financial Exposure Receipts are signed with a second engine credential,
+`CYBERENGINE_ECONOMICS_SIGNER_KEY`: a receipt-signer key, which the engine issues
+with `python tools/start_engine.py --signer-key` and accepts on its receipt-sign
+route alone (it cannot scan, stop, pause or approve). The receipt service signs and
+reads the engine's published keyring with it
+(`CyberEngineClient.for_receipt_signing`), and never sends the operator key for a
+receipt: without the signer key a receipt is refused `signer_unavailable` and
+nothing is recorded. Every other engine call, the stops among them, keeps the
+operator key. The setting is read by that literal name; like the other keys, it
+is a settings line reading the owner's key from the environment.
+
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
