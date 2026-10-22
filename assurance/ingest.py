@@ -386,6 +386,24 @@ def _host(target_url: str) -> str:
         return ""
 
 
+def _deployment_key(scan) -> tuple[dict, dict]:
+    """How ``deployment_for_scan`` keys a scan's deployment: the lookup that finds the
+    row, and the defaults a new one takes. One definition, so a reader that must only
+    FIND the deployment (:func:`existing_deployment_for_scan`) looks where the ingest
+    writes."""
+    host = _host(scan.target_url)
+    defaults = {"owner_id": getattr(scan, "user_id", None)}
+    if scan.engagement_id:
+        base = (
+            getattr(scan.engagement, "name", None)
+            or getattr(scan.engagement, "client_name", None)
+            or f"Engagement {scan.engagement_id}"
+        )
+        name = f"{base} · {host}" if host else base
+        return {"engagement_id": scan.engagement_id, "name": name}, defaults
+    return {"name": f"target:{host or scan.target_shown}", "engagement__isnull": True}, defaults
+
+
 def deployment_for_scan(scan) -> Deployment:
     """Get or create the deployment a scan's findings belong to.
 
@@ -396,27 +414,18 @@ def deployment_for_scan(scan) -> Deployment:
     six-state decision. Keying on (engagement, host) keeps ``api.example.com`` and
     ``admin.example.com`` separate while a re-scan of the same host lands on the
     same row. Idempotent."""
-    host = _host(scan.target_url)
-    owner_id = getattr(scan, "user_id", None)
-    if scan.engagement_id:
-        base = (
-            getattr(scan.engagement, "name", None)
-            or getattr(scan.engagement, "client_name", None)
-            or f"Engagement {scan.engagement_id}"
-        )
-        name = f"{base} · {host}" if host else base
-        deployment, _ = Deployment.objects.get_or_create(
-            engagement_id=scan.engagement_id,
-            name=name,
-            defaults={"owner_id": owner_id},
-        )
-        return deployment
-    deployment, _ = Deployment.objects.get_or_create(
-        name=f"target:{host or scan.target_shown}",
-        engagement__isnull=True,
-        defaults={"owner_id": owner_id},
-    )
+    lookup, defaults = _deployment_key(scan)
+    deployment, _ = Deployment.objects.get_or_create(**lookup, defaults=defaults)
     return deployment
+
+
+def existing_deployment_for_scan(scan) -> Deployment | None:
+    """The deployment ``deployment_for_scan`` keyed for ``scan``, if its ingest made one;
+    None otherwise. A read: it NEVER creates a deployment. A retest check
+    (``assurance.retest_checks``) tells its finding by the scan the twin came from, and
+    a scan that was never ingested has no deployment and no finding to tell."""
+    lookup, _defaults = _deployment_key(scan)
+    return Deployment.objects.filter(**lookup).order_by("pk").first()
 
 
 def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:

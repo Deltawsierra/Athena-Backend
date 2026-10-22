@@ -2534,6 +2534,78 @@ class ClosureEvidenceForward(models.Model):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# RetestCheck — the engine's retest verdict, pulled and recorded; NOT closure evidence
+# ---------------------------------------------------------------------------
+
+
+class RetestCheck(models.Model):
+    """One retest run's verdict, PULLED from the engine by this backend with its operator
+    key and recorded against the finding it was retested for
+    (``assurance.retest_checks``; owner decision 8).
+
+    NOT closure evidence, and it closes nothing. The engine's ``closed`` is "an absence
+    on a retest that looked, not proof of a fix": it carries no fixture class, no replay
+    variant, no remediation kind and no contract, so the closure gate
+    (``assurance.retest_closure``) never reads it, no :class:`RetestClosureEvidence` is
+    made of it, nothing is forwarded to Minotaur's dataset, and no field of the
+    :class:`Finding` moves for it -- not ``status``, not ``last_seen`` (a ``still_open``
+    check is a sighting on a retest scan this record never ingested; the row carries its
+    date), not the retest flag, not ``remediation_state``. Append-only, one row per
+    engine run (``engine_run_id`` is unique: a second collect of the same run is the same
+    row), naming what its identity stood on -- the twin, the scan run it was listed under
+    -- with the engine's words kept as the scan says them, the target's login withheld
+    (``detail``, ``raw``)."""
+
+    class State(models.TextChoices):
+        #: The run completed, and its verdict is the one it filed.
+        COMPLETED = "completed", "Completed"
+        #: The run was stopped after its check was filed: the verdict stands, and the
+        #: stop is said (``stopped_after_recording``).
+        ABORTED = "aborted", "Aborted after recording its check"
+
+    id = models.BigAutoField(primary_key=True)
+    finding = models.ForeignKey(Finding, on_delete=models.CASCADE, related_name="retest_checks")
+    # The engine's registry id for the retest run: what a Stop names, and what the run
+    # is read by (GET /api/scans/{run_id}). One row per run.
+    engine_run_id = models.CharField(max_length=64, unique=True)
+    # The scan record the retest produced on the engine, as it named it; null when it
+    # named none.
+    scan_record_id = models.CharField(max_length=64, null=True, blank=True)
+    # The decision twin that was retested, and the SCAN run it was listed under -- the
+    # run a PentestScan of this record names as engine_run_id, which is how the finding
+    # was told.
+    twin_id = models.IntegerField()
+    twin_run_id = models.CharField(max_length=64)
+    # The verdict as the engine sent it, and whether it is one this backend knows
+    # (closed, still_open, inconclusive).
+    verdict = models.CharField(max_length=32)
+    verdict_known = models.BooleanField()
+    # The engine's reading, at most retest_checks.MAX_DETAIL_CHARS, the target's login
+    # withheld.
+    detail = models.TextField(blank=True)
+    inventory_digest = models.CharField(max_length=128, blank=True)
+    # When the engine filed its check, by its own clock; null when it did not say.
+    engine_checked_at = models.DateTimeField(null=True, blank=True)
+    state = models.CharField(max_length=16, choices=State.choices)
+    # Whether the run was stopped after its check was filed (ABORTED): the verdict was
+    # recorded before the stop landed. Null only where the run's end was not read.
+    stopped_after_recording = models.BooleanField(null=True, blank=True)
+    collected_at = models.DateTimeField(default=timezone.now)
+    collected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    # The engine's result object for the run, the target's login withheld: provenance.
+    raw = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-collected_at", "-pk"]
+        indexes = [models.Index(fields=["finding", "collected_at"])]
+
+    def __str__(self) -> str:
+        return f"retest check {self.verdict} for finding {self.finding_id} (run {self.engine_run_id})"
+
+
 class RepairContractQuerySet(models.QuerySet):
     """An agreed contract is never edited and never deleted on its own: a queryset
     ``update``, ``bulk_update`` or ``delete`` is refused (:mod:`assurance.repair_contract`).
