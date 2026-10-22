@@ -154,14 +154,21 @@ MATRIX = {
         ("test_the_unrouted_llm_scan_view_is_reachable_by_no_url",),
     ),
     "report-email": Boundary(
-        "The scan report e-mailed (pentest.utils.send_pentest_scan_email): once by a scan launch, "
+        "The scan report e-mailed (pentest.utils.send_pentest_scan_email, through pentest.views._mail_report): "
+        "once by a scan launch; once by the collect of a run that outlasted its launch (POST "
+        "/api/pentest/scans/<uuid>/collect/, and manage.py collect_pending_scans, which runs the same code); "
         "again by POST /api/pentest/scans/<uuid>/email/",
         "none: every resend request sent the report",
-        _KEY_LAYER + " on the launch routes and the resend route",
-        "with the key: one e-mail; without: unchanged -- a retried resend sends it again",
+        _KEY_LAYER + " on the launch routes and the resend route. A collect carries no key: it claims the "
+        "scan's end in one statement (collected_at, on a row still pending and unclaimed) before it writes, "
+        "mails or ingests anything, so a second collect -- the dashboard's watch beside the command -- "
+        "answers 409 and sends nothing",
+        "with the key: one e-mail; without: unchanged -- a retried resend sends it again. A collect fired "
+        "twice mails once and reads the engine once",
         (
             "test_a_report_resend_replayed_with_its_key_sends_one_email",
             "test_an_account_keeps_at_most_its_bound_of_keys",
+            "test_a_collect_fired_twice_mails_the_report_once",
         ),
     ),
     "connector-push-manual": Boundary(
@@ -365,7 +372,8 @@ SITES = {
     "pentest/utils.py::send_pentest_scan_email::EmailMessage": "report-email",
     "pentest/views.py::resend_scan_email::send_pentest_scan_email": "report-email",
     "pentest/views.py::run_llm_pentest_scan::send_pentest_scan_email": "report-email",
-    "pentest/views.py::run_pentest_scan::send_pentest_scan_email": "report-email",
+    # The launch and the collect mail through one helper, so this is their one site.
+    "pentest/views.py::_mail_report::send_pentest_scan_email": "report-email",
     "pentest/views.py::run_llm_pentest_scan::PentestScan.objects.create": "engine-llm-scan-start",
     "pentest/views.py::run_llm_pentest_scan::run_llm_scan": "engine-llm-scan-start",
     "pentest/views.py::run_pentest_scan::PentestScan.objects.create": "engine-scan-start",
@@ -1164,6 +1172,35 @@ def test_a_report_resend_replayed_with_its_key_sends_one_email():
     assert first.status_code == 200
     assert len(mail.outbox) == 1, "the replayed resend mailed the report twice"
     assert replay.json() == first.json()
+
+
+def test_a_collect_fired_twice_mails_the_report_once(engine, scan_path):
+    """A run that outlasted its launch is collected later: by the dashboard's watch, by
+    manage.py collect_pending_scans, or by both. The end is claimed in one statement
+    before anything is written, so the second collect records nothing, mails nothing,
+    reads the engine no further, and never launches."""
+    analyst = _user()
+    run = copy.deepcopy(engine.scan_answer)
+    run["run_id"] = str(uuid.uuid4())
+    engine.runs[run["run_id"]] = run
+    scan = PentestScan.objects.create(
+        user=analyst, engagement=_engagement(analyst), target_url=TARGET, consent=True,
+        status=PentestScan.STATUS_PENDING, engine_run_id=run["run_id"], recipient_email="client@example.com",
+    )
+    client = _client(analyst)
+    url = f"/api/pentest/scans/{scan.uuid}/collect/"
+
+    first = client.post(url, {}, format="json")
+    second = client.post(url, {}, format="json")
+
+    assert first.status_code == 200, first.content
+    assert second.status_code == 409, second.content
+    assert len(mail.outbox) == 1, "the second collect mailed the report again"
+    assert engine.count("GET", f"/api/scans/{run['run_id']}") == 1, "the second collect read the engine"
+    assert engine.count("POST", "/api/scan") == 0, "a collect sent a launch"
+    scan.refresh_from_db()
+    assert (scan.status, scan.email_sent) == (PentestScan.STATUS_COMPLETED, True)
+    assert scan.collected_at is not None
 
 
 # ===========================================================================
