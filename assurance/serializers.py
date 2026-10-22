@@ -100,6 +100,10 @@ class FindingSerializer(serializers.ModelSerializer):
     evidence = EvidenceSerializer(many=True, read_only=True)
     evidence_class = serializers.CharField(read_only=True)
     deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    # The scan this finding was last observed in (Finding.scan), and that scan's run on
+    # the engine: how a reader joins a finding to the scan record it came from.
+    scan_uuid = serializers.UUIDField(source="scan.uuid", read_only=True, allow_null=True)
+    engine_run_id = serializers.CharField(source="scan.engine_run_id", read_only=True, allow_null=True)
     # The asset this finding concerns, once discovery has attached it (Phase 1.1).
     asset_uuid = serializers.UUIDField(source="asset.uuid", read_only=True, allow_null=True)
     asset_name = serializers.CharField(source="asset.name", read_only=True, allow_null=True)
@@ -153,6 +157,8 @@ class FindingSerializer(serializers.ModelSerializer):
         fields = [
             "uuid",
             "deployment_uuid",
+            "scan_uuid",
+            "engine_run_id",
             "finding_type",
             "title",
             "severity",
@@ -1095,6 +1101,10 @@ class ClaimEvidenceSerializer(serializers.ModelSerializer):
 class DeploymentSerializer(serializers.ModelSerializer):
     decision_label = serializers.CharField(source="get_decision_display", read_only=True)
     finding_count = serializers.IntegerField(read_only=True)
+    # The engagement this system is assessed under (Deployment.engagement), when one
+    # applies: a deployment is one (engagement, host), and this is the half a reader
+    # joins to the engagement and to the scans launched under it.
+    engagement_id = serializers.IntegerField(read_only=True, allow_null=True)
 
     def to_representation(self, instance):
         # The deployment list and detail publish the stored decision, as the
@@ -1122,6 +1132,7 @@ class DeploymentSerializer(serializers.ModelSerializer):
             "decision_revision",
             "description",
             "finding_count",
+            "engagement_id",
             "created_at",
             "updated_at",
         ]
