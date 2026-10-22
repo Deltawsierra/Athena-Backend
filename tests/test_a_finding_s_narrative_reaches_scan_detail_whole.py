@@ -111,7 +111,7 @@ def _launch_and_read(monkeypatch, rows, target=TARGET):
     )
     monkeypatch.setattr("pentest.views.target_is_out_of_bounds", lambda url: None)
     monkeypatch.setattr("pentest.views.preflight.check", lambda client, tenant_id=None: {"verdict": "unchanged"})
-    monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", lambda scan: b"%PDF-1.4 report")
+    monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", lambda scan, context=None: b"%PDF-1.4 report")
     monkeypatch.setattr("pentest.views.save_pdf_to_scan", lambda scan, pdf: None)
 
     client = APIClient()

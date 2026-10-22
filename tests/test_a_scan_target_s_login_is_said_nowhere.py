@@ -229,7 +229,7 @@ def test_an_answer_quoting_the_login_is_withheld_from_scan_detail(no_environment
     )
     monkeypatch.setattr("pentest.views.target_is_out_of_bounds", lambda url: None)
     monkeypatch.setattr("pentest.views.preflight.check", lambda client, tenant_id=None: {"verdict": "unchanged"})
-    monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", lambda scan: b"%PDF-1.4 report")
+    monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", lambda scan, context=None: b"%PDF-1.4 report")
     monkeypatch.setattr("pentest.views.save_pdf_to_scan", lambda scan, pdf: None)
 
     client = APIClient()

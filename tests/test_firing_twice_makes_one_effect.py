@@ -761,7 +761,7 @@ def scan_path(monkeypatch):
     of the target, the preflight gate (its own boundary, tested below) and the PDF."""
     monkeypatch.setattr("pentest.views.target_is_out_of_bounds", lambda url: None)
     monkeypatch.setattr("pentest.views.preflight.check", lambda client, tenant_id=None: {"verdict": "unchanged"})
-    monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", lambda scan: b"%PDF-1.4 report")
+    monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", lambda scan, context=None: b"%PDF-1.4 report")
     monkeypatch.setattr("pentest.views.save_pdf_to_scan", lambda scan, pdf: None)
 
 
@@ -1011,7 +1011,7 @@ def test_a_launch_that_raised_before_it_recorded_an_answer_reads_as_unknown(engi
     client = _client(analyst)
     body = _scan_body(_engagement(analyst))
 
-    def renderer_crashes(scan):
+    def renderer_crashes(scan, context=None):
         raise RuntimeError("the renderer crashed")
 
     monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", renderer_crashes)
