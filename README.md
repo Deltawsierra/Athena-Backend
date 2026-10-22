@@ -122,9 +122,14 @@ withdraw a stop, destroy a record or remove an operator. The token is compared
 as HMAC-SHA256 digests in constant time, and only a match costs a database
 read; a read of the service account that fails is answered 503 with its reason
 (never 401, which would send a client back to its password). The
-athena-dashboard server will present it on its stops in a follow-up; until then
-it signs in with its service account's password as before, so until then its
-stops still depend on that sign-in.
+athena-dashboard server presents it on every stop it sends this backend, and on
+nothing else (its test `the-service-token-rides-on-every-stop-and-on-nothing-else`),
+so its stops never depend on a person's sign-in. PRECONDITION: `FAILSAFE_SERVICE_USER`
+must name an ADMIN account. A scan's Stop (`POST /api/pentest/scans/<uuid>/stop/`) is
+scoped to the scans its caller may see (`scans_visible_to`: an analyst sees only the
+scans they launched), so a Stop the dashboard mirrors here under an analyst service
+account, for a scan another person launched through this backend, is answered 404 and
+sends the engine nothing.
 
 ### Sign-in and the stop lane
 
@@ -1664,6 +1669,105 @@ whenever the lookup names a run.
 every scan, owed Stops included: run `deliver_owed_stops` until it exits zero first.
 Code from before it reads an `unknown` scan as neither pending nor completed, so it
 makes no report of one and ingests nothing from it.
+
+### A scan that outlasts its launch: `wait_seconds`, `collect`, `collect_pending_scans`
+
+The launch waited for the run in full: the engine held it inline for 20 s
+(`SCAN_INLINE_WAIT_SECONDS`) and the run was then collected for `CYBERENGINE_SCAN_TIMEOUT`
+(600 s, `SCAN_COLLECT_SECONDS`), so a client that cannot hold a call that long never
+got the run's id back. Nothing collected a scan whose run outlasted that wait: it stayed
+`pending` with no verdict, no ingest, no report and no mail.
+
+**`wait_seconds`** on `POST /api/pentest/scan/` is optional: a number of seconds from 0
+to `SCAN_COLLECT_SECONDS`, how long the launch waits for the run in all. The engine is
+asked to hold the launch inline for the smaller of it and 20 s, and the run is collected
+for the rest (each read of the run bounded by the engine client's timeout). `0` is one
+read of the run and then the 202; absent, the launch waits as it always has; a value
+that is not a number of seconds in range is refused, 400, before anything is sent. The
+202 for a run still going is `{scan_id, status: "pending", engine_run_id, detail,
+status_url, collect_url}`: `status_url` is `/api/pentest/scans/<uuid>/`, `collect_url` is
+`/api/pentest/scans/<uuid>/collect/`. The recipient a launch names is kept on the row
+from the start (never served on a read), so a scan collected later is still mailed.
+
+**`POST /api/pentest/scans/<uuid>/collect/`** (an admin or analyst who can see the scan,
+as scan detail is scoped) reads the scan's run from the engine once, bounded, and
+records how it ended. It is not a stop (`safety/stops.py`: a read of the engine and a
+write of this record; it starts and stops nothing); it never sends a launch -- a
+reconcile is the only route that does, for an `unknown` launch on an operator's request
+-- and it never sends a Stop.
+
+| The run's record says | The scan reads | Answered |
+|---|---|---|
+| not done, or done in a state this backend does not read | `pending`, untouched | 202 `{scan_id, status, engine_run_id, detail: "still running"}` |
+| `completed` | the launch's own completion: the refusal check, the engagement re-authorised under its lock, `completed` with its verdict (the assurance ingest fires on commit), the report rendered, and mailed if the launch named a recipient | 200, the scan as detail serves it |
+| `aborted` (stopped on the engine) | **`stopped`**: `error_message` "Stopped on the engine: <reason>", what the run had when it stopped kept in `engine_response`, no verdict, nothing ingested, no report, no mail | 200 |
+| `failed` | `failed`: "Failed on the engine: <error>", the partial result kept | 200 |
+| the engine's own 404 (`No such scan run`) | `failed`: "the engine has no run <id>" | 200 |
+| unreachable, any other status, an unreadable body, a 404 anything else wrote | `pending`, untouched | 503 `{detail}` |
+| the scan is not `pending`, or names no run | unchanged | 409 `{detail, status}` |
+
+Two collects of one scan (the dashboard's watch and the command, say) record its end
+once: the end is claimed in one statement -- `collected_at` set on a row that is still
+pending and unclaimed -- before anything is written, so the second answers 409 and
+writes, ingests and mails nothing. A claim a dying process left lapses after
+`COLLECT_CLAIM_SECONDS` (600 s). `collected_at` is served on every read.
+
+**`stopped`** is a status of its own (migration `pentest.0020`): a run the engine stopped
+before it finished is never `failed` (that reads as the engine's fault) and never
+`completed` (a run that stopped looking has no verdict, whatever it found first).
+A stopped scan has no report to render or send (`pdf/` and `email/` answer 409) and is
+never ingested into the assurance record; what it had when it stopped is kept so the
+coverage of what did run is not lost. A run that ends `aborted` inside the launch's own
+wait is still recorded as the launch always recorded it (`failed`, "Scan aborted: ...",
+HTTP 502); only a run collected after the launch has answered is recorded `stopped`.
+
+**`python manage.py collect_pending_scans [--older-than-seconds N] [--limit N]`** runs
+the same code for every `pending` scan that names a run, one bounded read each, prints
+one line per scan, and exits non-zero while any scan stays pending for longer than
+`--older-than-seconds` (default 0: any). Run it on a schedule beside
+`deliver_owed_stops`: it is the backstop for a run nobody is watching. It never sends
+a launch and never a Stop; a scan that names no run is listed and sent nothing.
+
+**Reads.** `GET /api/pentest/scans/<uuid>/` and the rows of `GET /api/pentest/scans/`
+serve the record: `uuid`, `target_url` (login withheld), `consent`, `status` (`pending`,
+`completed`, `failed`, `stopped`, `unknown`), `verdict`, `verdict_label`, `created_at`,
+`collected_at`, `engine_run_id`, `pdf_url`, `email_sent`, `error_message`, `stop` (the
+Stop's reading, as before) and `engagement` (`{id, name, client_name, status}`); the
+detail also serves `engine_response`, the list does not. The recipient's address is
+never served. The preflight report (`PentestScan.assurance`) is not served either: it
+carries the engine's own words about its errors (which quote the engine's host) and the
+raw route measurements of the deployment's serving assets. A finding
+(`GET /api/assurance/findings/`) serves `scan_uuid` and `engine_run_id`, the scan it
+was last observed in; a deployment serves `engagement_id`, the authorisation it is
+assessed under.
+
+**The hybrid (the athena-dashboard).** This backend is the record and the governance
+gate: the target's bounds, consent, the engagement's authority and window, the preflight
+gate, the launch under the operator key with the scan's own launch key, and the
+record of every end. The dashboard launches every scan through `POST /api/pentest/scan/`
+with `wait_seconds: 0`, as the signed-in person; polls the ENGINE live by
+`engine_run_id` (`GET /api/scans/{run_id}`); stops the engine DIRECTLY from its own stop
+path, exactly as before, and only then mirrors the Stop to
+`POST /api/pentest/scans/<uuid>/stop/` with the failsafe service token, best-effort and
+never awaited -- the mirror's failure is shown, never a reason to wait; and asks for
+the collect when its poll sees the run end. `collect_pending_scans` collects what no
+dashboard watched. Nothing new sits on any stop path, here or there.
+
+Two PRECONDITIONS for that:
+
+1. `FAILSAFE_SERVICE_USER` must be an admin (above): otherwise the mirrored Stop cannot
+   see a scan another person launched, and is answered 404.
+2. The dashboard's engine key and this backend's `CYBERENGINE_OPERATOR_KEY` must both be
+   platform-operator keys, or belong to the same tenant. The engine scopes
+   `GET /api/scans/{run_id}` and `POST /api/scans/{run_id}/abort` to the tenant that
+   launched the run, so a run launched under this backend's key is 404 to a dashboard
+   key of another tenant: no live poll, and no direct Stop. The dashboard reads the run
+   once, directly, before it offers a Stop, and says plainly when it cannot.
+
+**Migration `pentest.0020`** adds `collected_at` as nullable (a plain `ADD COLUMN`) and
+the `stopped` status. Rolling it back drops `collected_at`; a `stopped` row keeps its
+status text, which code from before the migration reads as neither pending nor
+completed, so it makes no report of one and ingests nothing from it.
 
 ## Secrets
 
