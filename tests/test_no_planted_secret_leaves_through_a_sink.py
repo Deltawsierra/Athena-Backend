@@ -1704,6 +1704,8 @@ ROUTES: dict[str, str] = {
     "failsafe:state": _READ,
     "failsafe:submit-signature": _DOCS + "a signature on a command; answers the command, as command-detail reads it",
     "pentest:allowed_pentest_checks": _READ,
+    "pentest:collect_pentest_scan": _DOCS + "collects a pending scan's run from the engine; answers the scan as "
+    "detail_pentest_scan reads it, or that nothing was collected",
     "pentest:detail_pentest_scan": _READ,
     "pentest:download_scan_pdf": "exports",
     "pentest:engagement_detail": _READ,

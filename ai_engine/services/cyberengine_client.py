@@ -406,6 +406,16 @@ RUN_ABORTED = "aborted"
 #: its id.
 _RUN_ENDS = (RUN_COMPLETED, RUN_FAILED, RUN_ABORTED)
 
+#: What the engine's own 404 says about a run it does not have (api/server.py). Only
+#: this body, not a 404 anything else wrote, says there is no such run.
+NO_SUCH_RUN = "No such scan run"
+
+
+def run_has_ended(record) -> bool:
+    """Whether a run's record (:meth:`CyberEngineClient.read_scan_run`) says the run
+    ended in a state this backend reads: ``done`` and one of :data:`_RUN_ENDS`."""
+    return isinstance(record, dict) and record.get("done") is True and record.get("state") in _RUN_ENDS
+
 
 class CyberEngineClient:
     """
@@ -977,34 +987,9 @@ class CyberEngineClient:
         """
         budget = SCAN_COLLECT_SECONDS if collect_seconds is None else max(0.0, float(collect_seconds))
         deadline = time.monotonic() + budget
-        path = f"/api/scans/{run_id}"
 
         while True:
-            resp = self._send_get_or_uncollected(path, run_id)
-
-            if resp.status_code == 404:
-                # The engine has no such run: definite, and nothing to stop.
-                raise EngineError(
-                    f"The engine has no scan run {run_id}.",
-                    kind=ENGINE_REFUSED,
-                    status=resp.status_code,
-                    run_id=run_id,
-                )
-            if not (200 <= resp.status_code < 300):
-                raise ScanUncollected(
-                    f"The engine answered {resp.status_code} when asked about scan run "
-                    f"{run_id}; the scan may still be running, and can be collected "
-                    f"later: {_excerpt(resp.text)}",
-                    run_id=run_id,
-                )
-            try:
-                status = self._read_json(resp, path)
-            except EngineError as exc:
-                raise ScanUncollected(
-                    f"The engine's answer about scan run {run_id} could not be read; the "
-                    f"scan may still be running, and can be collected later: {exc}",
-                    run_id=run_id,
-                ) from exc
+            status = self.read_scan_run(run_id)
 
             if status.get("done") is True:
                 return self._finished_scan(status, run_id)
@@ -1017,6 +1002,60 @@ class CyberEngineClient:
                 )
 
             time.sleep(SCAN_POLL_SECONDS)
+
+    def read_scan_run(self, run_id: str) -> dict:
+        """One bounded read of run ``run_id``: its record as the engine wrote it
+        (``GET /api/scans/{run_id}``: ``done`` says whether it ended, ``state`` how --
+        :data:`_RUN_ENDS` -- and ``result`` what it had). One request, bounded by
+        ``ENGINE_TIMEOUT``, whatever the run is doing; it waits for nothing and sends no
+        launch. :meth:`collect_scan` polls it; the collect of a scan whose run outlasted
+        its launch (``pentest.views.collect_scan_record``) reads it once.
+
+        Raises EngineError ``refused`` (status 404, the run id carried) when the engine
+        itself says it has no such run (:data:`NO_SUCH_RUN`): definite, and nothing to
+        collect or to stop. Raises ScanUncollected when the engine cannot be read about
+        the run -- unreachable, any other status, a body this backend cannot read, or a
+        404 something else wrote (a gateway's page says nothing about the run; only the
+        engine's own 404 does, as on a stop): none of that is news that the run ended,
+        and the id is kept all the same.
+        """
+        path = f"/api/scans/{run_id}"
+        resp = self._send_get_or_uncollected(path, run_id)
+
+        if resp.status_code == 404:
+            try:
+                said = _json_of(resp)
+            except ValueError:
+                said = None
+            if isinstance(said, dict) and said.get("detail") == NO_SUCH_RUN:
+                # The engine has no such run: definite, and nothing to stop.
+                raise EngineError(
+                    f"The engine has no scan run {run_id}.",
+                    kind=ENGINE_REFUSED,
+                    status=resp.status_code,
+                    run_id=run_id,
+                )
+            raise ScanUncollected(
+                f"A 404 the engine did not write was answered when asked about scan run "
+                f"{run_id}; the scan may still be running, and can be collected later: "
+                f"{_excerpt(resp.text)}",
+                run_id=run_id,
+            )
+        if not (200 <= resp.status_code < 300):
+            raise ScanUncollected(
+                f"The engine answered {resp.status_code} when asked about scan run "
+                f"{run_id}; the scan may still be running, and can be collected "
+                f"later: {_excerpt(resp.text)}",
+                run_id=run_id,
+            )
+        try:
+            return self._read_json(resp, path)
+        except EngineError as exc:
+            raise ScanUncollected(
+                f"The engine's answer about scan run {run_id} could not be read; the "
+                f"scan may still be running, and can be collected later: {exc}",
+                run_id=run_id,
+            ) from exc
 
     def _send_get_or_uncollected(self, path: str, run_id: str) -> requests.Response:
         try:
