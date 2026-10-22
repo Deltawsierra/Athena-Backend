@@ -406,6 +406,16 @@ RUN_ABORTED = "aborted"
 #: its id.
 _RUN_ENDS = (RUN_COMPLETED, RUN_FAILED, RUN_ABORTED)
 
+#: What the engine's own 404 says about a run it does not have (api/server.py). Only
+#: this body, not a 404 anything else wrote, says there is no such run.
+NO_SUCH_RUN = "No such scan run"
+
+
+def run_has_ended(record) -> bool:
+    """Whether a run's record (:meth:`CyberEngineClient.read_scan_run`) says the run
+    ended in a state this backend reads: ``done`` and one of :data:`_RUN_ENDS`."""
+    return isinstance(record, dict) and record.get("done") is True and record.get("state") in _RUN_ENDS
+
 
 class CyberEngineClient:
     """
@@ -566,11 +576,12 @@ class CyberEngineClient:
             return body
         return None
 
-    def _collect(self, run_id: str, on_run) -> dict:
-        """Collect a run the engine named for a launch, once ``on_run`` has it."""
+    def _collect(self, run_id: str, on_run, collect_seconds: float | None = None) -> dict:
+        """Collect a run the engine named for a launch, once ``on_run`` has it, for at
+        most ``collect_seconds`` (:meth:`collect_scan`)."""
         if on_run is not None:
             on_run(run_id)
-        return self.collect_scan(run_id)
+        return self.collect_scan(run_id, collect_seconds=collect_seconds)
 
     @staticmethod
     def _key_held(resp: requests.Response) -> str | None:
@@ -685,7 +696,7 @@ class CyberEngineClient:
     @_saying_no_login_of_its_target
     def run_scan(self, target: str, engagement_ref: str | None = None, *,
                  idempotency_key: str | None = None, resend: bool = False,
-                 on_run=None) -> dict:
+                 on_run=None, collect_seconds: float | None = None) -> dict:
         """
         Run a scan and return its findings.
 
@@ -744,10 +755,21 @@ class CyberEngineClient:
         be going, before it is collected, so the caller can keep the id where a Stop
         finds it.
 
+        ``collect_seconds`` bounds how long the run is waited for in all: the engine is
+        asked to hold the launch inline for at most that long (never more than
+        ``SCAN_INLINE_WAIT_SECONDS``), and the run is then collected for the rest of
+        it (:meth:`collect_scan`). ``None`` is the default budget, ``SCAN_COLLECT_SECONDS``.
+        ``0`` asks for no inline wait and one read of the run: a launch answers as soon
+        as the engine names the run, and the scan is collected later
+        (``POST /api/pentest/scans/<uuid>/collect/``).
+
         No error this raises says the login ``target`` carries
         (``_saying_no_login_of_its_target``).
         """
-        payload = {"target": target, "wait_seconds": SCAN_INLINE_WAIT_SECONDS}
+        inline_wait = SCAN_INLINE_WAIT_SECONDS
+        if collect_seconds is not None:
+            inline_wait = min(float(collect_seconds), SCAN_INLINE_WAIT_SECONDS)
+        payload = {"target": target, "wait_seconds": inline_wait}
         if engagement_ref:
             payload["engagement_ref"] = engagement_ref
 
@@ -805,7 +827,7 @@ class CyberEngineClient:
             if first_run is not None:
                 # The FIRST launch's answer, as it was given, naming its run; one past
                 # the engine's size bound is not whole. The run is read as it stands.
-                return self._collect(first_run, on_run)
+                return self._collect(first_run, on_run, collect_seconds)
 
         if resp.status_code == 500:
             named = self._status_answer(resp)
@@ -816,7 +838,7 @@ class CyberEngineClient:
                 # X-Run-Id: a run was registered, and whether its work started is
                 # unknown. Collected like a 500 whose state is null: read, it says how
                 # it ended; unreadable, it is still running, with its id.
-                return self._collect(_header_run_id(resp), on_run)
+                return self._collect(_header_run_id(resp), on_run, collect_seconds)
             if run_id is not None:
                 if named.get("state") == RUN_FAILED:
                     raise EngineError(
@@ -828,14 +850,14 @@ class CyberEngineClient:
                     )
                 # Its work started: it is scanning the customer, and this id is
                 # the only handle on it.
-                return self._collect(run_id, on_run)
+                return self._collect(run_id, on_run, collect_seconds)
 
         if not (200 <= resp.status_code < 300):
             if _header_run_id(resp) is not None and _body_run_id(resp) is None:
                 # Any other refusal whose body names no run -- a 502 proxy page --
                 # while the engine's X-Run-Id names one: the engine registered that
                 # run, and nothing here says it did not start. Collected by that id.
-                return self._collect(_header_run_id(resp), on_run)
+                return self._collect(_header_run_id(resp), on_run, collect_seconds)
             raise self._refused(resp)
 
         try:
@@ -853,7 +875,7 @@ class CyberEngineClient:
             # an old engine's synchronous result, it recorded "upstream reset" as a
             # completed scan). Collected by the header's id: read, the run says how
             # it ended; unreadable, it is still running, with its id.
-            return self._collect(_header_run_id(resp), on_run)
+            return self._collect(_header_run_id(resp), on_run, collect_seconds)
 
         if ANSWER_FIELD in accepted and accepted[ANSWER_FIELD] != ANSWER_STATUS:
             said = f"HTTP {resp.status_code} with answer {accepted[ANSWER_FIELD]!r}"
@@ -901,7 +923,7 @@ class CyberEngineClient:
                     )
                 # An older engine that still answers synchronously.
                 return accepted
-            return self._collect(run_id, on_run)
+            return self._collect(run_id, on_run, collect_seconds)
 
         # A 202 (or any other 2xx): the run is not over, whatever state it names.
         if run_id is None:
@@ -911,7 +933,7 @@ class CyberEngineClient:
                 kind=ENGINE_UNREADABLE,
                 status=resp.status_code,
             )
-        return self._collect(run_id, on_run)
+        return self._collect(run_id, on_run, collect_seconds)
 
     @staticmethod
     def _unread(http_status: int | None, run_id: str, said: str) -> "ScanUncollected":
@@ -948,7 +970,7 @@ class CyberEngineClient:
             run_id=run_id,
         )
 
-    def collect_scan(self, run_id: str) -> dict:
+    def collect_scan(self, run_id: str, *, collect_seconds: float | None = None) -> dict:
         """
         Wait for a scan the engine is running, and return its findings.
 
@@ -957,36 +979,17 @@ class CyberEngineClient:
         collect it later. Raises ScanUncollected -- a ScanStillRunning -- when
         the engine cannot be read about the run: that is not news that the run
         ended, and the id is kept all the same.
+
+        ``collect_seconds`` is how long to keep collecting, ``SCAN_COLLECT_SECONDS``
+        when None. ``0`` is exactly one read of the run: done, it is returned as
+        it ended; not done, ScanStillRunning at once. Every read is bounded by
+        ``ENGINE_TIMEOUT``, whatever the budget.
         """
-        deadline = time.monotonic() + SCAN_COLLECT_SECONDS
-        path = f"/api/scans/{run_id}"
+        budget = SCAN_COLLECT_SECONDS if collect_seconds is None else max(0.0, float(collect_seconds))
+        deadline = time.monotonic() + budget
 
         while True:
-            resp = self._send_get_or_uncollected(path, run_id)
-
-            if resp.status_code == 404:
-                # The engine has no such run: definite, and nothing to stop.
-                raise EngineError(
-                    f"The engine has no scan run {run_id}.",
-                    kind=ENGINE_REFUSED,
-                    status=resp.status_code,
-                    run_id=run_id,
-                )
-            if not (200 <= resp.status_code < 300):
-                raise ScanUncollected(
-                    f"The engine answered {resp.status_code} when asked about scan run "
-                    f"{run_id}; the scan may still be running, and can be collected "
-                    f"later: {_excerpt(resp.text)}",
-                    run_id=run_id,
-                )
-            try:
-                status = self._read_json(resp, path)
-            except EngineError as exc:
-                raise ScanUncollected(
-                    f"The engine's answer about scan run {run_id} could not be read; the "
-                    f"scan may still be running, and can be collected later: {exc}",
-                    run_id=run_id,
-                ) from exc
+            status = self.read_scan_run(run_id)
 
             if status.get("done") is True:
                 return self._finished_scan(status, run_id)
@@ -994,11 +997,65 @@ class CyberEngineClient:
             if time.monotonic() >= deadline:
                 raise ScanStillRunning(
                     f"The engine is still running this scan after "
-                    f"{SCAN_COLLECT_SECONDS:.0f}s; it can be collected later.",
+                    f"{budget:.0f}s; it can be collected later.",
                     run_id=run_id,
                 )
 
             time.sleep(SCAN_POLL_SECONDS)
+
+    def read_scan_run(self, run_id: str) -> dict:
+        """One bounded read of run ``run_id``: its record as the engine wrote it
+        (``GET /api/scans/{run_id}``: ``done`` says whether it ended, ``state`` how --
+        :data:`_RUN_ENDS` -- and ``result`` what it had). One request, bounded by
+        ``ENGINE_TIMEOUT``, whatever the run is doing; it waits for nothing and sends no
+        launch. :meth:`collect_scan` polls it; the collect of a scan whose run outlasted
+        its launch (``pentest.views.collect_scan_record``) reads it once.
+
+        Raises EngineError ``refused`` (status 404, the run id carried) when the engine
+        itself says it has no such run (:data:`NO_SUCH_RUN`): definite, and nothing to
+        collect or to stop. Raises ScanUncollected when the engine cannot be read about
+        the run -- unreachable, any other status, a body this backend cannot read, or a
+        404 something else wrote (a gateway's page says nothing about the run; only the
+        engine's own 404 does, as on a stop): none of that is news that the run ended,
+        and the id is kept all the same.
+        """
+        path = f"/api/scans/{run_id}"
+        resp = self._send_get_or_uncollected(path, run_id)
+
+        if resp.status_code == 404:
+            try:
+                said = _json_of(resp)
+            except ValueError:
+                said = None
+            if isinstance(said, dict) and said.get("detail") == NO_SUCH_RUN:
+                # The engine has no such run: definite, and nothing to stop.
+                raise EngineError(
+                    f"The engine has no scan run {run_id}.",
+                    kind=ENGINE_REFUSED,
+                    status=resp.status_code,
+                    run_id=run_id,
+                )
+            raise ScanUncollected(
+                f"A 404 the engine did not write was answered when asked about scan run "
+                f"{run_id}; the scan may still be running, and can be collected later: "
+                f"{_excerpt(resp.text)}",
+                run_id=run_id,
+            )
+        if not (200 <= resp.status_code < 300):
+            raise ScanUncollected(
+                f"The engine answered {resp.status_code} when asked about scan run "
+                f"{run_id}; the scan may still be running, and can be collected "
+                f"later: {_excerpt(resp.text)}",
+                run_id=run_id,
+            )
+        try:
+            return self._read_json(resp, path)
+        except EngineError as exc:
+            raise ScanUncollected(
+                f"The engine's answer about scan run {run_id} could not be read; the "
+                f"scan may still be running, and can be collected later: {exc}",
+                run_id=run_id,
+            ) from exc
 
     def _send_get_or_uncollected(self, path: str, run_id: str) -> requests.Response:
         try:

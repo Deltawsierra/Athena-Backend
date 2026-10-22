@@ -773,6 +773,12 @@ NOT_STOPS = {
             "never saw the first send it starts the scan, so it is launch-direction"
         )
     },
+    "pentest:collect_pentest_scan": {
+        "POST": (
+            "collects a finished run's record from the engine: a read of the engine and a write "
+            "of this record; it starts and stops nothing"
+        )
+    },
     "pentest:download_scan_pdf": _get("renders a scan report as a PDF: a read that changes nothing"),
     "pentest:resend_scan_email": {"POST": "sends a scan report again by email: it stops nothing"},
     "pentest:pentest_scan_status": _get(),

@@ -1704,6 +1704,8 @@ ROUTES: dict[str, str] = {
     "failsafe:state": _READ,
     "failsafe:submit-signature": _DOCS + "a signature on a command; answers the command, as command-detail reads it",
     "pentest:allowed_pentest_checks": _READ,
+    "pentest:collect_pentest_scan": _DOCS + "collects a pending scan's run from the engine; answers the scan as "
+    "detail_pentest_scan reads it, or that nothing was collected",
     "pentest:detail_pentest_scan": _READ,
     "pentest:download_scan_pdf": "exports",
     "pentest:engagement_detail": _READ,
@@ -2121,6 +2123,13 @@ COMMANDS: dict[str, str] = {
     "approve_deployment": "commands: an operator's approval of the engine's deployment; prints the "
     "engine's measured tuple, never its key",
     "deliver_owed_stops": "commands",
+    # Collects every pending scan's run from the engine (pentest.views.collect_scan_record,
+    # the collect route's own code); prints one line per scan -- its uuid, run id, the
+    # answer's status and what the collect recorded: "still running", the verdict, or the
+    # end the engine gave, said with the target's login withheld (PentestScan.said) -- and
+    # a count of what stays pending.
+    "collect_pending_scans": "commands: collects pending scans' runs from the engine; prints per scan its uuid, "
+    "run id, status and the recorded end (login withheld), and a count",
     "reconcile_dispatch_attempt": "commands: settles one dispatch attempt by hand; prints its id and state",
     "recompute_chain_decisions": "commands: re-derives decisions; prints counts",
     "retry_blocking_dispatches": "commands: retries owed dispatches; prints counts and ids",
