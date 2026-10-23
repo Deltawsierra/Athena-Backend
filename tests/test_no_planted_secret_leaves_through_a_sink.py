@@ -296,6 +296,8 @@ PATHS: dict[str, str] = {
     "a page quoting the request, and run past their deadline",
     "closure_forward": "a closure recorded by the engine service and forwarded; refused; retried by "
     "manage.py retry_closure_forwards",
+    "retest_check": "a retest run's verdict, whose detail quotes the target's login, pulled from the engine into "
+    "a retest check; collected again; the finding's checks and the finding read",
     "gate_and_effects": "the gate's approval read, an observed effect signed by the test keyring's key, "
     "and a signed assurance receipt",
     "failsafe": "the engines' poll, a stop draft on the service token, the state read",
@@ -397,6 +399,8 @@ class Engine:
         self.accepted, self.completed = ACCEPTED, COMPLETED
         self.signing_key = signing_key
         self.runs: dict[str, dict] = {}
+        #: The decision twins kept under each scan run, as GET /api/decisions?run_id= lists them.
+        self.twins: dict[str, list[dict]] = {}
         self.hold = False
         self.moved_stop = False
         self.fake = Fake("engine", self.answer)
@@ -433,6 +437,14 @@ class Engine:
             if run["state"] == "running" and not self.hold:
                 run.update(state="completed", done=True, result=copy.deepcopy(self.completed["result"]))
             return 200, copy.deepcopy(run)
+        if method == "GET" and path.startswith("/api/decisions"):
+            from urllib.parse import parse_qs, urlparse
+
+            query = parse_qs(urlparse(path).query)
+            run_id = (query.get("run_id") or [None])[0]
+            wanted = (query.get("finding_type") or [None])[0]
+            twins = [copy.deepcopy(t) for t in self.twins.get(run_id, []) if wanted in (None, t.get("finding_type"))]
+            return 200, {"tenant": "default", "decisions": twins}
         if path == "/api/assurance/receipt/sign":
             return 200, _envelope(_engine_bytes(document.get("receipt")), self.signing_key)
         if path == "/api/classify-cve":
@@ -1096,6 +1108,67 @@ class World:
             h.get("X-Minotaur-Key") == CANARY["minotaur.outcomes_key"] for _m, _p, h in self.service.seen
         )
 
+    def retest_check(self, docs, signals):
+        """A retest run's verdict pulled from the engine into a RetestCheck (owner decision
+        8, assurance.retest_checks). The engine's detail quotes the target's login back;
+        the recorded row, the collect's answer, the list and the finding withhold it. The
+        finding's status, last_seen, retest flag and remediation state are what they were."""
+        from assurance.ingest import deployment_for_scan
+        from assurance.models import Finding, RetestCheck
+        from pentest.models import PentestScan
+
+        admin = self.client(self.admin)
+        login = CANARY["request.target_userinfo"]
+        target = f"https://scanner:{login}@offline.invalid/"
+        twin_run, run_id = str(uuid.uuid4()), str(uuid.uuid4())
+        # The scan the twin was captured under: of this record, ingested (its deployment
+        # exists), with the one finding of the verdict's type the retest is of.
+        scan = PentestScan.objects.create(
+            user=self.admin, target_url=target, consent=True, status=PentestScan.STATUS_COMPLETED,
+            engine_run_id=twin_run,
+        )
+        deployment = deployment_for_scan(scan)
+        finding = Finding.objects.create(
+            deployment=deployment, scan=scan, fingerprint="fp-retest-check", finding_type="open_redirect",
+            title="Open redirect", severity="high", retest_required=True,
+        )
+        kept = ("status", "last_seen", "retest_required", "remediation_state")
+        before = Finding.objects.filter(pk=finding.pk).values(*kept).first()
+        detail = f"open_redirect was reported against {target} on the retest: still there"
+        self.engine.runs[run_id] = {
+            "run_id": run_id, "kind": "retest", "target": target, "state": "completed", "done": True,
+            "reason": None, "key_hash": "operator-key-hash",
+            "result": {
+                "twin_id": 7, "verdict": "still_open", "detail": detail, "target": target,
+                "finding_type": "open_redirect", "inventory_digest": None, "run_id": run_id, "scan_record_id": 901,
+                "check": {"id": 7, "tenant": "default", "twin_id": 7, "target": target,
+                          "finding_type": "open_redirect", "verdict": "still_open", "detail": detail,
+                          "inventory_digest": None, "run_id": 901, "checked_by": "operator-key-hash",
+                          "checked_at": "2026-10-22T12:00:00+00:00"},
+            },
+        }
+        self.engine.twins[twin_run] = [
+            {"id": 7, "tenant": "default", "run_id": twin_run, "target": target, "finding_type": "open_redirect"}
+        ]
+        url = f"/api/assurance/findings/{finding.uuid}/retest-checks/"
+        body = {"run_id": run_id, "twin_run_id": twin_run}
+        collected = self.call(
+            docs, "api.answers", admin, "post", url + "collect/", "finding-retest-checks-collect", data=body, format="json",
+        )
+        signals["collect"] = collected.status_code
+        again = self.call(
+            docs, "api.answers", admin, "post", url + "collect/", "finding-retest-checks-collect", data=body, format="json",
+        )
+        signals["again"] = again.status_code
+        signals["rows"] = RetestCheck.objects.filter(engine_run_id=run_id).count()
+        signals["recorded"] = RetestCheck.objects.filter(engine_run_id=run_id, finding=finding).exists()
+        signals["listed"] = self.call(docs, "api.answers", admin, "get", url, "finding-retest-checks").status_code
+        served = self.call(docs, "api.answers", admin, "get", f"/api/assurance/findings/{finding.uuid}/", "finding-detail")
+        signals["served"] = len((served.json() or {}).get("retest_checks") or [])
+        signals["finding_unchanged"] = Finding.objects.filter(pk=finding.pk).values(*kept).first() == before
+        # The engine's detail quoted the login: the leak was driven, not missed.
+        signals["engine_detail_quoted_login"] = login in self.engine.runs[run_id]["result"]["detail"]
+
     def gate_and_effects(self, docs, signals):
         from tests.test_spine_authority_chain import WF, _base, _world
         from tests.test_the_gate_attests_the_approval_it_read import _record
@@ -1737,6 +1810,11 @@ ROUTES: dict[str, str] = {
     "finding-remediation-assign": _DOCS + "assigns a finding's remediation; answers it, as finding-remediation reads it",
     "finding-remediation-transition": _DOCS + "moves a remediation; answers it, as finding-remediation reads it",
     "finding-repair-contracts": _READ,
+    # A retest check (assurance.retest_checks): the collect answers the check it recorded
+    # -- the engine's detail, the target's login withheld -- and the finding's unchanged
+    # closure standing; the list answers every check of the finding.
+    "finding-retest-checks": _READ,
+    "finding-retest-checks-collect": _READ,
     "finding-vendor-packet": "api.packs",
     "provider-assertion-detail": _READ,
     "provider-assertion-list": _READ,
@@ -2272,6 +2350,11 @@ def test_every_path_ran(observed):
     assert s["connectors"]["webhook_got_token"] is True
     assert s["closure_forward"]["recorded"] == {"ok": 201, "echo": 201}, s["closure_forward"]
     assert s["closure_forward"]["minotaur_got_key"] is True
+    assert s["retest_check"]["collect"] == 201 and s["retest_check"]["again"] == 200, s["retest_check"]
+    assert s["retest_check"]["rows"] == 1 and s["retest_check"]["recorded"] is True, s["retest_check"]
+    assert s["retest_check"]["listed"] == 200 and s["retest_check"]["served"] == 1, s["retest_check"]
+    assert s["retest_check"]["finding_unchanged"] is True, s["retest_check"]
+    assert s["retest_check"]["engine_detail_quoted_login"] is True, s["retest_check"]
     assert s["gate_and_effects"]["gate_read"] == 200, s["gate_and_effects"]
     assert s["gate_and_effects"]["effect"] == "recorded", s["gate_and_effects"]
     assert s["failsafe"]["poll"] == 200 and s["failsafe"]["draft"] in (200, 201), s["failsafe"]

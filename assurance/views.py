@@ -126,6 +126,9 @@ from . import repair_contract
 from . import authority_chain_records
 from . import closure_evidence as evidence_route
 from . import closure_forward
+from .retest_checks import NotRecorded as CheckNotRecorded
+from .retest_checks import collect as collect_retest_check
+from .retest_checks import is_run_id as is_engine_run_id
 from .retest_closure import ClosureRefused, classify, closure_standing, record_closure_evidence
 from .vendor import assess_vendors
 from .serializers import (
@@ -142,10 +145,12 @@ from .serializers import (
     ProviderAssertionSerializer,
     ProviderSerializer,
     RemediationEventSerializer,
+    RetestCheckSerializer,
     RetestRequirementSerializer,
     UnknownSerializer,
     WorkflowChainOutcomeSerializer,
 )
+from accounts.permissions import IsAdminOrAnalyst
 
 User = get_user_model()
 
@@ -3271,6 +3276,84 @@ class FindingViewSet(
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=True, methods=["get"], url_path="retest-checks")
+    def retest_checks(self, request, uuid=None):
+        """Every retest check recorded against this finding (:mod:`assurance.retest_checks`),
+        newest first, paginated as the API's lists are: the engine's retest verdicts this
+        backend pulled and recorded. A read, open to whoever can see the finding, as the
+        rest of the assurance reads are. Checks are not closure evidence: ``closure`` on
+        the finding says what a closure stands on, and no check moves it."""
+        finding = self.get_object()
+        checks = finding.retest_checks.all()
+        page = self.paginate_queryset(checks)
+        if page is not None:
+            return self.get_paginated_response(RetestCheckSerializer(page, many=True).data)
+        return Response(RetestCheckSerializer(checks, many=True).data)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="retest-checks/collect",
+        permission_classes=[IsAdminOrAnalyst],
+        parser_classes=[SafeJSONParser],
+    )
+    def retest_checks_collect(self, request, uuid=None):
+        """Collect a finished retest run's verdict from the engine and record it against
+        this finding as a :class:`~assurance.models.RetestCheck` (owner decision 8; the
+        order and every refusal are :mod:`assurance.retest_checks`'). The body names
+        ``run_id`` (the retest run's engine id) and ``twin_run_id`` (the scan run the
+        retested twin was listed under), both required.
+
+        An admin or analyst who can see the finding, as finding detail is scoped. Not a
+        stop (``safety.stops``): one bounded read of the engine, before and outside any
+        transaction, and one row written to the check's own table; it starts and stops
+        nothing, and it never launches. Not closure evidence: the finding's ``status``,
+        ``last_seen``, retest flag, remediation state and closure standing are what they
+        were, and the answer carries that standing unchanged (``closure``).
+
+        Answers: 201, the check recorded; 200, the existing row for a run already
+        recorded, or the honest phase of a run that ended without a verdict (nothing
+        recorded); 202, a run still going; 404, a run the engine does not have -- a
+        tenant-bound key reads another tenant's run as no such run -- or a scan that is
+        not in this record; 409 and 422, an identity that does not hold; 503, an engine
+        that could not be read. Nothing is written for any answer but the 201."""
+        finding = self.get_object()
+        body = request.data
+        if not isinstance(body, dict):
+            raise ValidationError({"body": "a JSON object naming run_id and twin_run_id"})
+        named = {}
+        for field in ("run_id", "twin_run_id"):
+            value = body.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValidationError({field: "required: the engine's run id, a non-empty string"})
+            if not is_engine_run_id(value):
+                raise ValidationError(
+                    {field: "not a run id this backend names to the engine: letters, digits, '.', '_' and '-', "
+                            "at most 64 of them"}
+                )
+            named[field] = value
+        try:
+            client = CyberEngineClient.from_settings()
+        except RuntimeError:
+            return Response(
+                {"detail": "Not recorded: no engine is configured to read the run from.", "recorded": False},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        try:
+            check, created = collect_retest_check(
+                finding, named["run_id"], named["twin_run_id"], client=client, user=request.user
+            )
+        except CheckNotRecorded as refused:
+            return Response(refused.body, status=refused.status)
+        return Response(
+            {
+                "check": RetestCheckSerializer(check).data,
+                "recorded": created,
+                "closure": closure_standing(Finding.objects.get(pk=finding.pk)),
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["get"], url_path="remediation")
     def remediation(self, request, uuid=None):
         """The finding's remediation workflow (Phase 2.3): its current process
@@ -3572,8 +3655,9 @@ class FindingViewSet(
             self._scoped_findings()
             .select_related("deployment", "asset", "owner", "assignee")
             # The closure standing reads each finding's latest closure evidence, and
-            # holds it to the finding's current repair contract.
-            .prefetch_related("evidence", "closure_evidence", "repair_contracts")
+            # holds it to the finding's current repair contract. The retest checks the
+            # serializer carries (its latest few) are read with the page too.
+            .prefetch_related("evidence", "closure_evidence", "repair_contracts", "retest_checks")
         )
         severity = self.request.query_params.get("severity")
         if severity:
