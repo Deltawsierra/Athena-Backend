@@ -359,9 +359,60 @@ def test_an_ingested_finding_owes_the_retest_and_its_patch_close_is_refused():
     assert _api_patch(finding) is True
 
 
+# A queryset ``update``/``bulk_update`` skips Finding.save() and so the closure gate.
+# ``_writes_on_findings`` is the guard's eye for one: each such call that names a
+# disposition field and is made on findings. "On findings" first meant a lower-case
+# ``findings`` in the 200 characters before the call (``deployment.findings``, a local
+# named ``findings``). It matched nothing spelled with the model, so
+# ``Finding.objects.filter(pk=pk).update(status=...)`` went through. It now also means the
+# model's manager by name -- ``Finding.objects``, ``_default_manager`` or ``_base_manager``,
+# bare, module-qualified (``models.Finding``) or renamed on import (``Finding as X``) --
+# either within those 200 characters (a queryset bound to a name just above the call) or
+# leading straight into the call through any ``.filter(...)``/``.exclude(...)`` hops, however
+# long the chain and whatever whitespace, newlines or comments lie between its parts.
+_ARGS = r"[^()]*"
+for _ in range(4):  # a hop's arguments may nest parentheses four deep
+    _ARGS = rf"(?:[^()]|\({_ARGS}\))*"
+_GAP = r"(?:\s|\\|#[^\n]*)*"  # whitespace, a continuation or a comment between the parts of a chain
+
+# The retest flag too: a queryset update lowering it would let a close past the
+# gate, and the flagger scan below only matches it as a dict key or an
+# assignment (#125 review round 2, L5).
+_DISPOSITION_WRITE = re.compile(
+    r"(\.update|bulk_update)\((?:[^()]|\([^()]*\))*\b(status|remediation_state|retest_required)\b", re.S
+)
+
+
+def _finding_managers(text):
+    """The model's manager under every name ``text`` reaches it by, and that manager as
+    the root of a chain that runs straight into the call that follows it."""
+    names = "|".join(map(re.escape, ["Finding", *re.findall(r"\bFinding\s+as\s+(\w+)", text)]))
+    manager = rf"\b(?:{names}){_GAP}\.{_GAP}(?:objects|_default_manager|_base_manager)\b"
+    hops = rf"(?:{_GAP}\.{_GAP}\w+\({_ARGS}\))*"
+    return re.compile(manager), re.compile(manager + hops + _GAP + r"\.?" + _GAP + r"\Z")
+
+
+def _writes_on_findings(text):
+    """The queryset ``update``/``bulk_update`` calls in ``text`` that name a disposition
+    field and are made on findings."""
+    manager, chain = _finding_managers(text)
+    for match in _DISPOSITION_WRITE.finditer(text):
+        before = text[: match.start()]
+        window = max(0, match.start() - 200)
+        if (
+            "Finding" in match.group(0)
+            or "findings" in text[window : match.start()]
+            or manager.search(before, window)
+            or chain.search(before)
+        ):
+            yield match
+
+
 def test_no_code_path_writes_a_findings_disposition_past_save():
     """A queryset ``update``/``bulk_update`` skips :meth:`Finding.save` and so the
-    gate. None writes ``status`` or ``remediation_state`` on findings; the one
+    gate. None writes ``status`` or ``remediation_state`` on findings, whether it
+    reaches them by a related manager (``deployment.findings``) or by the model
+    (``Finding.objects``, ``models.Finding``, an ``as`` alias); the one
     literal CLOSED write is bom_drift's machine close of its own drift findings,
     which never carry ``retest_required`` (the flag is written only by the two
     sanctioned finding sources below, each through the gated save). And the
@@ -373,14 +424,12 @@ def test_no_code_path_writes_a_findings_disposition_past_save():
         for p in (REPO / "assurance").rglob("*.py")
         if "migrations" not in p.parts
     }
-    # The retest flag too: a queryset update lowering it would let a close past the
-    # gate, and the flagger scan below only matches it as a dict key or an
-    # assignment (#125 review round 2, L5).
-    bypass = re.compile(r"(\.update|bulk_update)\((?:[^()]|\([^()]*\))*\b(status|remediation_state|retest_required)\b", re.S)
-    for path, text in sources.items():
-        for match in bypass.finditer(text):
-            assert "Finding" not in match.group(0) and "findings" not in text[max(0, match.start() - 200):match.start()], (
-                path, match.group(0)[:120])
+    offenders = [
+        (str(path.relative_to(REPO)), text.count("\n", 0, match.start()) + 1, match.group(0)[:120])
+        for path, text in sources.items()
+        for match in _writes_on_findings(text)
+    ]
+    assert not offenders, offenders
     closers = sorted(p.name for p, t in sources.items() if re.search(r"(?<![=!<>])=\s*Finding\.Status\.CLOSED\b", t))
     assert closers == ["bom_drift.py"]
     flaggers = sorted(p.name for p, t in sources.items() if re.search(r"[\"']retest_required[\"']\s*:|\.retest_required\s*=", t))
@@ -393,6 +442,58 @@ def test_no_code_path_writes_a_findings_disposition_past_save():
     # above, unchanged, passes). Registering it is awareness of a real writer, not a
     # relaxation of the close gate.
     assert flaggers == ["achilles_results.py", "ingest.py"]
+
+
+_WRITES_ON_FINDINGS = {
+    "the model's manager": 'Finding.objects.update(status="closed")',
+    "a filter chain": "Finding.objects.filter(pk=pk).update(status=Finding.STATUS_CLOSED)",
+    "an exclude chain": 'Finding.objects.exclude(status="open").update(remediation_state="resolved")',
+    "the retest flag lowered": "Finding.objects.filter(pk=pk).update(retest_required=False)",
+    "bulk_update": 'Finding.objects.bulk_update(rows, ["status"])',
+    "parentheses nested in the filter": 'Finding.objects.filter(pk__in=ids(first(rows))).update(status="closed")',
+    "a chain broken across lines": (
+        '(\n    Finding.objects\n    .filter(pk=pk)\n    .exclude(severity="info")\n    .update(status="closed")\n)'
+    ),
+    "a comment between the hops": '(Finding.objects.filter(pk=pk)\n # close it\n .update(status="closed"))',
+    "a chain longer than the lookback window": (
+        "Finding.objects.filter("
+        + ", ".join(f"field_{i}=value_{i}" for i in range(30))
+        + ').exclude(pk=pk).update(status="closed")'
+    ),
+    "the model qualified by its module": 'models.Finding.objects.filter(pk=pk).update(status="closed")',
+    "the model's private manager": 'Finding._base_manager.filter(pk=pk).update(status="closed")',
+    "the model renamed on import": 'from .models import Finding as Row\n\nRow.objects.filter(pk=pk).update(status="closed")',
+    "a queryset bound to a name just above": 'rows = Finding.objects.select_for_update().filter(pk=pk)\nrows.update(status="closed")',
+    "a related manager (always caught)": 'deployment.findings.filter(pk=pk).update(status="closed")',
+    "a local named findings (always caught)": 'findings.update(remediation_state="resolved")',
+}
+_WRITES_NOT_ON_FINDINGS = {
+    "another model": "ClosureEvidenceForward.objects.filter(pk=pk).update(status=status)",
+    "a model whose name only ends in Finding": 'EffectFinding.objects.filter(pk=pk).update(status="x")',
+    "a finding written, but not a disposition field": 'Finding.objects.bulk_update(changed, ["asset"])',
+    "a finding selected by status, another field written": 'Finding.objects.filter(status="open").update(asset=asset)',
+    "the gated save": 'finding.save(update_fields=["status"])',
+    "the model read far above an unrelated write": (
+        "finding = Finding.objects.get(pk=pk)\n"
+        + "# unrelated\n" * 30
+        + "ClosureEvidenceForward.objects.filter(pk=pk).update(status=status)"
+    ),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(_WRITES_ON_FINDINGS))
+def test_the_disposition_scan_names_a_queryset_write_on_findings_in_every_spelling(spelling):
+    """The guard above is only as good as its eye. A related manager was always named;
+    the model's own spelling was not, and a planted
+    ``Finding.objects.filter(pk=pk).update(status=...)`` left the guard green."""
+    assert len(list(_writes_on_findings(_WRITES_ON_FINDINGS[spelling]))) == 1
+
+
+@pytest.mark.parametrize("spelling", sorted(_WRITES_NOT_ON_FINDINGS))
+def test_the_disposition_scan_leaves_a_write_that_is_not_a_findings_disposition_alone(spelling):
+    """The wider eye names no more than a disposition written past ``save()``: another
+    model, a finding's other columns, and the gated save are not it."""
+    assert list(_writes_on_findings(_WRITES_NOT_ON_FINDINGS[spelling])) == []
 
 
 # ------------------------------------------------ what is not a closure is untouched
