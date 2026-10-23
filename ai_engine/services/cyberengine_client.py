@@ -2,7 +2,7 @@ import contextlib
 import functools
 import re
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import requests
 from django.conf import settings as django_settings
@@ -1286,6 +1286,34 @@ class CyberEngineClient:
                 run_id=run_id,
             )
         return read_retest_run(self._read_json(resp, path), run_id)
+
+    def decision_twins(self, run_id: str, finding_type: str | None = None,
+                       tenant_id: str | None = None) -> list[dict]:
+        """The decision twins the engine kept under scan run ``run_id``: ``GET
+        /api/decisions?run_id=`` (athena-engine ``api/server.py list_decisions``), each
+        ``{id, tenant, run_id, target, finding_type, inputs, decision, inventory_digest,
+        captured_at}``, newest first, at most the engine's own page.
+
+        A read that starts and stops nothing. A retest check (``assurance.retest_checks``)
+        reads it to hold the twin a verdict names to the scan run it was captured under:
+        a twin's ``run_id`` is the SCAN run this backend recorded, which is how the
+        verdict is told to a finding of this record. The answer's ``decisions`` list, or an
+        ``unreadable`` EngineError when the body is not that shape.
+        """
+        query = {"run_id": run_id}
+        if finding_type:
+            query["finding_type"] = finding_type
+        if tenant_id:
+            query["tenant_id"] = tenant_id
+        body = self._get(f"/api/decisions?{urlencode(query)}")
+        twins = body.get("decisions") if isinstance(body, dict) else None
+        if not isinstance(twins, list):
+            raise EngineError(
+                "The engine answered the decisions listing in a shape this backend does not read: "
+                "no `decisions` list. Nothing was read from it.",
+                kind=ENGINE_UNREADABLE, status=200,
+            )
+        return twins
 
     def evidence_pack(self, reason: str, since: str | None = None, until: str | None = None,
                       run_id: str | None = None, engagement_ref: str | None = None,

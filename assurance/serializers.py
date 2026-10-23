@@ -32,6 +32,7 @@ from .models import (
     Provider,
     ProviderAssertion,
     RemediationEvent,
+    RetestCheck,
     RetestRequirement,
     Unknown,
     WorkflowChainOutcome,
@@ -96,6 +97,38 @@ class RemediationEventSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+#: How many of a finding's retest checks its serializer carries, newest first. The whole
+#: list is ``GET /api/assurance/findings/<uuid>/retest-checks/``.
+RETEST_CHECKS_SERVED = 10
+
+
+class RetestCheckSerializer(serializers.ModelSerializer):
+    """One retest check (``assurance.retest_checks``): the engine's retest verdict this
+    backend pulled and recorded against the finding. Read-only: every field is the
+    engine's word, said as the scan says it, or the record's own. NOT closure evidence --
+    the finding's ``closure`` says what a closure stands on, and no check moves it."""
+
+    collected_by = serializers.CharField(source="collected_by.username", read_only=True, allow_null=True)
+
+    class Meta:
+        model = RetestCheck
+        fields = [
+            "engine_run_id",
+            "scan_record_id",
+            "twin_id",
+            "twin_run_id",
+            "verdict",
+            "verdict_known",
+            "detail",
+            "state",
+            "stopped_after_recording",
+            "engine_checked_at",
+            "collected_at",
+            "collected_by",
+        ]
+        read_only_fields = fields
+
+
 class FindingSerializer(serializers.ModelSerializer):
     evidence = EvidenceSerializer(many=True, read_only=True)
     evidence_class = serializers.CharField(read_only=True)
@@ -145,12 +178,22 @@ class FindingSerializer(serializers.ModelSerializer):
     # standing that says a closure is effect-backed; a closed finding that asked
     # for no retest reads "closed_without_retest", never verified.
     closure = serializers.SerializerMethodField()
+    # The engine's retest verdicts this backend pulled and recorded against the finding
+    # (assurance.retest_checks), newest first, at most RETEST_CHECKS_SERVED; the whole
+    # list is GET findings/<uuid>/retest-checks/. Checks, not closure evidence: ``closure``
+    # above is what a closure stands on, and no check moves it. Read-only, additive.
+    retest_checks = serializers.SerializerMethodField()
 
     def get_status_must_not_imply(self, obj) -> str | None:
         return Finding.MUST_NOT_IMPLY.get(obj.status)
 
     def get_closure(self, obj) -> dict:
         return closure_standing(obj)
+
+    def get_retest_checks(self, obj) -> list:
+        # A page's checks are prefetched (FindingViewSet.get_queryset); the slice reads
+        # the prefetched rows, so a page of findings stays a fixed number of queries.
+        return RetestCheckSerializer(obj.retest_checks.all()[:RETEST_CHECKS_SERVED], many=True).data
 
     class Meta:
         model = Finding
@@ -181,6 +224,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "location",
             "retest_required",
             "closure",
+            "retest_checks",
             "evidence_class",
             "evidence",
             "asset_uuid",

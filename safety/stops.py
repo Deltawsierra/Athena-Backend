@@ -729,6 +729,17 @@ NOT_STOPS = {
     "finding-closure-evidence": {
         "POST": "the engine service records a retest run's evidence: it closes nothing and stops nothing"
     },
+    # A retest check (assurance.retest_checks): the engine's retest verdict, pulled by
+    # this backend and recorded against the finding it was retested for. Not closure
+    # evidence; it closes nothing. The engine is read before and outside any transaction,
+    # and the write is one row of its own table.
+    "finding-retest-checks": _get(),
+    "finding-retest-checks-collect": {
+        "POST": (
+            "collects a finished retest run's verdict from the engine and records it: a read of the engine "
+            "and a write of this record; it starts and stops nothing"
+        )
+    },
     "finding-assignable": _get(),
     "finding-repair-contracts": {
         "GET": _READ,

@@ -633,6 +633,77 @@ or from the environment when the settings name none.
   (`deliver_owed_stops`) among them. No credential setting ever fails a record, a
   command or the start.
 
+### Retest checks
+
+A **retest check** is the engine's retest verdict -- `closed`, `still_open` or
+`inconclusive`, "an absence on a retest that looked, not proof of a fix" in the
+engine's own words -- pulled from the engine by this backend with its operator key and
+recorded against the finding it was retested for (`RetestCheck`, migration
+`assurance.0082`, `assurance/retest_checks.py`). Owner decision 8, as the recon of
+22 October 2026 resolved it: PULL, into a record of its own, because the engine's
+verdict carries none of what the closure gate reads.
+
+**What a check is NOT.** A check is not closure evidence and it closes nothing. No
+check writes a finding's `status`, `last_seen`, `retest_required` or
+`remediation_state`; none creates a `RetestClosureEvidence` row, forwards anything to
+Minotaur's dataset or adds an `Evidence` row; the closure standing a finding serves is
+what it was before the check. A `closed` check leaves a retest-gated finding
+`not_closable` ("no closure evidence recorded"), and the gate refuses its close as it
+did. A `still_open` check never refreshes `last_seen`: it is a sighting on a retest scan
+this record never ingested, and the check row carries its own date.
+`POST /api/assurance/findings/<uuid>/closure-evidence/` stays the engine service's route
+for Minotaur's replay documents, and the only writer of closure evidence.
+
+**The route.** `POST /api/assurance/findings/<uuid>/retest-checks/collect/` with
+`{"run_id": "<the retest run's engine id>", "twin_run_id": "<the scan run the retested
+twin was listed under>"}`, both required (400 naming the field; a value that is not a
+run id is refused before the engine is asked). An admin or analyst who can see the
+finding, as finding detail is scoped (404 otherwise; 401 anonymous; 403 a viewer). In
+order, and nothing is written unless every step passes:
+
+1. a run already recorded is answered 200 with its row; the engine is not read;
+2. one bounded read of the run (`GET /api/scans/<run_id>`, read as `read_retest_run`
+   reads it), before and outside any transaction. The engine's own 404 is a 404 here:
+   `the engine has no run <id> this backend can read`. An engine that cannot be reached
+   or read is 503, described by the failure's kind, never by the engine's words;
+3. a run still going is 202 `{"phase": "running"}`; a run that stopped before a verdict,
+   failed, was refused or ended without a verdict is 200 `{"phase", "recorded": false,
+   "detail"}` -- the honest phase, nothing recorded, as the dashboard's own watch files
+   nothing for them. A verdict the engine filed before the run was aborted is recorded,
+   with `stopped_after_recording: true`;
+4. identity: the `PentestScan` of this record that ran under `twin_run_id` (404 `that
+   scan is not in this record` otherwise -- a scan started outside this record, such as
+   a dashboard-direct legacy scan, cannot have its retest recorded here); its
+   deployment, found as the ingest keyed it and never created (422 when its run was
+   never ingested, or when it is another deployment than the finding's); the verdict's
+   type is the finding's (422), and the finding is the one of that type in the
+   deployment (409 naming the candidates when there are several); the verdict's target
+   host is the scan's (422); and the engine lists the twin under that scan run with that
+   type (`GET /api/decisions?run_id=`, one more bounded read; 422 when it does not);
+5. one short transaction inserting one row, unique on the engine's run id; 201 with
+   `{"check", "recorded": true, "closure"}` -- the row, and the finding's closure
+   standing, unchanged.
+
+`GET /api/assurance/findings/<uuid>/retest-checks/` lists a finding's checks, newest
+first, paginated, scoped as the finding is; finding detail carries its latest ten as
+`retest_checks`. Each check names the engine run, the scan record it produced, the twin
+and the scan run it was listed under, the verdict as the engine sent it and whether it
+is one this backend knows, the engine's detail, the run's end (`completed`, or `aborted`
+after its check was filed), when the engine checked, and who collected it and when.
+The engine's detail and result are kept and served with the target's login withheld, as
+every scan answer is.
+
+**Tenant precondition (decision 7).** The backend reads the run with its own operator
+key. A key bound to a tenant reads only that tenant's runs: a retest started under
+another tenant's key -- a dashboard whose engine key is not this backend's tenant -- is
+"no such run" to the engine, and an honest 404 here. Both keys platform-operator, or the
+same tenant, is the precondition for a dashboard-started retest to be recorded here.
+
+Not a stop (`safety/stops.py`): the collect reads the engine and writes this record; it
+starts and stops nothing, and it never launches (no `POST /api/scan`, no
+`POST /api/remediation/retest`). Nothing a Stop reads is touched: the write is one row of
+the check's own table, never a `PentestScan`, an `Engagement` or a `Finding`.
+
 ## Economic Exposure: the customer parameter set
 
 Economic Exposure estimates what a finding could cost, as a range with its sources

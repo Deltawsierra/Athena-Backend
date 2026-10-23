@@ -646,6 +646,61 @@ def _closure_evidence():
     return dep, write
 
 
+def _retest_check_collect():
+    """A retest run's verdict pulled from the engine and recorded as a RetestCheck
+    (assurance.retest_checks): the engine is a stand-in answering the run's record as a
+    verdict and listing the twin under the scan run. The check is a row of its own
+    table; the decision reads nothing of it."""
+    import uuid as uuidlib
+    from unittest import mock
+
+    from assurance import views
+    from assurance.ingest import deployment_for_scan
+    from pentest.models import PentestScan
+
+    admin = _admin()
+    twin_run, run_id = str(uuidlib.uuid4()), str(uuidlib.uuid4())
+    target = "https://offline.invalid/"
+    scan = PentestScan.objects.create(
+        user=admin, target_url=target, consent=True, status=PentestScan.STATUS_COMPLETED, engine_run_id=twin_run
+    )
+    dep = deployment_for_scan(scan)
+    Deployment.objects.filter(pk=dep.pk).update(last_complete_scan_at=timezone.now())
+    dep.refresh_from_db()
+    finding = Finding.objects.create(
+        deployment=dep, scan=scan, fingerprint="fp-retest", finding_type="xss", title="XSS", severity="high",
+        retest_required=True,
+    )
+    recompute_decision(dep)
+    result = {
+        "twin_id": 1, "verdict": "closed", "target": target, "finding_type": "xss", "inventory_digest": None,
+        "detail": "xss was not reported against https://offline.invalid/ on the retest: an absence, not a fix",
+        "run_id": run_id, "scan_record_id": 730,
+        "check": {"id": 1, "twin_id": 1, "verdict": "closed", "finding_type": "xss", "run_id": 730,
+                  "checked_at": "2026-10-22T12:00:00+00:00"},
+    }
+
+    class Engine:
+        """The engine as CyberEngineClient reads it (read_retest_run's verdict; the twin listing)."""
+
+        def retest_status(self, named):
+            return {"answer": "verdict", "verdict": "closed", "detail": result["detail"], "check": result["check"],
+                    "scan_record_id": "730", "run_id": named, "stop_id": None, "state": "completed",
+                    "stopped_after_recording": None, "body": result}
+
+        def decision_twins(self, named, finding_type=None, tenant_id=None):
+            return [{"id": 1, "run_id": named, "target": target, "finding_type": "xss"}]
+
+    def write(client):
+        with mock.patch.object(views.CyberEngineClient, "from_settings", lambda: Engine()):
+            return client.post(
+                f"/api/assurance/findings/{finding.uuid}/retest-checks/collect/",
+                {"run_id": run_id, "twin_run_id": twin_run}, format="json",
+            )
+
+    return dep, write
+
+
 def _repair_contract():
     dep = _scanned()
     finding = _finding(dep)
@@ -1010,6 +1065,12 @@ CANNOT_MOVE = {
         "records a retest run's evidence for a later close to be judged on; it moves no "
         "finding's status, and a close is still the operator's PATCH, which is in MOVES",
         _closure_evidence,
+    ),
+    ("FindingViewSet", "retest_checks_collect", "post"): (
+        "records the engine's retest verdict as a RetestCheck row, which the decision never reads: it "
+        "writes no Finding field (status, last_seen, the retest flag, remediation state), no closure "
+        "evidence and no Evidence row; a close is still the operator's PATCH, which is in MOVES",
+        _retest_check_collect,
     ),
     ("FindingViewSet", "repair_contracts", "post"): (
         "agrees what a repair must eliminate and preserve before it is worked on; the "

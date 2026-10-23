@@ -36,6 +36,7 @@ from collections import namedtuple
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs
 
 import pytest
 import requests
@@ -322,6 +323,19 @@ MATRIX = {
         "send whose answer was lost is UNKNOWN and sent again only with --unknown",
         ("test_a_closure_forward_fired_twice_is_one_dataset_row",),
     ),
+    "retest-check-collect": Boundary(
+        "POST /api/assurance/findings/<uuid>/retest-checks/collect/ (assurance.retest_checks.collect): a "
+        "finished retest run's verdict read from the engine -- GET /api/scans/<run_id>, then GET /api/decisions "
+        "for the twin -- and recorded as one RetestCheck row, which is not closure evidence and closes nothing",
+        "none: new",
+        "the engine's run id: RetestCheck.engine_run_id is UNIQUE. A run already recorded is answered 200 with "
+        "its row before the engine is read; a second insert that races the first lands on the constraint and "
+        "answers the row it finds",
+        "collected twice -- the dashboard's watch and a person, say -- the run is one row; the second collect "
+        "reads the engine no further, and neither launches anything (no POST /api/scan, no POST "
+        "/api/remediation/retest)",
+        ("test_a_retest_check_collected_twice_is_one_row",),
+    ),
     "economics-feed-fetch": Boundary(
         "manage.py fetch_financial_source (economics step 10): an official publisher's data API read "
         "through assurance.economics.feeds.OutboundTransport -- a GET for ECB, H.10 and FRED, and a POST "
@@ -561,6 +575,9 @@ class FakeEngine:
         #: serves no exposure-receipt route, as today's engine does not.
         self.receipt_key = None
         self.last_body = None
+        #: The decision twins kept under each scan run, as GET /api/decisions?run_id= lists them.
+        self.twins = {}
+        self.last_query = {}
 
     def count(self, method, path):
         return sum(1 for m, p, _ in self.calls if (m, p) == (method, path))
@@ -574,7 +591,8 @@ class FakeEngine:
     def _answer(self, method, url, body, headers=None):
         if not url.startswith(self.base):
             raise requests.ConnectionError(f"nothing is reachable from this test: {url}")
-        path = url[len(self.base):].split("?")[0]
+        path, _, query = url[len(self.base):].partition("?")
+        self.last_query = {key: values[-1] for key, values in parse_qs(query).items()}
         self.calls.append((method, path, body))
         self.last_body = body
         self.headers.append((method, path, dict(headers or {})))
@@ -603,6 +621,12 @@ class FakeEngine:
             return _http(200, answer)
         if method == "GET" and path.removeprefix("/api/scans/") in self.runs:
             return _http(200, self.runs[path.removeprefix("/api/scans/")])
+        if (method, path) == ("GET", "/api/decisions"):
+            twins = self.twins.get(self.last_query.get("run_id"), [])
+            wanted = self.last_query.get("finding_type")
+            return _http(200, {"tenant": "default", "decisions": [
+                copy.deepcopy(t) for t in twins if wanted is None or t.get("finding_type") == wanted
+            ]})
         if method == "POST" and path.startswith("/api/scans/") and path.endswith("/abort"):
             run = self.runs.get(path.removeprefix("/api/scans/").removesuffix("/abort"))
             if run is None:
@@ -1314,6 +1338,81 @@ def test_a_closure_forward_fired_twice_is_one_dataset_row(settings, monkeypatch)
     assert sent == [document]
     forward.refresh_from_db()
     assert (forward.status, forward.attempts) == (ClosureEvidenceForward.Status.SENT, 1)
+
+
+# ===========================================================================
+# retest-check-collect
+# ===========================================================================
+
+
+RECORDED_RETEST = REPO / "tests" / "fixtures" / "engine_launch" / "pr71-f4610ae" / "retest-running-then-verdict.json"
+
+
+def _recorded_retest_run(run_id) -> dict:
+    """athena-engine #71's record of a retest run that completed with a verdict, as the
+    real engine sent it (the last GET /api/scans/{run_id} of the recorded exchange),
+    under ``run_id``."""
+    exchanges = json.loads(RECORDED_RETEST.read_text())["exchanges"]
+    reads = [e for e in exchanges if e["request"]["method"] == "GET" and e["request"]["path"].startswith("/api/scans/")]
+    run = copy.deepcopy(reads[-1]["body"])
+    run["run_id"] = run_id
+    run["result"]["run_id"] = run_id
+    return run
+
+
+def test_a_retest_check_collected_twice_is_one_row(engine):
+    """A finished retest run collected twice -- the dashboard's watch and a person, say --
+    is one RetestCheck: the second collect answers the row the first recorded, reads the
+    engine no further, and neither launches anything."""
+    from assurance.ingest import deployment_for_scan
+    from assurance.models import RetestCheck
+
+    analyst = _user()
+    twin_run, run_id = str(uuid.uuid4()), str(uuid.uuid4())
+    scan = PentestScan.objects.create(
+        user=analyst, engagement=_engagement(analyst), target_url=TARGET, consent=True,
+        status=PentestScan.STATUS_COMPLETED, engine_run_id=twin_run,
+    )
+    finding = Finding.objects.create(
+        deployment=deployment_for_scan(scan), scan=scan, fingerprint="fp-retest", finding_type="xss", title="XSS",
+        severity="high", retest_required=True,
+    )
+    engine.runs[run_id] = _recorded_retest_run(run_id)
+    engine.twins[twin_run] = [{"id": 1, "run_id": twin_run, "target": TARGET, "finding_type": "xss"}]
+    client = _client(analyst)
+    url = f"/api/assurance/findings/{finding.uuid}/retest-checks/collect/"
+    body = {"run_id": run_id, "twin_run_id": twin_run}
+
+    first = client.post(url, body, format="json")
+    second = client.post(url, body, format="json")
+
+    assert first.status_code == 201, first.content
+    assert second.status_code == 200, second.content
+    assert second.json()["recorded"] is False and second.json()["check"] == first.json()["check"]
+    assert RetestCheck.objects.filter(engine_run_id=run_id).count() == 1
+    assert engine.count("GET", f"/api/scans/{run_id}") == 1, "the second collect read the engine again"
+    assert engine.count("GET", "/api/decisions") == 1
+
+    # Raced: another collect's row lands while this one is reading the engine, after
+    # its lookup saw none. The insert lands on the unique run id, and the row answered
+    # is the one that got there first: still one row.
+    raced_run = str(uuid.uuid4())
+    engine.runs[raced_run] = _recorded_retest_run(raced_run)
+
+    def another_collect_lands():
+        RetestCheck.objects.create(
+            finding=finding, engine_run_id=raced_run, scan_record_id="732", twin_id=1, twin_run_id=twin_run,
+            verdict="closed", verdict_known=True, state="completed", stopped_after_recording=False,
+        )
+
+    engine.during[f"/api/scans/{raced_run}"] = another_collect_lands
+    raced = client.post(url, {"run_id": raced_run, "twin_run_id": twin_run}, format="json")
+
+    assert raced.status_code == 200, raced.content
+    assert raced.json()["recorded"] is False
+    assert RetestCheck.objects.filter(engine_run_id=raced_run).count() == 1, "a raced collect made a second row"
+    assert engine.count("POST", "/api/scan") == 0, "a collect sent a launch"
+    assert engine.count("POST", "/api/remediation/retest") == 0, "a collect sent a retest"
 
 
 def test_a_feed_fetched_twice_is_one_source_version(settings):
