@@ -29,8 +29,10 @@ import contextlib
 import io
 import logging
 import os
+import select
 import threading
 import time
+import types
 import uuid
 from datetime import timedelta
 
@@ -2327,6 +2329,7 @@ class _Stderr:
 
     def __init__(self, fill=False):
         self.read_fd, self.write_fd = os.pipe()
+        self.full = fill
         if fill:
             os.set_blocking(self.write_fd, False)
             try:
@@ -2357,6 +2360,32 @@ class _Stderr:
         os.close(self.write_fd)
 
 
+@pytest.fixture
+def stderr_select(monkeypatch):
+    """Where select takes sockets only (Windows), oplog cannot ask it about a pipe, and
+    hands the line to a writer thread instead (tests/test_oplog_without_select.py). The
+    tests below are about what oplog does with select's ANSWER -- write in this thread
+    when stderr is writable, skip and count when it is not -- so there it is given one:
+    the test's stderr is writable unless the test filled it. Elsewhere the real select
+    answers, as it does in production."""
+
+    def install(err):
+        from assurance import oplog
+
+        try:
+            select.select([], [err.write_fd], [], 0)
+            return
+        except OSError:
+            pass
+
+        def answer(_readers, writers, _errors, _timeout):
+            return [], ([] if err.full else list(writers)), []
+
+        monkeypatch.setattr(oplog, "select", types.SimpleNamespace(select=answer))
+
+    return install
+
+
 class _Sink(logging.Handler):
     """A log handler that records which thread wrote each record to it, and can be
     made slow."""
@@ -2373,7 +2402,7 @@ class _Sink(logging.Handler):
 
 @with_key
 def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_stderr_and_kept_for_the_log(
-    monkeypatch, caplog
+    monkeypatch, caplog, stderr_select
 ):
     """The process is out of threads and the stop could not record its dispatch:
     nothing else will ever know it is owed. The ERROR naming the command is on
@@ -2386,6 +2415,7 @@ def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_st
     from assurance import oplog
 
     err = _Stderr()
+    stderr_select(err)
     sink = _Sink()
     logging.getLogger("assurance").addHandler(sink)
     kept = oplog.KEPT_FOR_WRITER[0]
@@ -2426,7 +2456,9 @@ def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_st
 
 @with_key
 @pytest.mark.parametrize("threads", ["can start", "cannot start"])
-def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_inside(threads, monkeypatch, caplog):
+def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_inside(
+    threads, monkeypatch, caplog, stderr_select
+):
     """A log sink that takes 2 s a record, and no thread inside it: free to be
     written to, and slow. The line is on stderr at once and the call returns at
     once -- whether or not a thread can start -- because this thread never writes
@@ -2436,6 +2468,7 @@ def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_insi
     from assurance import oplog
 
     err = _Stderr()
+    stderr_select(err)
     sink = _Sink(seconds=2.0)
     logging.getLogger("assurance").addHandler(sink)
     monkeypatch.setattr(sys, "__stderr__", err)
@@ -2467,7 +2500,7 @@ def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_insi
         logging.getLogger("assurance").removeHandler(sink)
 
 
-def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch, caplog):
+def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch, caplog, stderr_select):
     """stderr is a pipe nobody is reading, full: the line is not written there --
     a write would block -- and the call returns at once; the logger still has it."""
     import sys
@@ -2475,6 +2508,7 @@ def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch,
     from assurance import oplog
 
     err = _Stderr(fill=True)
+    stderr_select(err)
     monkeypatch.setattr(sys, "__stderr__", err)
     skipped = oplog.STDERR_SKIPPED[0]
     try:
