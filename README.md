@@ -1111,6 +1111,11 @@ caps, each read from the environment by name:
 No stop takes a slot: a scan's Stop and every operator stop are answered within their
 bound while every slot is held (`tests/test_economics_run_cap.py`).
 
+On Windows there is no `fcntl`, so no slot can be locked and none is ever granted: a
+simulate is refused with the same 503 (`economics_capacity`, "the economics run slots
+cannot be read on this server") and is never run uncapped. Nothing else is affected, and
+no stop route is (`tests/test_economics_run_cap_without_fcntl.py`).
+
 ### Continuous financial assurance (E6)
 
 Every completed exposure run records what it depends on, read before it ran (spec,

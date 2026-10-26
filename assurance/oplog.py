@@ -5,7 +5,10 @@
   calling thread (a stop's), at once, it writes ONE line to stderr, and only if
   stderr can take it without waiting (``select``); it never writes to a log
   handler, whose sink may be slow or stalled. The record for the handlers goes
-  through :func:`log_later`. When no thread can start, it waits in the queue --
+  through :func:`log_later`. Where ``select`` cannot be asked (Windows takes
+  sockets only, and stderr is a console or a pipe), the line is handed to one
+  small thread that writes it; this thread still waits on nothing (see
+  :func:`_write_stderr_now`). When no thread can start, it waits in the queue --
   bounded, and counted in :data:`KEPT_FOR_WRITER` -- until a later request, the
   sweeper or the exit starts or runs the writer.
 - :func:`log_later` -- for everything else (noise, as far as recovery goes): the
@@ -48,6 +51,17 @@ _PUMP: list = []
 _PUMP_LOCK = threading.Lock()
 #: Lines :func:`emit_now` could not write to stderr without waiting.
 STDERR_SKIPPED = [0]
+#: What Windows' ``select`` fails with on a descriptor that is not a socket
+#: (WSAENOTSOCK, "WinError 10038"): it cannot say whether stderr would take a line.
+_WSAENOTSOCK = 10038
+#: Held by the one thread that is writing a line to stderr where ``select`` cannot be
+#: asked. While it is held, the next line is counted in :data:`STDERR_SKIPPED`: stderr
+#: has not taken the last one, which is what ``select`` reports as "not writable".
+_STDERR_WRITING = threading.Lock()
+#: That thread, for the exit (and a test) to wait for.
+_STDERR_WRITER: list = []
+#: The longest the exit waits for it.
+STDERR_AT_EXIT_SECONDS = 0.5
 
 
 #: Whether the pump is writing a record now.
@@ -131,15 +145,64 @@ def dropped() -> int:
     return _DROPPED[0]
 
 
+def _select_takes_sockets_only(exc: OSError) -> bool:
+    """Is ``exc`` Windows' answer to ``select`` on a descriptor that is not a socket?"""
+    return _WSAENOTSOCK in (exc.errno, getattr(exc, "winerror", None))
+
+
+def _write_stderr_in_a_thread(fd: int, data: bytes) -> bool:
+    """For where ``select`` cannot say whether stderr would take the line (Windows).
+
+    A write to a full pipe, or to a console whose window is paused, blocks, and the
+    caller is a stop's thread: it must not wait. So the line is written by a thread
+    of its own and this returns at once -- ``True`` when the line was handed over,
+    ``False`` (counted in :data:`STDERR_SKIPPED`) when the last line is still being
+    written, which is how a stderr that is not taking lines shows itself here, or
+    when no thread can start. One writer at a time, so a stalled stderr strands at
+    most one thread, never one per line."""
+    writing = _STDERR_WRITING
+    if not writing.acquire(blocking=False):
+        STDERR_SKIPPED[0] += 1
+        return False
+
+    def write() -> None:
+        try:
+            os.write(fd, data)
+        except (OSError, ValueError):
+            STDERR_SKIPPED[0] += 1
+        finally:
+            writing.release()
+
+    try:
+        thread = threading.Thread(target=write, name="assurance-stderr", daemon=True)
+        thread.start()
+    except RuntimeError:  # no thread can start: the record still waits for the log thread
+        writing.release()
+        STDERR_SKIPPED[0] += 1
+        return False
+    _STDERR_WRITER[:] = [thread]
+    return True
+
+
 def _write_stderr_now(line: str) -> bool:
-    """One line to stderr if it can take it without waiting; ``False`` if not."""
+    """One line to stderr if it can take it without waiting; ``False`` if not.
+
+    Where ``select`` can be asked, the line is written here, in the calling thread,
+    once stderr is writable. Where it cannot (Windows), a thread writes it and this
+    does not wait for it: ``True`` then means the line was handed over (see
+    :func:`_write_stderr_in_a_thread`)."""
     data = (line.replace("\n", " ")[:MAX_LINE] + "\n").encode("utf-8", "replace")
     try:
         try:
             fd = sys.__stderr__.fileno() if sys.__stderr__ is not None else 2
         except (AttributeError, ValueError, OSError):
             fd = 2
-        _, writable, _ = select.select([], [fd], [], 0)
+        try:
+            _, writable, _ = select.select([], [fd], [], 0)
+        except OSError as exc:
+            if not _select_takes_sockets_only(exc):
+                raise
+            return _write_stderr_in_a_thread(fd, data)
         if not writable:
             STDERR_SKIPPED[0] += 1
             return False
@@ -206,19 +269,25 @@ def _flush_at_exit() -> None:
     left = drain(FLUSH_AT_EXIT_SECONDS)
     if left:
         _write_stderr_now(f"assurance: {left} deferred log record(s) were not written before exit")
+    # A line handed to the stderr thread (Windows) is lost if the process ends first.
+    writer = _STDERR_WRITER[0] if _STDERR_WRITER else None
+    if writer is not None:
+        writer.join(STDERR_AT_EXIT_SECONDS)
 
 
 atexit.register(_flush_at_exit)
 
 
 def _after_fork_in_child() -> None:
-    global _BUF, _COND, _PUMP_LOCK
+    global _BUF, _COND, _PUMP_LOCK, _STDERR_WRITING
     _BUF = collections.deque()
     _COND = threading.Condition(threading.Lock())
     _DROPPED[0] = 0
     _BUSY[0] = False
     _PUMP.clear()
     _PUMP_LOCK = threading.Lock()
+    _STDERR_WRITING = threading.Lock()
+    _STDERR_WRITER.clear()
 
 
 if hasattr(os, "register_at_fork"):

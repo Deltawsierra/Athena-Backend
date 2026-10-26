@@ -17,7 +17,10 @@ with ONE line: ``@capacity.capped`` on its handler (:func:`capped`).
   once: a slot cannot leak, and no lease, expiry or sweeper is needed. A database
   lease was the alternative; it leaks a dead worker's slot until it expires, and it
   would put a database read in front of the cap. The cap is per host, which is what
-  it protects: the host's pool of workers.
+  it protects: the host's pool of workers. Where there is no ``fcntl`` (Windows)
+  nothing can be locked and no slot is ever granted: every run is refused with the
+  same 503 (``unreadable``), never run uncapped, and that refusal cannot itself
+  raise (a second ``import fcntl`` inside its handler used to turn it into a 500).
 - **It never waits.** Every lock is taken with ``LOCK_NB``. When no slot is free the
   request is answered AT ONCE: 503, ``Retry-After``, code ``economics_capacity``
   (:func:`at_capacity`); nothing runs and nothing is recorded. Nothing queues.
@@ -48,6 +51,11 @@ import functools
 import hashlib
 import os
 import tempfile
+
+try:
+    import fcntl
+except ImportError:  # Windows has no fcntl: no slot can be locked, so none is ever granted (below)
+    fcntl = None
 
 #: The code a request is answered with when no slot is free.
 CODE = "economics_capacity"
@@ -111,23 +119,24 @@ class Slots:
         self._descriptors = descriptors
 
     def release(self) -> None:
-        import fcntl
-
         descriptors, self._descriptors = self._descriptors, []
         for descriptor in reversed(descriptors):
             # LOCK_UN first: a child forked meanwhile shares the open file, and must not
-            # keep the slot. Closing the last descriptor releases it in any case.
-            with contextlib.suppress(OSError):
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            # keep the slot. Closing the last descriptor releases it in any case. Without
+            # fcntl no slot was ever taken, so there is nothing to unlock: only to close.
+            if fcntl is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
             with contextlib.suppress(OSError):
                 os.close(descriptor)
 
 
 def _take_one(directory: str, prefix: str, count: int) -> int | None:
     """An exclusive lock on the first free one of ``count`` slot files, WITHOUT
-    WAITING, or None when every one is held."""
-    import fcntl
-
+    WAITING, or None when every one is held. Raises ``ImportError`` where there is no
+    ``fcntl`` (Windows): :func:`acquire` answers that as ``"unreadable"``."""
+    if fcntl is None:
+        raise ImportError("fcntl is not available on this platform: no run slot can be locked")
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     for index in range(count):
         descriptor = os.open(os.path.join(directory, f"{prefix}-{index}.lock"), flags, 0o600)
@@ -151,7 +160,11 @@ def acquire(tenant: str) -> tuple[Slots | None, str]:
     """``(slots, "")`` when one of the tenant's slots and one of the host's are free,
     both taken without waiting; else ``(None, why)``. ``why`` is ``"tenant"`` (the
     tenant's every slot is held), ``"host"`` (the host's every slot is held) or
-    ``"unreadable"`` (the slot files cannot be opened: refused, never run uncapped)."""
+    ``"unreadable"`` (the slot files cannot be opened: refused, never run uncapped).
+    Where there is no ``fcntl`` (Windows) nothing can be locked, so every run is
+    ``"unreadable"``: the honest answer is the 503, never a run no cap counts."""
+    if fcntl is None:
+        return None, "unreadable"
     held: list[int] = []
     try:
         directory = slot_directory()

@@ -85,7 +85,7 @@ def declaration() -> dict[str, Any]:
             f"{DECLARATION} does not exist, so there is nothing that says what "
             f"this deployment is approved to be"
         )
-    loaded = yaml.safe_load(DECLARATION.read_text()) or {}
+    loaded = yaml.safe_load(DECLARATION.read_text(encoding="utf-8")) or {}
     if not loaded.get("deployment_id") or not loaded.get("components"):
         raise DeploymentNotApproved(
             f"{DECLARATION} does not name a deployment_id and its components"

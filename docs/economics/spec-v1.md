@@ -5878,7 +5878,9 @@ slots, `tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's.
 - **Per host.** The cap protects the host's worker pool, so it is per host; a deployment
   of several machines has a cap on each. The directory must be local to the host.
 - **Fails closed.** Slot files that cannot be opened refuse the run, 503
-  `economics_capacity` ("cannot be read"); a run is never made uncapped.
+  `economics_capacity` ("cannot be read"); a run is never made uncapped. Where there is
+  no `fcntl` (Windows) no slot can be locked, so every run is refused this way, and the
+  refusal itself cannot raise (`tests/test_economics_run_cap_without_fcntl.py`).
 
 ### 32.3 The caps
 

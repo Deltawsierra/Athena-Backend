@@ -1,0 +1,11 @@
+# Text is LF in every checkout. Git for Windows would otherwise check files out as
+# CRLF (core.autocrlf=true), and a file that is hashed, signed or compared byte for
+# byte -- a receipt, a digest-pinned fixture, a golden file -- would read differently
+# on the owner's machine than in CI.
+* text=auto eol=lf
+
+# Never converted, whatever the checkout: images and fonts, and the fixtures the tests
+# pin by their bytes (five feed and catalog CSVs carry CRLF line endings on purpose).
+*.png binary
+*.ttf binary
+tests/fixtures/** -text

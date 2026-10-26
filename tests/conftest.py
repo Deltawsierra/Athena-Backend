@@ -143,7 +143,7 @@ def enforce_dependency_pins() -> None:
         return
 
     try:
-        pin = declared_pin((ROOT / "requirements.txt").read_text())
+        pin = declared_pin((ROOT / "requirements.txt").read_text(encoding="utf-8"))
     except OSError:
         pin = None
 
