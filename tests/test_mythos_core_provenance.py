@@ -14,7 +14,11 @@ spot-checking the one that happened to occur.
 
 from __future__ import annotations
 
+import functools
+import ntpath
+import os
 import pathlib
+import posixpath
 
 import pytest
 
@@ -972,3 +976,490 @@ def test_the_hook_refuses_a_path_shadow_end_to_end():
         ct._dist_base = saved["dist_base"]
         if saved["env"] is not None:
             os.environ["ATHENA_MYTHOS_CORE_PIN_GUARD"] = saved["env"]
+
+
+# ---------------------------------------------------------------------------
+# The same questions, asked about Windows paths
+#
+# The guard runs at conftest import. Where it cannot recognise the pinned
+# install it does not fail a test: it stops pytest before one is collected. It
+# used to compare paths as strings with a hard-coded "/", so on Windows
+# (`C:\...`, backslashes, either case) the genuine install was reported as a
+# shadow and the suite could not start.
+#
+# CI runs on Linux. These hand the guard Windows-SPELLED paths and tell it to
+# judge them by Windows rules (`ospath=ntpath`), which is the code path a Windows
+# runner takes, so pinning it needs no Windows machine. Every case that must be
+# accepted has a twin that must still be refused: a guard that stopped raising on
+# Windows by also stopping to look would pass the first half of this section and
+# fail the second.
+# ---------------------------------------------------------------------------
+
+from tests.mythos_core_provenance import _file_url_to_path, _under  # noqa: E402
+
+WIN_MODULE = "mythos_core"
+WIN_SITE = r"C:\Users\dsmit\venv\Lib\site-packages"
+WIN_CHECKOUT = r"C:\Users\dsmit\Documents\Coding\Mythos-Core"
+WIN_CHECKOUT_URL = "file:///C:/Users/dsmit/Documents/Coding/Mythos-Core"
+
+
+@pytest.fixture
+def windows_paths(monkeypatch):
+    """Windows path RULES without a Windows filesystem.
+
+    `ntpath.realpath` asks the disk what a path really is. On a Windows runner
+    that would go looking for `C:\\Users\\dsmit` and `\\\\fileserver`, which are
+    made up, so it is replaced by its pure-string half (`abspath`) -- which is also
+    all a Linux runner has. The rules under test (separators, drive letters, case,
+    UNC roots, `..`) are the same either way."""
+    monkeypatch.setattr(ntpath, "realpath", ntpath.abspath)
+
+
+def _win_pkg(root, *rest):
+    return ntpath.join(root, WIN_MODULE, *rest)
+
+
+def _win(locations, found, dist_base=WIN_SITE):
+    return shadow_complaint(locations, found, dist_base=dist_base, ospath=ntpath)
+
+
+# -- one directory, many spellings: all inside ---------------------------------
+
+WINDOWS_INSIDE = {
+    "the ordinary install": (
+        r"C:\Users\dsmit\venv\Lib\site-packages\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "the same directory in another case": (
+        r"C:\Users\dsmit\venv\Lib\site-packages\pkg\__init__.py",
+        r"c:\USERS\DSmit\venv\lib\SITE-PACKAGES",
+    ),
+    "forward slashes on one side": (
+        "C:/Users/dsmit/venv/Lib/site-packages/pkg/__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "a trailing separator on the parent": (
+        r"C:\Users\dsmit\venv\Lib\site-packages\pkg\__init__.py",
+        "C:\\Users\\dsmit\\venv\\Lib\\site-packages\\",
+    ),
+    "doubled separators": (
+        r"C:\Users\dsmit\\venv\Lib\\site-packages\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "a dot-dot that stays inside": (
+        r"C:\Users\dsmit\venv\Lib\Scripts\..\site-packages\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "the directory itself": (
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "a UNC share": (
+        r"\\fileserver\tools\site-packages\pkg\__init__.py",
+        r"\\FILESERVER\Tools\site-packages",
+    ),
+}
+
+WINDOWS_OUTSIDE = {
+    "another directory entirely": (
+        r"C:\Users\dsmit\Downloads\Mythos-Core\src\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "the same path on another drive": (
+        r"D:\Users\dsmit\venv\Lib\site-packages\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "a sibling that shares a prefix": (
+        r"C:\Users\dsmit\venv\Lib\site-packages-evil\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "a sibling that shares a prefix, differing in case": (
+        r"C:\Users\dsmit\venv\Lib\SITE-PACKAGES-evil\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "a dot-dot that leaves": (
+        r"C:\Users\dsmit\venv\Lib\site-packages\..\Evil\pkg\__init__.py",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "the parent of the parent": (
+        r"C:\Users\dsmit\venv\Lib",
+        r"C:\Users\dsmit\venv\Lib\site-packages",
+    ),
+    "another UNC server": (
+        r"\\evil\tools\site-packages\pkg\__init__.py",
+        r"\\fileserver\tools\site-packages",
+    ),
+    "another UNC share on the same server": (
+        r"\\fileserver\evil\site-packages\pkg\__init__.py",
+        r"\\fileserver\tools\site-packages",
+    ),
+    "a local path against a UNC parent": (
+        r"C:\tools\site-packages\pkg\__init__.py",
+        r"\\fileserver\tools\site-packages",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", WINDOWS_INSIDE)
+def test_windows_spellings_of_one_directory_are_inside_it(case, windows_paths):
+    child, parent = WINDOWS_INSIDE[case]
+    assert _under(child, parent, ospath=ntpath), f"{child} is inside {parent}"
+
+
+@pytest.mark.parametrize("case", WINDOWS_OUTSIDE)
+def test_windows_paths_that_are_not_inside_are_refused(case, windows_paths):
+    """The twin of the test above, case for case. A drive letter, a UNC share, a
+    shared prefix and a `..` each look like containment to a careless comparison."""
+    child, parent = WINDOWS_OUTSIDE[case]
+    assert not _under(child, parent, ospath=ntpath), f"{child} is not inside {parent}"
+
+
+def test_short_names_are_resolved_on_both_sides_before_comparing(
+    windows_paths, monkeypatch
+):
+    """On Windows `realpath` is what turns `PROGRA~1` into `Program Files`; a
+    comparison that skipped it would read one place as two (refusing the pinned
+    install) or two as one. Stood in for here, because a Linux runner has no 8.3
+    names: the property is that BOTH sides go through it, and that its answer
+    decides."""
+    expansions = {
+        r"C:\PROGRA~1\CORE": r"C:\Program Files\Core",
+        r"C:\EVIL~1": r"C:\evil",
+    }
+    real = ntpath.realpath
+
+    def expanding(path):
+        for short, long in expansions.items():
+            if path.upper().startswith(short):
+                path = long + path[len(short) :]
+        return real(path)
+
+    monkeypatch.setattr(ntpath, "realpath", expanding)
+
+    assert _under(
+        r"C:\PROGRA~1\Core\pkg\__init__.py", r"C:\Program Files\Core", ospath=ntpath
+    )
+    assert _under(r"C:\Program Files\Core\pkg", r"C:\PROGRA~1\Core", ospath=ntpath)
+    assert not _under(r"C:\EVIL~1\pkg", r"C:\Program Files\Core", ospath=ntpath)
+
+
+# -- the shadow check itself, in Windows spelling -------------------------------
+
+
+def test_a_windows_install_beside_its_metadata_is_the_pinned_one(windows_paths):
+    """THE CONTROL, and the state that stopped pytest from starting: the package
+    file, its `__path__` entry and a submodule all inside site-packages."""
+    assert (
+        _win(
+            {
+                f"{WIN_MODULE}.__file__": _win_pkg(WIN_SITE, "__init__.py"),
+                f"{WIN_MODULE}.__path__[0]": _win_pkg(WIN_SITE),
+                f"{WIN_MODULE}.http.__file__": _win_pkg(WIN_SITE, "http.py"),
+            },
+            _vcs(),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("case", WINDOWS_INSIDE)
+def test_the_shadow_check_accepts_every_windows_spelling_of_the_pinned_location(
+    case, windows_paths
+):
+    child, parent = WINDOWS_INSIDE[case]
+    assert _win({f"{WIN_MODULE}.__file__": child}, _vcs(), dist_base=parent) is None
+
+
+@pytest.mark.parametrize("case", WINDOWS_OUTSIDE)
+def test_the_shadow_check_still_refuses_a_windows_shadow(case, windows_paths):
+    """THE FINDING, in Windows spelling. Not one of these may come back None."""
+    child, parent = WINDOWS_OUTSIDE[case]
+    grievance = _win({f"{WIN_MODULE}.__file__": child}, _vcs(), dist_base=parent)
+    assert grievance is not None, f"{child} was let through as if inside {parent}"
+    assert "shadowing" in grievance
+    # Named as the path resolves, so the reader can act on it.
+    assert ntpath.normpath(child) in grievance
+
+
+def test_a_windows_path_entry_outside_the_install_is_caught_though_the_file_is_right(
+    windows_paths,
+):
+    grievance = _win(
+        {
+            f"{WIN_MODULE}.__file__": _win_pkg(WIN_SITE, "__init__.py"),
+            f"{WIN_MODULE}.__path__[0]": r"C:\Users\dsmit\AppData\Local\Temp\evil\pkg",
+        },
+        _vcs(),
+    )
+    assert grievance is not None
+    assert "__path__[0]" in grievance
+    assert "1 of 2" in grievance
+
+
+def test_a_windows_submodule_loaded_from_elsewhere_is_caught(windows_paths):
+    grievance = _win(
+        {
+            f"{WIN_MODULE}.__file__": _win_pkg(WIN_SITE, "__init__.py"),
+            f"{WIN_MODULE}.__path__[0]": _win_pkg(WIN_SITE),
+            f"{WIN_MODULE}.http.__file__": r"D:\evil\pkg\http.py",
+        },
+        _vcs(),
+    )
+    assert grievance is not None
+    assert f"{WIN_MODULE}.http.__file__" in grievance
+    assert "1 of 3" in grievance
+
+
+def test_every_windows_stray_is_listed_not_just_the_first(windows_paths):
+    grievance = _win(
+        {
+            f"{WIN_MODULE}.__file__": r"C:\a\pkg\__init__.py",
+            f"{WIN_MODULE}.__path__[0]": r"D:\b\pkg",
+            f"{WIN_MODULE}.http.__file__": r"\\c\share\pkg\http.py",
+        },
+        _vcs(),
+    )
+    assert grievance is not None
+    assert "3 of 3" in grievance
+    for stray in (r"C:\a\pkg", r"D:\b\pkg", r"\\c\share\pkg"):
+        assert stray in grievance
+
+
+# -- an editable install names its checkout by a file:// URL ----------------
+
+
+def test_a_windows_editable_install_may_load_from_the_checkout_its_url_names(
+    windows_paths,
+):
+    """The development setup on Windows: pip records `file:///C:/...`, and the
+    package lives in that checkout rather than in site-packages."""
+    assert (
+        _win(
+            {
+                f"{WIN_MODULE}.__file__": ntpath.join(
+                    WIN_CHECKOUT, "src", WIN_MODULE, "__init__.py"
+                ),
+                f"{WIN_MODULE}.__path__[0]": ntpath.join(
+                    WIN_CHECKOUT, "src", WIN_MODULE
+                ),
+            },
+            _local(WIN_CHECKOUT_URL),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        r"C:\Users\dsmit\Documents\Coding\Mythos-Core-old\src\pkg\__init__.py",
+        r"C:\Users\dsmit\Documents\Coding\Other\src\pkg\__init__.py",
+        r"D:\Users\dsmit\Documents\Coding\Mythos-Core\src\pkg\__init__.py",
+        r"C:\Users\dsmit\Documents\Coding\Mythos-Core\..\Other\pkg\__init__.py",
+    ],
+    ids=["shared prefix", "another checkout", "another drive", "dot-dot out"],
+)
+def test_a_windows_module_beside_the_named_checkout_is_still_a_shadow(
+    where, windows_paths
+):
+    grievance = _win({f"{WIN_MODULE}.__file__": where}, _local(WIN_CHECKOUT_URL))
+    assert grievance is not None
+
+
+def test_a_file_url_in_another_spelling_names_the_same_checkout(windows_paths):
+    """Lower-case drive, a percent-escaped space: the URL is pip's, not the
+    operator's, and pip escapes."""
+    assert (
+        _win(
+            {f"{WIN_MODULE}.__file__": r"C:\Users\Jo Smith\Core\src\pkg\__init__.py"},
+            _local("file:///c:/users/jo%20smith/core"),
+        )
+        is None
+    )
+
+
+def test_an_unreadable_file_url_offers_no_candidate_and_so_admits_nothing():
+    """`file://` names no path. It used to become the empty path, which pathlib
+    reads as the current directory -- so the CWD was a place the pinned package
+    could live. Neither the CWD nor the raw text of the URL read as a path may
+    stand in for it: fewer candidates is stricter, never looser."""
+    for where in (
+        os.path.join(os.getcwd(), "pkg", "__init__.py"),
+        os.path.join(os.getcwd(), "file:", "pkg", "__init__.py"),
+    ):
+        grievance = shadow_complaint(
+            {f"{WIN_MODULE}.__file__": where},
+            _local("file://"),
+            dist_base="/srv/site-packages",
+        )
+        assert grievance is not None, f"{where} was admitted by a URL that names no path"
+
+
+FILE_URLS = [
+    (ntpath, "file:///C:/Users/dsmit/dep", r"C:\Users\dsmit\dep"),
+    (ntpath, "file:///c:/Users/dsmit/dep", r"C:\Users\dsmit\dep"),
+    (ntpath, "file:///C:/Users/Jo%20Smith/dep", r"C:\Users\Jo Smith\dep"),
+    (ntpath, "file://localhost/C:/dep", r"C:\dep"),
+    (ntpath, "file://server/share/dep", r"\\server\share\dep"),
+    (posixpath, "file:///srv/dep", "/srv/dep"),
+    (posixpath, "file:///srv/my%20dep", "/srv/my dep"),
+    (posixpath, "file://localhost/srv/dep", "/srv/dep"),
+]
+
+
+@pytest.mark.parametrize(("ospath", "url", "expected"), FILE_URLS)
+def test_a_file_url_is_read_as_the_path_its_platform_spells(ospath, url, expected):
+    assert _file_url_to_path(url, ospath=ospath) == expected
+
+
+@pytest.mark.parametrize("ospath", [ntpath, posixpath], ids=["nt", "posix"])
+@pytest.mark.parametrize("url", ["file://", "file://localhost"])
+def test_a_file_url_naming_no_path_is_none_not_the_current_directory(ospath, url):
+    assert _file_url_to_path(url, ospath=ospath) is None
+
+
+def test_provenance_reads_a_windows_editable_checkout_from_its_url(windows_paths):
+    seen = []
+
+    def fake_git(repo, *args):
+        seen.append(str(repo))
+        return PIN if args[0] == "rev-parse" else ""
+
+    found = provenance_from_direct_url(
+        f'{{"url": "{WIN_CHECKOUT_URL}", "dir_info": {{"editable": true}}}}',
+        git=fake_git,
+        ospath=ntpath,
+    )
+
+    assert found.kind == "local"
+    assert found.commit == PIN
+    assert found.location == WIN_CHECKOUT, (
+        "the URL's /C:/... was not turned into C:\\..."
+    )
+    assert seen and set(seen) == {WIN_CHECKOUT}
+
+
+def test_provenance_from_a_file_url_that_names_no_path_is_unknown_not_a_pass(
+    windows_paths,
+):
+    found = provenance_from_direct_url(
+        '{"url": "file://", "dir_info": {"editable": true}}',
+        git=lambda *a, **k: PIN,
+        ospath=ntpath,
+    )
+    assert found.kind == "unknown"
+    assert found.commit is None
+    assert complaint(PIN, found) is not None
+
+
+def test_a_windows_editable_install_end_to_end_from_the_json_pip_wrote(windows_paths):
+    """pip's `direct_url.json` -> provenance -> shadow check, with nothing handed
+    to the shadow check by the test but the two Windows strings pip and Python
+    would each have produced."""
+    found = provenance_from_direct_url(
+        f'{{"url": "{WIN_CHECKOUT_URL}", "dir_info": {{"editable": true}}}}',
+        git=lambda repo, *a: PIN if a[0] == "rev-parse" else "",
+        ospath=ntpath,
+    )
+    inside = ntpath.join(WIN_CHECKOUT, "src", WIN_MODULE, "__init__.py")
+    elsewhere = ntpath.join(
+        r"C:\Users\dsmit\Downloads", "src", WIN_MODULE, "__init__.py"
+    )
+
+    assert _win({f"{WIN_MODULE}.__file__": inside}, found) is None
+    assert _win({f"{WIN_MODULE}.__file__": elsewhere}, found) is not None
+
+
+# -- POSIX is unchanged ---------------------------------------------------------
+
+
+def test_posix_paths_are_still_judged_case_sensitively():
+    """Windows folds case; POSIX does not, and must not start to. `/srv/Core` is
+    a different directory from `/srv/core`."""
+    grievance = shadow_complaint(
+        {f"{WIN_MODULE}.__file__": f"/srv/Site-Packages/{WIN_MODULE}/__init__.py"},
+        _vcs(),
+        dist_base="/srv/site-packages",
+        ospath=posixpath,
+    )
+    assert grievance is not None
+
+
+def test_a_backslash_is_an_ordinary_character_in_a_posix_path():
+    """`/srv/site-packages\\pkg` is ONE entry in `/srv`, a sibling of
+    `site-packages`, not a directory inside it."""
+    grievance = shadow_complaint(
+        {
+            f"{WIN_MODULE}.__file__": "/srv/site-packages\\"
+            + WIN_MODULE
+            + "\\__init__.py"
+        },
+        _vcs(),
+        dist_base="/srv/site-packages",
+        ospath=posixpath,
+    )
+    assert grievance is not None
+
+
+def test_a_posix_drive_letter_is_just_a_directory_name():
+    assert not _under("/srv/D:/core/pkg", "/srv/C:/core", ospath=posixpath)
+    assert _under("/srv/C:/core/pkg", "/srv/C:/core", ospath=posixpath)
+
+
+# -- through the real hook ------------------------------------------------------
+
+
+def _windows_hook(monkeypatch, imported):
+    """Wire the real `enforce_dependency_pins` to Windows-spelled inputs: pip's
+    record, the dist-info directory and the imported locations. The pin matches
+    perfectly, so the only thing left to decide is where the module came from."""
+    monkeypatch.delenv(OPT_OUT_ENV, raising=False)
+    pin = declared_pin(
+        (tests_conftest.ROOT / "requirements.txt").read_text(encoding="utf-8")
+    )
+    monkeypatch.setattr(
+        tests_conftest,
+        "_installed_direct_url",
+        lambda: (
+            '{"url": "https://h/r", "vcs_info": {"vcs": "git", '
+            f'"commit_id": "{pin}", "requested_revision": "{pin}"}}}}'
+        ),
+    )
+    monkeypatch.setattr(tests_conftest, "_dist_base", lambda: WIN_SITE)
+    monkeypatch.setattr(tests_conftest, "_imported_locations", lambda: imported)
+    monkeypatch.setattr(
+        tests_conftest,
+        "shadow_complaint",
+        functools.partial(shadow_complaint, ospath=ntpath),
+    )
+
+
+def test_the_hook_lets_a_windows_pinned_install_through(windows_paths, monkeypatch):
+    """The sentence this PR exists for: on Windows the guard must not stop pytest
+    from starting when the module IS the pinned one."""
+    _windows_hook(
+        monkeypatch,
+        {
+            f"{WIN_MODULE}.__file__": _win_pkg(WIN_SITE, "__init__.py"),
+            f"{WIN_MODULE}.__path__[0]": _win_pkg(WIN_SITE),
+        },
+    )
+
+    assert tests_conftest.enforce_dependency_pins() is None
+
+
+def test_the_hook_still_refuses_a_windows_shadow(windows_paths, monkeypatch):
+    """...and must still stop it when it is not. Same pin, same provenance."""
+    _windows_hook(
+        monkeypatch,
+        {
+            f"{WIN_MODULE}.__file__": _win_pkg(WIN_SITE, "__init__.py"),
+            f"{WIN_MODULE}.__path__[0]": r"C:\Users\dsmit\AppData\Local\Temp\a-shadow\pkg",
+        },
+    )
+
+    with pytest.raises(pytest.UsageError) as refusal:
+        tests_conftest.enforce_dependency_pins()
+
+    assert "shadowing" in str(refusal.value)
+    assert r"C:\Users\dsmit\AppData\Local\Temp\a-shadow\pkg" in str(refusal.value)

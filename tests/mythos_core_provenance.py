@@ -29,10 +29,15 @@ without a drifted checkout to hand; `conftest.py` wires it to the session.
 from __future__ import annotations
 
 import json
+import ntpath
+import nturl2path
+import os
 import pathlib
 from collections.abc import Mapping
 import re
 import subprocess
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 
 #: Opt out for deliberate local mythos-core development. It announces itself on
@@ -139,7 +144,39 @@ def _content_differs(repo: pathlib.Path, path: str, *, git=_git) -> bool:
     return bool(recorded) and bool(actual) and recorded != actual
 
 
-def provenance_from_direct_url(raw: str | None, *, git=_git) -> Provenance:
+def _file_url_to_path(url: str, *, ospath=os.path) -> str | None:
+    r"""The filesystem path a ``file:`` URL names, spelled as ``ospath`` spells paths.
+
+    ``file:///srv/dep`` is ``/srv/dep`` on POSIX; ``file:///C:/Users/me/dep`` is
+    ``C:\Users\me\dep`` on Windows, and ``file://host/share/dep`` is the UNC path
+    ``\\host\share\dep`` there. pip writes these (PEP 610) with percent-escapes.
+
+    This used to cut off the first seven characters. That leaves
+    ``/C:/Users/me/dep`` on Windows, which names nothing, leaves ``%20`` undecoded
+    everywhere, and turns a bare ``file://`` into the empty path -- which
+    ``pathlib`` reads as the current directory, so wherever pytest happened to be
+    run became a place the pinned package was allowed to live.
+
+    None when the URL cannot be read as a local path. A caller must treat that as
+    "nothing established", never as a match.
+    """
+    parts = urllib.parse.urlsplit(url)
+    path = parts.path
+    if parts.netloc and parts.netloc.lower() != "localhost":
+        path = f"//{parts.netloc}{path}"
+    if ospath is ntpath:
+        to_path = nturl2path.url2pathname
+    else:
+        to_path = urllib.request.url2pathname
+    try:
+        return to_path(path) or None
+    except (OSError, ValueError):
+        return None
+
+
+def provenance_from_direct_url(
+    raw: str | None, *, git=_git, ospath=os.path
+) -> Provenance:
     """Read pip's ``direct_url.json`` for the installed distribution.
 
     pip writes this for anything installed from a URL or a path (PEP 610). A git
@@ -183,15 +220,16 @@ def provenance_from_direct_url(raw: str | None, *, git=_git) -> Provenance:
         )
 
     if isinstance(info.get("dir_info"), dict) or url.startswith("file://"):
-        path = (
-            pathlib.Path(url[len("file://") :]) if url.startswith("file://") else None
+        located = (
+            _file_url_to_path(url, ospath=ospath) if url.startswith("file://") else None
         )
-        if path is None:
+        if located is None:
             return Provenance(
                 kind="unknown",
                 location=url,
                 why="installed from a local path that could not be resolved",
             )
+        path = pathlib.Path(located)
         head = git(path, "rev-parse", "HEAD")
         if head is None:
             return Provenance(
@@ -318,15 +356,34 @@ def remedy(found: Provenance) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _under(child: str, parent: str) -> bool:
-    """Is ``child`` inside ``parent``? Both already absolute and resolved.
+def _pure_path_class(ospath) -> type[pathlib.PurePath]:
+    """The ``pathlib`` flavour that goes with an ``os.path`` module."""
+    return pathlib.PureWindowsPath if ospath is ntpath else pathlib.PurePosixPath
 
-    String prefixing with an explicit separator rather than `Path.is_relative_to`
-    alone, so that ``/srv/core-evil`` is not read as living inside ``/srv/core``.
+
+def _under(child: str, parent: str, *, ospath=os.path) -> bool:
+    r"""Is ``child`` the same place as ``parent``, or somewhere beneath it?
+
+    Both sides go through the same two steps before they are compared:
+
+    * ``realpath``, so ``..``, symlinks, junctions and Windows 8.3 short names
+      (``PROGRA~1``) cannot make one place look like two, or two look like one;
+    * ``normcase``, so ``C:\Site`` and ``c:/site`` are one directory on Windows,
+      while on POSIX, where nothing is folded, ``/srv/Core`` and ``/srv/core``
+      stay two.
+
+    They are then compared a path COMPONENT at a time (``is_relative_to``). That is
+    what keeps ``/srv/core-evil`` from reading as inside ``/srv/core``, and
+    ``D:\core`` from reading as inside ``C:\core``.
+
+    This was ``child.startswith(parent.rstrip("/") + "/")``, which works only where
+    the separator is ``/``. On Windows ``str(Path(...).resolve())`` is
+    ``C:\...\...``, so nothing was ever inside anything but itself: the genuine,
+    pinned install was reported as a shadow and pytest refused to collect a test.
     """
-    if child == parent:
-        return True
-    return child.startswith(parent.rstrip("/") + "/")
+    pure = _pure_path_class(ospath)
+    inner, outer = (pure(ospath.normcase(ospath.realpath(p))) for p in (child, parent))
+    return inner.is_relative_to(outer)
 
 
 def shadow_complaint(
@@ -334,6 +391,7 @@ def shadow_complaint(
     found: Provenance,
     *,
     dist_base: str | None = None,
+    ospath=os.path,
 ) -> str | None:
     """Why the imported module is not the one the provenance describes, or None.
 
@@ -357,6 +415,11 @@ def shadow_complaint(
     A VCS ``location`` is a URL, not a path, so it is not offered as a candidate;
     for that install shape ``dist_base`` is the answer and is sufficient.
 
+    ``ospath`` is the set of path rules the strings are judged by: the host's
+    ``os.path``, which is all production ever uses. A test hands in ``ntpath`` to
+    ask what Windows would make of Windows-spelled paths, on a runner that is not
+    Windows.
+
     Returns None when there is nothing to compare against rather than inventing a
     verdict -- an unestablished provenance is already `complaint`'s finding, and
     reporting it twice in different words would make one problem look like two.
@@ -370,12 +433,15 @@ def shadow_complaint(
 
     candidates = []
     if dist_base:
-        candidates.append(str(pathlib.Path(dist_base).resolve()))
+        candidates.append(ospath.realpath(dist_base))
     if found.location and not found.location.startswith(("http://", "https://", "git+")):
         location = found.location
         if location.startswith("file://"):
-            location = location[len("file://") :]
-        candidates.append(str(pathlib.Path(location).resolve()))
+            location = _file_url_to_path(location, ospath=ospath)
+        # A file URL that cannot be read as a path offers no candidate: fewer
+        # places the package may live, never more.
+        if location:
+            candidates.append(ospath.realpath(location))
 
     if not candidates:
         return None
@@ -384,12 +450,9 @@ def shadow_complaint(
     # inside a candidate would pass the package root and never look at the
     # __path__ the submodules actually come from.
     strays = {
-        label: str(pathlib.Path(where).resolve())
+        label: ospath.realpath(where)
         for label, where in locations.items()
-        if not any(
-            _under(str(pathlib.Path(where).resolve()), candidate)
-            for candidate in candidates
-        )
+        if not any(_under(where, candidate, ospath=ospath) for candidate in candidates)
     }
     if not strays:
         return None
