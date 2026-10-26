@@ -3,6 +3,27 @@
 Django REST backend and React frontend for the Mythos security platform. It
 drives a separate scanning engine over HTTP.
 
+In the platform's words: Athena looks, Achilles tests, SPINE records and decides,
+Minotaur measures. SPINE is the platform record; in this repository it is the
+`assurance/` app.
+
+## Three engagement modes, kept distinct
+
+The platform is used in three ways. What one of them shows is not evidence for
+another, and a record should say which one it came from.
+
+- **Assessment** -- tests and reports. Scans are launched through the engine, and
+  their findings and reports are kept (`pentest/`).
+- **Release assurance** -- binds a recommendation to an exact deployment. SPINE holds
+  a deployment's claims, evidence and approvals, derives its decision, and signs the
+  Assurance Receipt for it (`mythos.assurance.receipt/6.0`; see "Verifying a receipt").
+- **Runtime enforcement** -- mediates supported paths. The defender gateway
+  (`audit/middleware.py`) asks the engine for a decision on the requests that pass
+  through it. `DEFENDER_MONITOR_ONLY` defaults to on, so decisions are logged and not
+  enforced until enforcement is turned on deliberately, and a stop is never held back
+  in either mode ("The engine", below). A path that does not pass through the gateway
+  is not mediated.
+
 ## Running it
 
 ```bash
@@ -20,6 +41,27 @@ In a second terminal:
 npm install
 npm run dev                              # http://localhost:3000, proxying to :8000
 ```
+
+On Windows (PowerShell, Python 3.12) the same steps, with the environment's own
+interpreter so no script policy is involved (these forms have not yet been run on a
+Windows host). `.env` is read into the session by the loop, which skips blank lines and
+`#` comments and takes each value as written:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt   # enough to run and test the backend
+Copy-Item .env.example .env                                         # then fill in DJANGO_SECRET_KEY
+Get-Content .env | Where-Object { $_ -match '^\s*[^#\s][^=]*=' } | ForEach-Object {
+    $name, $value = $_ -split '=', 2
+    Set-Item -Path "Env:$($name.Trim())" -Value $value.Trim()
+}
+.\.venv\Scripts\python.exe manage.py migrate
+.\.venv\Scripts\python.exe manage.py runserver
+```
+
+and in a second PowerShell window, `npm install` then `npm run dev`, as above.
+`.\.venv\Scripts\Activate.ps1` activates the environment if your execution policy
+allows scripts.
 
 `requirements.txt` is the full runtime set. It no longer pulls torch,
 transformers, spaCy or datasets, nor the spaCy model wheel that was served from
@@ -105,7 +147,8 @@ so overlapping stops or a response nobody closes cannot switch it off for good.
 
 A stop client should not need a password sign-in to stop: sign-in is not a
 stop, so the gateway judges it and failed guesses can lock it. Set
-`FAILSAFE_SERVICE_TOKEN` (at least 32 characters, e.g. `openssl rand -hex 32`;
+`FAILSAFE_SERVICE_TOKEN` (at least 32 characters, e.g. `openssl rand -hex 32`, or in PowerShell
+`python -c "import secrets; print(secrets.token_hex(32))"`;
 shorter is treated as unset) and `FAILSAFE_SERVICE_USER` (the username of the
 active admin or analyst account the client acts as). A request that presents
 the token in the `X-Failsafe-Service-Token` header is authenticated as that
@@ -290,6 +333,17 @@ backend.
   openssl genpkey -algorithm ed25519 -out signin-record.pem
   chmod 600 signin-record.pem
   openssl pkey -in signin-record.pem -pubout -outform DER | tail -c 32 | base64
+  ```
+
+  On Windows, where `tail`, `base64` and `chmod` are not available, the same two outputs
+  come from the `cryptography` package the backend already requires: the first line writes
+  the PEM (PKCS#8, Ed25519) and prints the same base64 public key the pipeline above does
+  (checked against it on Linux), and `icacls` leaves the file readable and writable by your
+  account alone (the form of `chmod 600` that Windows has; not yet run on a Windows host):
+
+  ```powershell
+  python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; from cryptography.hazmat.primitives import serialization as s; import base64; k = Ed25519PrivateKey.generate(); open('signin-record.pem', 'wb').write(k.private_bytes(s.Encoding.PEM, s.PrivateFormat.PKCS8, s.NoEncryption())); print(base64.b64encode(k.public_key().public_bytes(s.Encoding.Raw, s.PublicFormat.Raw)).decode())"
+  icacls signin-record.pem /inheritance:r /grant:r "${env:USERNAME}:(R,W)"
   ```
 
   and add `{"engine": "mythos-signin-collector", "public_key": "<that base64>"}` to
@@ -1312,7 +1366,7 @@ one `info` finding beside unreadable rows reads `ready`.
 deployment's Assurance Receipt beside the DSSE envelope the engine signed it in.
 `assurance-receipt/` returns the unsigned copy. The receipt is specified in
 [`docs/receipt-spec/`](docs/receipt-spec/README.md); the current version is
-`mythos.assurance.receipt/4.1`. The specification covers every member, the
+`mythos.assurance.receipt/6.0` (what `RECEIPT_VERSION` in `assurance/receipt.py` emits). The specification covers every member, the
 canonical form and digests, the signature, the verification steps with every
 refusal, and how older versions are read. Anyone can verify a receipt offline with
 the specification and `tools/verify_receipt.py`, which needs only Python and
@@ -1329,7 +1383,7 @@ is verified, 1 when it is refused (the first line names the reason), and 2 when 
 verifier could not run. A verified receipt attests integrity and provenance only,
 and does not say the assessment is correct.
 
-A signed 4.1 receipt carries the time it was issued, `issued_at`, inside the
+A signed receipt from 4.1 on carries the time it was issued, `issued_at`, inside the
 signature: this backend's clock when it had the receipt signed, in UTC. An
 `issued_at` edited after signing fails the signature, and the verifier prints the
 signed time. It is the issuer's clock, not proof of when the state held, and how
@@ -1357,6 +1411,8 @@ signature and the age, which the backend never checks.
 ```bash
 pytest
 ```
+
+In PowerShell, with the environment from "Running it": `.\.venv\Scripts\python.exe -m pytest`.
 
 The suite uses `tests/settings_test.py`, which reuses the real settings and
 overrides only the database, mail and throttling. The engine contract tests in
