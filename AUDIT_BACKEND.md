@@ -38,7 +38,8 @@ None of the six is open, so the counts under "Counts by severity" no longer hold
 This is not a new audit: nothing else was re-read for a count.
 
 Two other lines were out of date and are corrected in place: the connector bullet
-under "Clean bill", and the receipt version in the policy-pinning bullet. The
+under "Clean bill", and the receipt version in the policy-pinning bullet (corrected
+again on 26 Oct 2026, when the code emitted `…/6.0`). The
 scope line at the top lists what was read on 2026-09-18. Twenty-one modules of
 `assurance/` were added after that date (among them `composition`,
 `workflow_chains`, `served_route`, `coverage`, `evidence_audit`,
@@ -188,10 +189,12 @@ the write contract clients depend on.
   `invalidation.check_invalidations` (a policy change invalidates a decision and
   opens an attributed retest, off a pass to STALE), and surfaced on
   `decision_support` and in the assurance receipt (standard bumped to
-  `…/1.1` by that change; `RECEIPT_VERSION` is now `…/4.1`). The pin embeds
-  `receipt.HASHED_CONTENT_VERSION` (`…/4.0`), the version that introduced the
-  receipt's hashed content, not `RECEIPT_VERSION`, so the 4.1 step (a signed
-  issue time) left the pin where it was. It never
+  `…/1.1` by that change; `RECEIPT_VERSION` is now `…/6.0`). The pin embeds
+  `receipt.HASHED_CONTENT_VERSION`, which is the version that introduced the
+  receipt's latest hashed content (today `…/6.0`, the same string as
+  `RECEIPT_VERSION`), so a step that adds no hashed content, like 4.1 (a signed
+  issue time), leaves the pin where it was, and 5.0 and 6.0 (new hashed content)
+  moved it. It never
   fabricates a pass and never softens a CONTRADICTED claim.
 - **Receipt / fingerprint determinism.** Canonical JSON (sorted keys, compact
   separators), evidence rows and finding digests sorted (Merkle-style), every

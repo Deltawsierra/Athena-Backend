@@ -1149,9 +1149,11 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         dict, always at HTTP 200 — read ``ok``, not the status code (the house
         idiom; cf. ``assurance_check``). With no credentials configured the
         connector is inert: it returns ``{"ok": false, "detail": "<name> not
-        configured"}`` and makes no network call. Live wiring — a real transport
-        bound to per-tenant credentials — is the deferred follow-up; until then a
-        push against an unconfigured connector simply reports not-configured."""
+        configured"}`` and makes no network call. The live wiring ships: a deployment's
+        operational per-tenant ``ConnectorBinding`` (its endpoint and decrypted
+        credential) pushes through a real transport (``RequestsTransport``); without
+        one, the process-wide settings/env config applies, and a connector with
+        neither reports not-configured."""
         _require_admin(request)
         from .connectors import RequestsTransport, UnknownConnector, build_connector
 
@@ -1594,7 +1596,9 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         computed, never stored. Inert by default: with no cloud credentials
         configured the domain makes no fetch and returns ``{"connected": false,
         ...}`` with the catalog of checks it would run (the house verdict idiom —
-        200, read ``connected``). Live wiring is the deferred follow-up."""
+        200, read ``connected``). The live wiring ships: a deployment's operational
+        per-tenant ``PostureBinding`` has it assessed against the resource the
+        binding points at, through a read-only ``RequestsFetcher``."""
         return Response(self._assess_posture("cloud"))
 
     @action(detail=True, methods=["get"], url_path="secrets-posture")
@@ -1603,8 +1607,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         KMS/key rotation, secret-store hygiene, committed-secret indicators, and
         encryption at rest. A read — open to any authenticated operator, computed,
         never stored. Inert by default (``connected: false`` with no credentials).
-        No secret VALUE is ever emitted — only presence/hygiene facts. Live wiring
-        is the deferred follow-up."""
+        No secret VALUE is ever emitted — only presence/hygiene facts. The live
+        wiring ships: a deployment's operational per-tenant ``PostureBinding`` has it
+        assessed against the resource the binding points at, through a read-only
+        ``RequestsFetcher``."""
         return Response(self._assess_posture("secrets"))
 
     @action(detail=True, methods=["get"], url_path="repo-posture")
@@ -1613,7 +1619,9 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         CI/CD runner exposure, dependency risk, IaC misconfig, embedded secrets,
         and pipeline drift. A read — open to any authenticated operator, computed,
         never stored. Inert by default (``connected: false`` with no credentials).
-        Live wiring is the deferred follow-up."""
+        The live wiring ships: a deployment's operational per-tenant
+        ``PostureBinding`` has it assessed against the resource the binding points
+        at, through a read-only ``RequestsFetcher``."""
         return Response(self._assess_posture("repo"))
 
     def _assess_posture(self, domain: str) -> dict:
