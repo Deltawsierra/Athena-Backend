@@ -250,7 +250,7 @@ sent to the engine, not recorded, and not quoted in the answer or the log. Djang
 still receives and parses a multipart body before the view runs (above its in-memory
 upload limit that goes to a temporary file, not to memory); a web server in front that
 caps request bodies is what stops a body being received at all. The text route (`POST /api/detection/defender/text/`)
-has no size limit yet.
+has no size limit of its own yet; only Django's request-body limit applies to it.
 
 ## Signed chain outcomes
 

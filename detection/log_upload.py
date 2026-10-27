@@ -35,8 +35,8 @@ from rest_framework.exceptions import APIException, ValidationError
 #: The most a log file uploaded to ``POST /api/detection/defender/file/`` may be, in
 #: bytes: 1 MiB.
 #:
-#: Neither the engine's text route nor this backend's had a limit, so there was no
-#: figure to match; this one is the engine's file-upload cap, chosen from what the
+#: Neither the engine's text route nor this backend's had a limit of its own, so there
+#: was no figure to match; this one is the engine's file-upload cap, chosen from what the
 #: defender costs. Measured on the engine, ``LogDefender.analyze_lines`` takes about 1 s
 #: of CPU per MiB of ordinary access-log lines, and about 14 s per MiB of lines that all
 #: alert, which also answers with about 37 MiB of JSON for that one MiB (and this
