@@ -29,10 +29,15 @@ class DefenderTextScanAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        # A body that declares itself over the bound is refused before request.data
+        # parses it; a text over the cap, in characters or in UTF-8 bytes, is refused 413
+        # (detection/log_upload.py).
+        log_upload.check_declared_length(request, log_upload.LOG_TEXT_MAX_REQUEST_BYTES)
         serializer = ThreatDetectionScanSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            log_upload.refuse_invalid_text(serializer.errors)
 
-        content = serializer.validated_data["content"]
+        content = log_upload.check_log_text(serializer.validated_data["content"])
         client = CyberEngineClient.from_settings()
 
         try:

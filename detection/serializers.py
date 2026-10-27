@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from . import log_upload
 from .models import ThreatDetection, CVEClassifyResult
 
 
@@ -9,8 +10,11 @@ from .models import ThreatDetection, CVEClassifyResult
 class ThreatDetectionScanSerializer(serializers.Serializer):
     """
     Text-based defender scan input.
+
+    ``max_length`` is the log-upload cap in characters; the view also holds the text to it in
+    UTF-8 bytes, which is what the engine measures (detection/log_upload.py).
     """
-    content = serializers.CharField()
+    content = serializers.CharField(max_length=log_upload.LOG_UPLOAD_MAX_BYTES)
 
 
 class ThreatDetectionUploadSerializer(serializers.Serializer):
