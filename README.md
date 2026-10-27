@@ -90,6 +90,36 @@ is a settings line reading the owner's key from the environment.
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
+### Testing against a loopback target (`ATHENA_PENTEST_TEST_TARGETS`)
+
+A scan's target is held to a scope guard (`pentest/views.py`
+`target_is_out_of_bounds`): loopback, private, link-local, metadata and reserved
+addresses are refused, in every spelling, before anything reaches the engine.
+That is correct for a deployment that scans real customer systems, and it means
+the assurance flow cannot run against a deliberately vulnerable test target
+(Minotaur) that is reachable only on loopback.
+
+`ATHENA_PENTEST_TEST_TARGETS` is a testing affordance for exactly that: a
+comma-separated list of `host` or `host:port` entries (for example
+`127.0.0.1:8100` or `127.0.0.1,minotaur.local`) that are permitted despite being
+loopback or internal, so the whole flow -- consent, engagement, record, the
+dashboard's adoption and findings -- can run against them. It mirrors the
+engine's own egress allowlist (`config/engine.loop.yaml`), which the engine
+needs set to the same host for the scan to reach it.
+
+- **Empty by default.** Unset (the shipped state) it has no effect: the scope
+  guard is exactly as before, and every loopback/internal target is refused.
+  `manage.py check --deploy` is unaffected.
+- **Exact, never broad.** Only a host (or host:port) that an entry names is
+  permitted; a different port, a different host, or another spelling of loopback
+  is refused as before. It never widens the engagement scope, and the engine's
+  own egress policy still applies.
+- **Audited.** Every target permitted this way is logged at WARNING
+  (`pentest.views`) naming the variable, so the deviation is visible.
+- **Never a production setting.** A deployment that scans anything real leaves it
+  unset. Setting it is an operator's deliberate decision to scan a loopback or
+  internal host they control, and nothing else relaxes.
+
 The engine client (`ai_engine/services/cyberengine_client.py`) bounds every answer
 it parses. An answer longer than 8 MiB is not parsed at all. Every other answer is
 checked for nesting depth in one linear pass before it is parsed: an answer cut off
