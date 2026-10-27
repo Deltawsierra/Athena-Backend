@@ -37,7 +37,6 @@ from collections.abc import Mapping
 import re
 import subprocess
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 
 #: Opt out for deliberate local mythos-core development. It announces itself on
@@ -167,7 +166,9 @@ def _file_url_to_path(url: str, *, ospath=os.path) -> str | None:
     if ospath is ntpath:
         to_path = nturl2path.url2pathname
     else:
-        to_path = urllib.request.url2pathname
+        # Not urllib.request.url2pathname: that one is the HOST's, so on Windows it
+        # would answer a POSIX question with backslashes. On POSIX it is this.
+        to_path = urllib.parse.unquote
     try:
         return to_path(path) or None
     except (OSError, ValueError):

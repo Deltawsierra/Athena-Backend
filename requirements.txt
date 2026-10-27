@@ -214,4 +214,21 @@ zopfli==0.2.3.post1
 # byte what it was at 104fdc9 (the same git blobs: iso4217.json sha256
 # b23e144243e3...), so the table pins in tests/test_economics_engine.py hold
 # unchanged.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@b1f6e9d855a54421e073ffd178c03a90116a371f
+#
+# What the pin since b1f6e9d (Mythos-Core#50) adds:
+#
+# Mythos-Core#53 -- the reason for the 9b0579b pin: mythos_core imports, and its
+# stop paths run, on Windows. safe_http.py registered os.register_at_fork at import
+# with no guard, and that function exists only where os.fork does, so importing
+# mythos_core.http or mythos_core.failsafe raised AttributeError on Windows. This
+# service imports both at module level (pentest/models.py and pentest/views.py,
+# which hold the scan's Stop route, and failsafe/signing.py), so Django could not
+# load the pentest app there at all. The hook is now registered only where it
+# exists; on Linux nothing changes. Core gained a windows-latest CI job and a
+# regression test for exactly this. The pin guard stays ON (neither
+# DEPENDENCY_PIN_GUARD nor ATHENA_MYTHOS_CORE_PIN_GUARD is set anywhere).
+#
+# Mythos-Core#51 and #52 ride along and change nothing here: #51 is FREEZE.md
+# (documentation), #52 lifts the engine-agnostic persona fence into
+# mythos_core.persona, new code that this service does not import.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@9b0579b0cebfd79a383055083f46ada9e6ddb53e

@@ -136,6 +136,77 @@ jobs:
       - name: Test
         run: pytest
 
+  # The owner runs this service on Windows (PowerShell, Python 3.12). This job installs
+  # it there, imports what Windows used to refuse to import (mythos_core.http and
+  # mythos_core.failsafe, which the pentest app -- the scan's Stop route -- and the
+  # failsafe plane load at start), and runs the tests that must pass there: the pin
+  # guard on Windows paths, the stop paths, and the Windows-equivalent tests for the
+  # two places this service used POSIX-only calls (economics/capacity.py without fcntl,
+  # oplog.py without select on stderr). It does not run tests/test_economics_run_cap.py
+  # as a file: that file asserts the flock slots themselves, which Windows has no fcntl
+  # to take; tests/test_economics_run_cap_without_fcntl.py is its Windows form, and the
+  # three tests of that file that read the code, not the lock, are named below. The Linux
+  # job above still runs everything. Bash steps say `shell: bash` (Git Bash is on the
+  # runner); the rest run as PowerShell.
+  backend-windows:
+    runs-on: windows-latest
+    env:
+      DJANGO_SECRET_KEY: ci-secret-key-not-used-outside-ci
+      DJANGO_DEBUG: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Authenticate the private mythos-core dependency
+        shell: bash
+        env:
+          MYTHOS_CORE_TOKEN: ${{ secrets.MYTHOS_CORE_TOKEN }}
+        run: |
+          if [ -n "$MYTHOS_CORE_TOKEN" ]; then
+            git config --global url."https://x-access-token:${MYTHOS_CORE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          else
+            echo "::error::MYTHOS_CORE_TOKEN secret is not set; the private mythos-core git dependency cannot be cloned. Add it under Settings -> Secrets and variables -> Actions (a fine-grained PAT with read access to Deltawsierra/Mythos-Core)."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Import smoke (core, then every app the stops run through)
+        shell: bash
+        run: |
+          python -c "import mythos_core.http, mythos_core.failsafe"
+          python manage.py check
+          python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.economics.capacity"
+          python manage.py makemigrations --check --dry-run
+
+      - name: Test (pin guard, stop paths, Windows-equivalent tests)
+        shell: bash
+        run: |
+          pytest \
+            tests/test_mythos_core_pin.py \
+            tests/test_mythos_core_provenance.py \
+            tests/test_economics_run_cap_without_fcntl.py \
+            tests/test_oplog_without_select.py \
+            tests/test_failsafe_control_plane.py \
+            tests/test_no_control_holds_back_a_stop.py \
+            tests/test_no_dispatch_holds_back_a_stop.py \
+            tests/test_no_stop_waits_on_an_engine_answer.py \
+            tests/test_a_persons_stop_outlives_their_account.py \
+            tests/test_a_supersede_never_holds_back_a_stop.py \
+            tests/test_nothing_that_watches_holds_back_a_stop.py \
+            tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py \
+            tests/test_a_proxy_password_that_cannot_be_encoded_owes_the_stop.py \
+            tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
+            tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
+            tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
+            tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \
+            tests/test_economics_run_cap.py::test_the_spec_and_the_readme_state_the_cap
+
   frontend:
     runs-on: ubuntu-latest
     steps:

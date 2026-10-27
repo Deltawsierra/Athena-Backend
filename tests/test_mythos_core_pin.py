@@ -31,7 +31,7 @@ _PIN = re.compile(
 
 
 def _pins(name: str) -> list[str]:
-    text = (ROOT / name).read_text()
+    text = (ROOT / name).read_text(encoding="utf-8")
     return [m.group("ref") for m in _PIN.finditer(text)]
 
 

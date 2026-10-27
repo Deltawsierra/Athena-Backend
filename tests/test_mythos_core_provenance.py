@@ -85,7 +85,7 @@ def test_an_editable_checkout_is_read_from_its_git_head():
 
     assert found.kind == "local"
     assert found.commit == PIN
-    assert found.location == "/home/user/mythos-core"
+    assert found.location == str(pathlib.Path("/home/user/mythos-core"))  # as the host spells it
     assert not found.dirty
     # The working tree is consulted, not just HEAD -- see the dirty test below.
     assert ("status", "--porcelain") in calls
@@ -364,9 +364,8 @@ def test_a_core_loaded_from_somewhere_else_entirely_is_a_complaint():
     )
     assert grievance is not None
     # It has to name all three, or nobody can act on it.
-    assert "/tmp/some-other-checkout/src/mythos_core/__init__.py" in grievance
-    assert "/work/core" in grievance
-    assert "/srv/site-packages" in grievance
+    for where in ("/tmp/some-other-checkout/src/mythos_core/__init__.py", "/work/core", "/srv/site-packages"):
+        assert os.path.realpath(where) in grievance  # as the host spells it: a drive and backslashes on Windows
     assert "PYTHONPATH" in grievance
 
 
@@ -430,7 +429,7 @@ def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
     from tests.mythos_core_provenance import declared_pin
 
     ct = tests_conftest
-    pin = declared_pin((ct.ROOT / "requirements.txt").read_text())
+    pin = declared_pin((ct.ROOT / "requirements.txt").read_text(encoding="utf-8"))
 
     saved = {
         "direct_url": ct._installed_direct_url,
@@ -451,7 +450,7 @@ def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
         with pytest.raises(pytest.UsageError) as refusal:
             ct.enforce_dependency_pins()
         assert "shadowing" in str(refusal.value)
-        assert "/tmp/a-shadow/mythos_core/__init__.py" in str(refusal.value)
+        assert os.path.realpath("/tmp/a-shadow/mythos_core/__init__.py") in str(refusal.value)
     finally:
         ct._installed_direct_url = saved["direct_url"]
         ct._imported_locations = saved["imported_locations"]
@@ -820,7 +819,7 @@ def test_a_path_entry_outside_the_install_is_caught_even_when_the_file_is_right(
         "guard said nothing -- the defect this test exists for"
     )
     assert "__path__[0]" in grievance
-    assert "/tmp/evil/mythos_core" in grievance
+    assert os.path.realpath("/tmp/evil/mythos_core") in grievance
     assert "1 of 2" in grievance
 
 
@@ -855,7 +854,7 @@ def test_every_stray_is_listed_not_just_the_first():
     assert grievance is not None
     assert "3 of 3" in grievance
     for stray in ("/tmp/a/mythos_core", "/tmp/b/mythos_core", "/tmp/c/mythos_core"):
-        assert stray in grievance
+        assert os.path.realpath(stray) in grievance
 
 
 def test_a_normal_package_with_its_path_beside_its_file_is_silent():
@@ -947,7 +946,7 @@ def test_the_hook_refuses_a_path_shadow_end_to_end():
     from tests.mythos_core_provenance import declared_pin
 
     ct = tests_conftest
-    pin = declared_pin((ct.ROOT / "requirements.txt").read_text())
+    pin = declared_pin((ct.ROOT / "requirements.txt").read_text(encoding="utf-8"))
 
     saved = {
         "direct_url": ct._installed_direct_url,
@@ -969,7 +968,7 @@ def test_the_hook_refuses_a_path_shadow_end_to_end():
         with pytest.raises(pytest.UsageError) as refusal:
             ct.enforce_dependency_pins()
         assert "__path__[0]" in str(refusal.value)
-        assert "/tmp/a-path-shadow/mythos_core" in str(refusal.value)
+        assert os.path.realpath("/tmp/a-path-shadow/mythos_core") in str(refusal.value)
     finally:
         ct._installed_direct_url = saved["direct_url"]
         ct._imported_locations = saved["imported_locations"]
@@ -1310,6 +1309,16 @@ FILE_URLS = [
 @pytest.mark.parametrize(("ospath", "url", "expected"), FILE_URLS)
 def test_a_file_url_is_read_as_the_path_its_platform_spells(ospath, url, expected):
     assert _file_url_to_path(url, ospath=ospath) == expected
+
+
+def test_a_posix_file_url_is_read_by_posix_rules_even_on_a_windows_host(monkeypatch):
+    """`urllib.request.url2pathname` is the HOST's: on Windows it is `nturl2path`'s. A
+    POSIX question asked there (`ospath=posixpath`) must still be answered with `/`."""
+    import nturl2path
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "url2pathname", nturl2path.url2pathname)
+    assert _file_url_to_path("file:///srv/my%20dep", ospath=posixpath) == "/srv/my dep"
 
 
 @pytest.mark.parametrize("ospath", [ntpath, posixpath], ids=["nt", "posix"])

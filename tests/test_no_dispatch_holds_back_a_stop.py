@@ -25,11 +25,14 @@ assert that it is.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
 import os
+import select
 import threading
 import time
+import types
 import uuid
 from datetime import timedelta
 
@@ -2181,11 +2184,10 @@ def test_a_look_that_fails_is_not_taken_for_absent():
 # ------------------------------------------------------------------ fork safety
 
 
-def test_a_forked_child_starts_afresh_whatever_the_parent_held():
-    """A pre-forking server forks workers while this process's threads may hold
-    its locks and run slots. The child gets fresh ones -- a lock held at the fork
-    would be held for ever there, and every stop that starts a dispatch would hang
-    on it -- no jobs, and no sweeper: it starts its own."""
+@contextlib.contextmanager
+def _a_parent_that_holds_everything():
+    """This module's state as a pre-forking server's parent can leave it at a fork: a
+    lock another thread holds, every run slot taken, a job, a sweeper."""
     held, release = threading.Event(), threading.Event()
 
     def hold():
@@ -2200,24 +2202,8 @@ def test_a_forked_child_starts_afresh_whatever_the_parent_held():
     taken = [slots.acquire(timeout=1) for _ in range(dispatch._max_concurrent_runs())]
     dispatch._JOBS[777] = False
     dispatch._SWEEPER[:] = [(os.getpid(), holder)]
-    read, write = os.pipe()
     try:
-        pid = os.fork()
-        if pid == 0:  # the child: no database, no Django request -- only this module's state
-            try:
-                ok = [
-                    dispatch._JOBS_LOCK.acquire(timeout=2),
-                    dispatch._JOBS == {},
-                    dispatch._run_slots().acquire(timeout=2),
-                    dispatch._SWEEPER == [],
-                    not dispatch._SWEEP_STOP.is_set(),
-                ]
-                os.write(write, ("".join("1" if x else "0" for x in ok)).encode())
-            finally:
-                os._exit(0)
-        os.close(write)
-        answer = os.read(read, 16).decode()
-        os.waitpid(pid, 0)
+        yield
     finally:
         release.set()
         holder.join(5)
@@ -2226,7 +2212,73 @@ def test_a_forked_child_starts_afresh_whatever_the_parent_held():
                 slots.release()
         dispatch._JOBS.pop(777, None)
         dispatch._SWEEPER.clear()
+
+
+def _what_a_fresh_state_offers() -> str:
+    """One digit a fact: the jobs lock is free, there are no jobs, a run slot is free,
+    no sweeper is recorded, and the sweeper is not told to stop."""
+    ok = [
+        dispatch._JOBS_LOCK.acquire(timeout=2),
+        dispatch._JOBS == {},
+        dispatch._run_slots().acquire(timeout=2),
+        dispatch._SWEEPER == [],
+        not dispatch._SWEEP_STOP.is_set(),
+    ]
+    return "".join("1" if x else "0" for x in ok)
+
+
+def _what_a_forked_child_finds() -> str:
+    read, write = os.pipe()
+    try:
+        pid = os.fork()
+        if pid == 0:  # the child: no database, no Django request -- only this module's state
+            try:
+                os.write(write, _what_a_fresh_state_offers().encode())
+            finally:
+                os._exit(0)
+        os.close(write)
+        answer = os.read(read, 16).decode()
+        os.waitpid(pid, 0)
+        return answer
+    finally:
         os.close(read)
+
+
+def _what_the_reset_leaves_here() -> str:
+    """The same reset a fork runs in its child, run in this process: for where there is
+    no fork (Windows registers no hook, and no child ever inherits anything). The
+    module's state is put back after."""
+    kept = (dispatch._JOBS, dispatch._JOBS_LOCK, dispatch._SLOTS, dispatch._SLOTS_LOCK, dispatch._SWEEP_STOP,
+            dispatch._SWEEPER_STARTING)
+    swept, retry = list(dispatch._SWEEPER), dict(dispatch._SWEEPER_RETRY)
+    counted = dispatch._NOT_STARTED[0], dispatch._UNRECORDED_REFUSED[0]
+    try:
+        dispatch._after_fork_in_child()
+        return _what_a_fresh_state_offers()
+    finally:
+        (dispatch._JOBS, dispatch._JOBS_LOCK, dispatch._SLOTS, dispatch._SLOTS_LOCK, dispatch._SWEEP_STOP,
+         dispatch._SWEEPER_STARTING) = kept
+        dispatch._SWEEPER[:] = swept
+        dispatch._SWEEPER_RETRY.clear()
+        dispatch._SWEEPER_RETRY.update(retry)
+        dispatch._NOT_STARTED[0], dispatch._UNRECORDED_REFUSED[0] = counted
+
+
+def test_a_forked_child_starts_afresh_whatever_the_parent_held():
+    """A pre-forking server forks workers while this process's threads may hold
+    its locks and run slots. The child gets fresh ones -- a lock held at the fork
+    would be held for ever there, and every stop that starts a dispatch would hang
+    on it -- no jobs, and no sweeper: it starts its own. Where there is no fork
+    (Windows) the reset is run in this process instead."""
+    with _a_parent_that_holds_everything():
+        answer = _what_a_forked_child_finds() if hasattr(os, "fork") else _what_the_reset_leaves_here()
+    assert answer == "11111", answer
+
+
+def test_the_reset_a_fork_runs_starts_afresh_whatever_the_parent_held_on_every_os():
+    """The reset itself, with no fork to carry it: the same five facts, in this process."""
+    with _a_parent_that_holds_everything():
+        answer = _what_the_reset_leaves_here()
     assert answer == "11111", answer
 
 
@@ -2277,6 +2329,7 @@ class _Stderr:
 
     def __init__(self, fill=False):
         self.read_fd, self.write_fd = os.pipe()
+        self.full = fill
         if fill:
             os.set_blocking(self.write_fd, False)
             try:
@@ -2307,6 +2360,32 @@ class _Stderr:
         os.close(self.write_fd)
 
 
+@pytest.fixture
+def stderr_select(monkeypatch):
+    """Where select takes sockets only (Windows), oplog cannot ask it about a pipe, and
+    hands the line to a writer thread instead (tests/test_oplog_without_select.py). The
+    tests below are about what oplog does with select's ANSWER -- write in this thread
+    when stderr is writable, skip and count when it is not -- so there it is given one:
+    the test's stderr is writable unless the test filled it. Elsewhere the real select
+    answers, as it does in production."""
+
+    def install(err):
+        from assurance import oplog
+
+        try:
+            select.select([], [err.write_fd], [], 0)
+            return
+        except OSError:
+            pass
+
+        def answer(_readers, writers, _errors, _timeout):
+            return [], ([] if err.full else list(writers)), []
+
+        monkeypatch.setattr(oplog, "select", types.SimpleNamespace(select=answer))
+
+    return install
+
+
 class _Sink(logging.Handler):
     """A log handler that records which thread wrote each record to it, and can be
     made slow."""
@@ -2323,7 +2402,7 @@ class _Sink(logging.Handler):
 
 @with_key
 def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_stderr_and_kept_for_the_log(
-    monkeypatch, caplog
+    monkeypatch, caplog, stderr_select
 ):
     """The process is out of threads and the stop could not record its dispatch:
     nothing else will ever know it is owed. The ERROR naming the command is on
@@ -2336,6 +2415,7 @@ def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_st
     from assurance import oplog
 
     err = _Stderr()
+    stderr_select(err)
     sink = _Sink()
     logging.getLogger("assurance").addHandler(sink)
     kept = oplog.KEPT_FOR_WRITER[0]
@@ -2376,7 +2456,9 @@ def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_st
 
 @with_key
 @pytest.mark.parametrize("threads", ["can start", "cannot start"])
-def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_inside(threads, monkeypatch, caplog):
+def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_inside(
+    threads, monkeypatch, caplog, stderr_select
+):
     """A log sink that takes 2 s a record, and no thread inside it: free to be
     written to, and slow. The line is on stderr at once and the call returns at
     once -- whether or not a thread can start -- because this thread never writes
@@ -2386,6 +2468,7 @@ def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_insi
     from assurance import oplog
 
     err = _Stderr()
+    stderr_select(err)
     sink = _Sink(seconds=2.0)
     logging.getLogger("assurance").addHandler(sink)
     monkeypatch.setattr(sys, "__stderr__", err)
@@ -2417,7 +2500,7 @@ def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_insi
         logging.getLogger("assurance").removeHandler(sink)
 
 
-def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch, caplog):
+def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch, caplog, stderr_select):
     """stderr is a pipe nobody is reading, full: the line is not written there --
     a write would block -- and the call returns at once; the logger still has it."""
     import sys
@@ -2425,6 +2508,7 @@ def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch,
     from assurance import oplog
 
     err = _Stderr(fill=True)
+    stderr_select(err)
     monkeypatch.setattr(sys, "__stderr__", err)
     skipped = oplog.STDERR_SKIPPED[0]
     try:
