@@ -249,8 +249,21 @@ accepted, so the Investigations page's file input is unchanged. A refused file i
 sent to the engine, not recorded, and not quoted in the answer or the log. Django
 still receives and parses a multipart body before the view runs (above its in-memory
 upload limit that goes to a temporary file, not to memory); a web server in front that
-caps request bodies is what stops a body being received at all. The text route (`POST /api/detection/defender/text/`)
-has no size limit of its own yet; only Django's request-body limit applies to it.
+caps request bodies is what stops a body being received at all.
+
+`POST /api/detection/defender/text/` takes the same bound on its text: at most 1 MiB, in
+the UTF-8 bytes it is (the file view's figure, not a second one; the engine's text route
+holds the same). A request that declares a body over 6 MiB plus 16 KiB is refused 413
+before its body is parsed. A text of more than 1,048,576 characters is refused 413 by the
+serializer's `max_length`, and a text of 1,048,576 characters or fewer that is more than
+that in UTF-8 bytes (an accented letter is two) is refused 413 by the view, each with the
+same sentence as the file view's. The declared-length bound is 6 MiB, not 1 MiB, because
+JSON can spell one byte of text as six (`\u0001`, as Python's `json.dumps`, and so
+`requests`, write a control character), and a text the cap allows is not refused for how
+its client wrote it down. As for the file view, a refused text is not sent to the engine,
+not recorded, and not quoted in the answer or the log, and the declared-length check sees
+only a length the client declares: a web server in front that caps request bodies is what
+stops a body being received at all.
 
 ## Signed chain outcomes
 

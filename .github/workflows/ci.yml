@@ -203,6 +203,7 @@ jobs:
             tests/test_a_proxy_password_that_cannot_be_encoded_owes_the_stop.py \
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
             tests/test_a_log_upload_is_bounded.py \
+            tests/test_a_log_text_is_bounded.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \

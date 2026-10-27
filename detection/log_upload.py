@@ -1,4 +1,5 @@
-"""A log file uploaded to ``POST /api/detection/defender/file/``, read within a bound.
+"""A log file uploaded to ``POST /api/detection/defender/file/``, and log text posted to
+``POST /api/detection/defender/text/``, each read within a bound.
 
 The view took a bare ``serializers.FileField()`` and ran ``uploaded_file.read().decode()``:
 no limit on size or kind, the whole file held in memory, then sent on to the engine's
@@ -25,6 +26,18 @@ that stops a body being received at all.
 
 The figures are the engine's (``engine/utils/log_upload.py`` in Athena-Engine), which
 refuses a file over its cap with a 413 of its own: this cap must never be larger.
+
+The text view had the same defect: ``serializers.CharField()`` with no ``max_length``, so
+only Django's request-body limit applied. It now checks, in this order:
+
+  1. The declared ``Content-Length``, before ``request.data`` is parsed: over
+     ``LOG_TEXT_MAX_REQUEST_BYTES`` is refused 413 with nothing read.
+  2. The serializer's ``max_length``, ``LOG_UPLOAD_MAX_BYTES`` characters: a text over it is
+     refused 413 (``refuse_invalid_text``), not the 400 a validation error is.
+  3. The text's own size in UTF-8 bytes, ``check_log_text``: 413. A character is at least one
+     byte, so this is the check that holds for text that is not ASCII.
+
+The same fixed sentence as the file view's. Nothing here is on a stop's path.
 """
 
 from __future__ import annotations
@@ -54,6 +67,18 @@ LOG_UPLOAD_ENVELOPE_BYTES = 16 * 1024
 
 #: The most the whole request body may declare.
 LOG_UPLOAD_MAX_REQUEST_BYTES = LOG_UPLOAD_MAX_BYTES + LOG_UPLOAD_ENVELOPE_BYTES
+
+#: The most JSON can make of one byte of text: a control character such as ``\x01`` is one
+#: byte as text and six as ``\u0001``, which is how Python's ``json.dumps`` (and so
+#: ``requests``' ``json=``) writes it. A newline is two, a character outside the Basic
+#: Multilingual Plane three, the rest less. The engine's text route holds the same figure.
+LOG_TEXT_JSON_EXPANSION = 6
+
+#: The most the whole request body of ``POST /api/detection/defender/text/`` may declare: a
+#: text at the cap in its worst JSON spelling, and the envelope around it. It is not a second
+#: cap on the text, which is ``LOG_UPLOAD_MAX_BYTES``; it is the bound the declared length is
+#: held to, so that no text the cap allows is refused for how its client wrote it down.
+LOG_TEXT_MAX_REQUEST_BYTES = LOG_UPLOAD_MAX_BYTES * LOG_TEXT_JSON_EXPANSION + LOG_UPLOAD_ENVELOPE_BYTES
 
 #: How much of the file is looked at to tell text from a binary: the head, as git does.
 LOG_UPLOAD_SNIFF_BYTES = 8192
@@ -96,8 +121,8 @@ def is_log_type(content_type: str | None) -> bool:
     return not media or media.startswith("text/") or media in LOG_UPLOAD_TYPES
 
 
-def check_declared_length(request) -> None:
-    """Refuse a body whose declared length is over the bound, before it is parsed.
+def check_declared_length(request, bound: int = LOG_UPLOAD_MAX_REQUEST_BYTES) -> None:
+    """Refuse a body whose declared length is over ``bound``, before it is parsed.
 
     Call it before ``request.data`` is touched: nothing is read here, only the header.
     A body that declares no length is not refused here; it is held to the cap below."""
@@ -105,8 +130,32 @@ def check_declared_length(request) -> None:
         declared = int(request.META.get("CONTENT_LENGTH") or 0)
     except ValueError:
         raise ValidationError({"detail": "Content-Length is not a number"}) from None
-    if declared > LOG_UPLOAD_MAX_REQUEST_BYTES:
+    if declared > bound:
         raise LogUploadTooLarge()
+
+
+def refuse_invalid_text(errors) -> None:
+    """Raise what a serializer that did not validate ``content`` is answered with: 413 if
+    the text was refused for its length, else the 400 ``raise_exception=True`` would raise.
+
+    ``errors`` is ``serializer.errors``. A message is never looked at, only its code, so
+    nothing the caller sent can reach the answer."""
+    if any(error.code == "max_length" for error in errors.get("content", [])):
+        raise LogUploadTooLarge()
+    raise ValidationError(errors)
+
+
+def check_log_text(text: str) -> str:
+    """The text, if it is within ``LOG_UPLOAD_MAX_BYTES`` in the UTF-8 bytes it is; else
+    ``LogUploadTooLarge`` (413).
+
+    The serializer's ``max_length`` counts characters and a character is one to four bytes,
+    so this is the check the engine's own would make. A lone surrogate (which the serializer
+    refuses, but this does not depend on that) counts as the three bytes it would take,
+    rather than raising."""
+    if len(text.encode("utf-8", errors="surrogatepass")) > LOG_UPLOAD_MAX_BYTES:
+        raise LogUploadTooLarge()
+    return text
 
 
 def read_log_text(uploaded_file) -> str:
