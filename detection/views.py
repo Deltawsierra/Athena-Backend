@@ -8,6 +8,7 @@ from django.http import HttpResponse
 
 from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
 
+from . import log_upload
 from .models import ThreatDetection, CVEClassifyResult
 from .serializers import (
     ThreatDetectionScanSerializer,
@@ -62,11 +63,14 @@ class DefenderFileScanAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        # A body that declares itself over the cap is refused before request.data
+        # parses it, and a file is read only within the cap (detection/log_upload.py).
+        log_upload.check_declared_length(request)
         serializer = ThreatDetectionUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         uploaded_file = serializer.validated_data["uploaded_file"]
-        content = uploaded_file.read().decode("utf-8", errors="ignore")
+        content = log_upload.read_log_text(uploaded_file)
 
         client = CyberEngineClient.from_settings()
 
