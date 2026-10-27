@@ -235,6 +235,23 @@ fields for the events of every account that still exists. An account removed
 before `0047` has no name left to copy, and its events read as the machine's.
 Rolling back past `0047` drops the snapshot.
 
+## Log-file uploads
+
+`POST /api/detection/defender/file/` takes a text log file of at most 1 MiB
+(`detection/log_upload.py`; the engine's own cap on the file it analyses is the same
+figure, and this one must never be larger). A request that declares a body over that
+plus 16 KiB of multipart envelope is refused 413 before its body is parsed; a file
+over 1 MiB is refused 413 by its size, and the read is bounded at one byte past the
+cap whatever size the file says; a file of a type that is not a log's (image, PDF,
+archive) or whose first 8 KiB holds a NUL byte (a UTF-16 file, a binary) is refused
+415. A browser sends a `.log` file as `application/octet-stream` and `text/*` is
+accepted, so the Investigations page's file input is unchanged. A refused file is not
+sent to the engine, not recorded, and not quoted in the answer or the log. Django
+still receives and parses a multipart body before the view runs (above its in-memory
+upload limit that goes to a temporary file, not to memory); a web server in front that
+caps request bodies is what stops a body being received at all. The text route (`POST /api/detection/defender/text/`)
+has no size limit of its own yet; only Django's request-body limit applies to it.
+
 ## Signed chain outcomes
 
 `POST /api/assurance/deployments/<uuid>/chain-outcomes/observed/` records chain
