@@ -231,4 +231,32 @@ zopfli==0.2.3.post1
 # Mythos-Core#51 and #52 ride along and change nothing here: #51 is FREEZE.md
 # (documentation), #52 lifts the engine-agnostic persona fence into
 # mythos_core.persona, new code that this service does not import.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@9b0579b0cebfd79a383055083f46ada9e6ddb53e
+#
+# What the pin since 9b0579b (Mythos-Core#53) adds:
+#
+# Mythos-Core#55 -- the reason for the 59e168c pin: three things land together,
+# and all three are carried or hold here rather than changing anything this
+# service relies on.
+# (1) One status vocabulary. mythos_core.status is now the single set of execution
+# states (proposed, denied, permitted, dispatched, accepted, committed, failed,
+# partial, unknown) and release states that every engine maps its own words onto,
+# so SPINE, scoring and a customer report stop adding up unlike things. This
+# service does not import mythos_core.status -- its own states are unchanged -- so
+# it is carried for the engines that do, not read here.
+# (2) The OpenTelemetry GenAI semantic conventions are pinned to one commit of the
+# semantic-conventions repository instead of tracked as "the latest", because the
+# names move (gen_ai.system was renamed gen_ai.provider.name). tracing.span and the
+# span/attribute names now fix the vocabulary at that commit. assurance/
+# observability.py imports only the names it emits (EXECUTE_TOOL, GEN_AI_TOOL_NAME,
+# INVOKE_WORKFLOW, MYTHOS_VERDICT, PLAN, RETRIEVAL), none of which changed; it does
+# NOT import GEN_AI_SYSTEM (now an alias of GEN_AI_PROVIDER_NAME), so the rename
+# does not reach this service's spans.
+# (3) The persona lint mirror is stricter. As with #52 above, this service does not
+# import mythos_core.persona, so the stricter lint has nothing of this repo's to
+# reject.
+# The surfaces this service does import -- outcome, evidence, currency,
+# exposure_receipt, failsafe (operator command signatures), http.egress and
+# authority.context -- continue to satisfy their pins and signature tests against
+# 59e168c; the suite is green on the pin bump alone. The pin guard stays ON
+# (neither DEPENDENCY_PIN_GUARD nor ATHENA_MYTHOS_CORE_PIN_GUARD is set anywhere).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@59e168cac7f8bc145d98bb1776ee60b8a5f2a4b9
