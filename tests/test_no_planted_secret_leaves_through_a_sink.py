@@ -67,7 +67,7 @@ import types
 import uuid
 import zlib
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1674,10 +1674,13 @@ class World:
         try:
             with pytest.MonkeyPatch.context() as mp:
                 mp.setattr(economics_feeds, "base_url", lambda feed: fake.base)
-                # As of the recording's own date: with no --as-of the command asks for
-                # the 13 months before today, which the recording stops covering as the
-                # calendar moves on (it refused as feed_partial from 1 Nov 2026).
-                self.command(docs, "fetch_financial_source", "fred-cpiaucsl", "--as-of", "2026-10-13")
+                # The clock is held at the recording's own date, as tests/test_economics_feeds.py
+                # holds it. Left running, the FRED fetch asks for the 13 months before today,
+                # which the recording stops covering as the calendar moves on (refused as
+                # feed_partial from 1 Nov 2026). An --as-of would not do for BLS: it serves
+                # today's values only and refuses any other date before anything is sent.
+                mp.setattr(economics_feeds.timezone, "now", lambda: datetime(2026, 10, 13, 18, 0, tzinfo=UTC))
+                self.command(docs, "fetch_financial_source", "fred-cpiaucsl")
                 signals["client_request_line"] = "/fred/series/observations?" in "".join(self.lines._parts)
                 with _in_mode(fake, "echo"):
                     refused, _ = self.command(docs, "fetch_financial_source", "bls-ppi-final-demand", raises=True)
