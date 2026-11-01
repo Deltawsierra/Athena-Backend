@@ -827,12 +827,10 @@ def _hops_named(records, verdict: str) -> str:
     return " | ".join(parts)
 
 
-#: The one broken reading that says an effect was NOT produced (F1): a provider's
-#: signed readback answered not_applied (assurance.authority_chain.readback).
-_NOT_PRODUCED = "effect_not_produced"
-
-
 def _broken_chains_note(records) -> str:
+    # The one broken reading that says an effect was NOT produced (F1): a provider's
+    # signed readback answered not_applied (assurance.authority_chain.readback).
+    not_produced = "effect_not_produced"
     codes = {
         reading.code
         for record in records
@@ -849,9 +847,9 @@ def _broken_chains_note(records) -> str:
         " A provider's signed readback says the effect was not produced: record the chain the effect was produced "
         "through, if it was."
     )
-    if codes == {_NOT_PRODUCED}:
+    if codes == {not_produced}:
         said = readback
-    elif _NOT_PRODUCED in codes:
+    elif not_produced in codes:
         said = authority + readback
     else:
         said = authority

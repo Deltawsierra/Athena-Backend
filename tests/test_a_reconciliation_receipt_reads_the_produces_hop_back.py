@@ -719,7 +719,11 @@ def test_the_words_are_the_one_status_vocabulary_and_the_tool_kinds_the_grammar(
         "cannot_say": vocabulary.UNKNOWN,
     }
     assert _er().BASIS_OBSERVED == vocabulary.OBSERVED
-    assert rule.RECONCILED_CONCLUSIONS == {vocabulary.COMMITTED, vocabulary.FAILED, vocabulary.UNKNOWN}
+    assert (rule.RECONCILED_COMMITTED, rule.RECONCILED_FAILED, rule.RECONCILED_UNKNOWN) == (
+        vocabulary.COMMITTED,
+        vocabulary.FAILED,
+        vocabulary.UNKNOWN,
+    )
     assert _er().TOOL_KINDS == rule.TOOL_NODE_KINDS
 
 

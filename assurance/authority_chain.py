@@ -982,7 +982,6 @@ class ObservedEffect:
 RECONCILED_COMMITTED = "committed"
 RECONCILED_FAILED = "failed"
 RECONCILED_UNKNOWN = "unknown"
-RECONCILED_CONCLUSIONS: frozenset[str] = frozenset({RECONCILED_COMMITTED, RECONCILED_FAILED, RECONCILED_UNKNOWN})
 
 
 @dataclass(frozen=True)
@@ -2326,13 +2325,15 @@ def _observed(chain, i, inputs, index) -> list[Reading]:
 
 # ------------------------------------------------- produces, read back (F1)
 
-#: What each conclusion says of an attempt: its effect applied, not applied, or no answer.
-_APPLIED, _NOT_APPLIED, _NO_ANSWER = "applied", "not_applied", "no_answer"
-_BUCKET: Mapping[str, str] = {
-    RECONCILED_COMMITTED: _APPLIED,
-    RECONCILED_FAILED: _NOT_APPLIED,
-    RECONCILED_UNKNOWN: _NO_ANSWER,
-}
+def _reads(conclusion: str) -> str:
+    """What a receipt's conclusion says of its attempt: ``applied`` (``committed``),
+    ``not_applied`` (``failed``), or ``no_answer`` -- ``unknown``, and anything else,
+    which says nothing either way."""
+    if conclusion == RECONCILED_COMMITTED:
+        return "applied"
+    if conclusion == RECONCILED_FAILED:
+        return "not_applied"
+    return "no_answer"
 
 
 def _cited_effect(chain: Chain, inputs: Inputs) -> ObservedEffect | None:
@@ -2541,35 +2542,35 @@ def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int |
     # What each attempt of the dispatch reads, by its gate decision.
     attempts: dict[str, dict] = {}
     for r in about:
-        entry = attempts.setdefault(r.gate_outcome_id, {"number": r.attempt, _APPLIED: [], _NOT_APPLIED: [], _NO_ANSWER: []})
-        entry[_BUCKET.get(r.conclusion, _NO_ANSWER)].append(f"receipt {r.receipt_id}")
+        entry = attempts.setdefault(r.gate_outcome_id, {"number": r.attempt, "applied": [], "not_applied": [], "no_answer": []})
+        entry[_reads(r.conclusion)].append(f"receipt {r.receipt_id}")
     for outcome, observed in effects:
-        entry = attempts.setdefault(observed.gate_outcome_id, {"number": None, _APPLIED: [], _NOT_APPLIED: [], _NO_ANSWER: []})
-        entry[_APPLIED].append(f"observed effect {outcome.outcome_id}")
+        entry = attempts.setdefault(observed.gate_outcome_id, {"number": None, "applied": [], "not_applied": [], "no_answer": []})
+        entry['applied'].append(f"observed effect {outcome.outcome_id}")
 
     def label(g: str) -> str:
         number = attempts[g]["number"]
         return f"attempt {number} (gate decision {g})" if number is not None else f"the observed attempt (gate decision {g})"
 
-    applied = sorted(g for g, a in attempts.items() if a[_APPLIED])
+    applied = sorted(g for g, a in attempts.items() if a["applied"])
     conflicts: list[str] = []
     if len(applied) > 1:
-        each = "; ".join(f"{label(g)}: {_listed(attempts[g][_APPLIED])}" for g in applied)
+        each = "; ".join(f"{label(g)}: {_listed(attempts[g]['applied'])}" for g in applied)
         conflicts.append(f"{len(applied)} attempts of dispatch {dispatch} read applied ({each}), and one dispatch produces its effect once")
     for g in applied:
-        if attempts[g][_NOT_APPLIED]:
+        if attempts[g]["not_applied"]:
             conflicts.append(
-                f"{label(g)} read both applied ({_listed(attempts[g][_APPLIED])}) and not_applied "
-                f"({_listed(attempts[g][_NOT_APPLIED])})"
+                f"{label(g)} read both applied ({_listed(attempts[g]['applied'])}) and not_applied "
+                f"({_listed(attempts[g]['not_applied'])})"
             )
     if len(applied) == 1 and attempts[applied[0]]["number"] is not None:
         first = attempts[applied[0]]["number"]
         for g in sorted(attempts):
             later = attempts[g]
-            if g != applied[0] and later[_NOT_APPLIED] and later["number"] is not None and later["number"] > first:
+            if g != applied[0] and later["not_applied"] and later["number"] is not None and later["number"] > first:
                 conflicts.append(
-                    f"{label(g)} read not_applied ({_listed(later[_NOT_APPLIED])}) after {label(applied[0])} read applied "
-                    f"({_listed(attempts[applied[0]][_APPLIED])})"
+                    f"{label(g)} read not_applied ({_listed(later['not_applied'])}) after {label(applied[0])} read applied "
+                    f"({_listed(attempts[applied[0]]['applied'])})"
                 )
     if conflicts:
         return Readback(
@@ -2600,7 +2601,7 @@ def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int |
             "which is not on record here: stored, they prove nothing until it is",
         )
 
-    if mine[_APPLIED]:
+    if mine["applied"]:
         committed = of(RECONCILED_COMMITTED)
         proving = [r for r in committed if r.receipt_id in bound]
         if proving:
@@ -2620,7 +2621,7 @@ def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int |
             )
         # Applied by the observed effect alone (which proves it), or by receipts that do not bind yet.
         return Readback(dispatch, kept, (unbound(committed),) if committed else ())
-    if mine[_NOT_APPLIED]:
+    if mine["not_applied"]:
         failed = of(RECONCILED_FAILED)
         breaking = [r for r in failed if r.receipt_id in bound]
         if not breaking:
@@ -2640,7 +2641,7 @@ def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int |
                 ),
             ),
         )
-    r = [r for r in own if _BUCKET.get(r.conclusion, _NO_ANSWER) == _NO_ANSWER][0]
+    r = [r for r in own if _reads(r.conclusion) == "no_answer"][0]
     return Readback(
         dispatch,
         kept,
