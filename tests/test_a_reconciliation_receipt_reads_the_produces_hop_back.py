@@ -726,6 +726,22 @@ def test_the_words_are_the_one_status_vocabulary_and_the_tool_kinds_the_grammar(
 # ------------------------------------------------------------- the shared vector
 
 
+def _wire(hexed):
+    """An envelope as posted, from the vector's hex spelling (``payload_hex``,
+    ``sig_hex``); a field the vector keeps as posted is kept."""
+    out = {k: v for k, v in hexed.items() if k not in ("payload_hex", "signatures")}
+    if "payload_hex" in hexed:
+        out["payload"] = base64.b64encode(bytes.fromhex(hexed["payload_hex"])).decode()
+    if "signatures" in hexed:
+        out["signatures"] = [
+            {"keyid": s["keyid"], "sig": base64.b64encode(bytes.fromhex(s["sig_hex"])).decode()}
+            if isinstance(s, dict) and set(s) == {"keyid", "sig_hex"}
+            else s
+            for s in hexed["signatures"]
+        ]
+    return out
+
+
 def _vector_keyring(v):
     raw = bytes.fromhex(v["effect_public_key_hex"])
     gate = bytes.fromhex(v["gate_public_key_hex"])
@@ -744,10 +760,11 @@ def test_this_backend_verifies_every_valid_receipt_achilles_signed_in_the_vector
     keyring = _vector_keyring(v)
     answers = set()
     for case in v["valid"]:
-        document, key_id, why = _er().verify_envelope(case["envelope"], keyring)
+        envelope = _wire(case["envelope"])
+        document, key_id, why = _er().verify_envelope(envelope, keyring)
         assert why == "" and document == case["document"], case["name"]
         assert key_id == oc.key_id_for(oc.raw_public_key(key))
-        assert oc.canonical_bytes(document) == base64.b64decode(case["envelope"]["payload"])
+        assert oc.canonical_bytes(document) == bytes.fromhex(case["envelope"]["payload_hex"])
         answers.add(document["readback"]["answer"])
     assert answers == set(_er().ANSWERS)
     assert any(case["document"]["attempt"] > 1 for case in v["valid"])
@@ -761,5 +778,5 @@ def test_every_invalid_receipt_and_envelope_in_the_vector_is_refused():
             _er().validate_receipt(case["document"])
     keyring = _vector_keyring(v)
     for case in v["invalid_envelopes"]:
-        document, _, why = _er().verify_envelope(case["envelope"], keyring)
+        document, _, why = _er().verify_envelope(_wire(case["envelope"]), keyring)
         assert document is None and why, case["why"]
