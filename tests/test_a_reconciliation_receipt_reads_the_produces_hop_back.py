@@ -45,14 +45,9 @@ from rest_framework.test import APIClient
 
 from assurance import authority_chain as rule
 from assurance import composition as comp
-from assurance import effect_reconciliation as er
 from assurance import observed_outcomes
 from assurance.decision import decision_support
-from assurance.models import (
-    EffectReconciliationReceipt,
-    EffectReconciliationRewriteRefused,
-    WorkflowChainOutcome,
-)
+from assurance.models import WorkflowChainOutcome
 from tests import signed_chains
 from tests.test_spine_authority_chain import WF, _admin, _base, _client, _fresh, _hops, _post, _version, _world
 
@@ -61,6 +56,26 @@ pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("engine_keyring")]
 User = get_user_model()
 TOKEN = "observed-effect-service-token-for-tests-0123456789"  # pragma: allowlist secret
 VECTOR = Path(__file__).resolve().parent / "vectors" / "effect-reconciliation-v1.json"
+
+
+def _er():
+    """The module this change adds, imported when a test reads it: so on a checkout
+    without it each test here fails on its own, rather than the file failing to load."""
+    from assurance import effect_reconciliation
+
+    return effect_reconciliation
+
+
+def _receipts():
+    from assurance.models import EffectReconciliationReceipt
+
+    return EffectReconciliationReceipt.objects
+
+
+def _rewrite_refused():
+    from assurance.models import EffectReconciliationRewriteRefused
+
+    return EffectReconciliationRewriteRefused
 
 
 @pytest.fixture
@@ -453,7 +468,7 @@ def test_an_outcome_envelope_is_refused_at_the_receipt_route(service):
         reason = resp.json()["refused"][0]["reason"]
         assert "signed chain outcome, not a reconciliation receipt" in reason
         assert "observed-effects route" in reason
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
     assert WorkflowChainOutcome.objects.count() == outcomes
 
 
@@ -472,7 +487,7 @@ def test_a_receipt_is_refused_at_the_observed_effect_and_signed_outcome_routes(s
     assert resp.status_code == 400, resp.content
     assert "effect-reconciliations route" in resp.json()["refused"][0]["reason"]
     assert WorkflowChainOutcome.objects.count() == outcomes
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
 
 
 @pytest.mark.parametrize(
@@ -486,7 +501,7 @@ def test_a_receipt_signed_by_any_key_but_the_effect_key_is_refused(service, sign
     resp = _send(service, dep, envelope)
     assert resp.status_code == 400, resp.content
     assert said in resp.json()["refused"][0]["reason"]
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
 
 
 def _retyped(envelope, declared=None, signed=None):
@@ -494,9 +509,9 @@ def _retyped(envelope, declared=None, signed=None):
     signature covers set apart."""
     payload = base64.b64decode(envelope["payload"])
     key = signed_chains.ENGINE_KEYS["achilles-effect"]
-    sig = key.sign(oc.pae(signed or er.PAYLOAD_TYPE, payload))
+    sig = key.sign(oc.pae(signed or _er().PAYLOAD_TYPE, payload))
     return {
-        "payloadType": declared or er.PAYLOAD_TYPE,
+        "payloadType": declared or _er().PAYLOAD_TYPE,
         "payload": envelope["payload"],
         "signatures": [{"keyid": envelope["signatures"][0]["keyid"], "sig": base64.b64encode(sig).decode()}],
     }
@@ -517,7 +532,7 @@ def test_a_receipt_verifies_only_under_its_own_payload_type(service, declared, s
     resp = _send(service, dep, _retyped(envelope, declared, signed))
     assert resp.status_code == 400, resp.content
     assert said in resp.json()["refused"][0]["reason"]
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
 
 
 def test_the_same_envelope_twice_is_one_receipt_and_other_bytes_under_its_id_are_409(service):
@@ -527,13 +542,13 @@ def test_the_same_envelope_twice_is_one_receipt_and_other_bytes_under_its_id_are
     again = _send(service, dep, envelope)
     assert again.status_code == 200, again.content
     assert again.json()["recorded"] == 0 and again.json()["already_recorded"] is True
-    assert EffectReconciliationReceipt.objects.count() == 1
+    assert _receipts().count() == 1
 
     other, _ = _receipt(dep, permit.outcome_id, "not_applied", receipt_id=document["receipt_id"])
     resp = _send(service, dep, other)
     assert resp.status_code == 409, resp.content
     assert "already recorded, with other bytes" in resp.json()["refused"][0]["reason"]
-    (row,) = EffectReconciliationReceipt.objects.all()
+    (row,) = _receipts().all()
     assert row.answer == "applied" and row.envelope == envelope
 
 
@@ -547,13 +562,13 @@ def test_a_receipt_for_another_deployment_or_outside_the_window_is_refused(servi
         resp = _send(service, dep, envelope)
         assert resp.status_code == 400, resp.content
         assert said in resp.json()["refused"][0]["reason"]
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
 
 
 def test_the_body_is_bounded_and_every_refusal_is_a_named_4xx(service):
     dep, client, permit, _ = _world()
     url = _base(dep) + "effect-reconciliations/"
-    big = service.post(url, json.dumps({"envelope": "x" * (er.MAX_BODY_BYTES + 1)}), content_type="application/json")
+    big = service.post(url, json.dumps({"envelope": "x" * (_er().MAX_BODY_BYTES + 1)}), content_type="application/json")
     assert big.status_code == 413
     assert service.post(url, "envelope=x", content_type="application/x-www-form-urlencoded").status_code == 415
     good, _ = _receipt(dep, permit.outcome_id, "applied")
@@ -561,7 +576,7 @@ def test_the_body_is_bounded_and_every_refusal_is_a_named_4xx(service):
     key = signed_chains.ENGINE_KEYS["achilles-effect"]
 
     def signed(raw):
-        sig = base64.b64encode(key.sign(oc.pae(er.PAYLOAD_TYPE, raw))).decode()
+        sig = base64.b64encode(key.sign(oc.pae(_er().PAYLOAD_TYPE, raw))).decode()
         return {**good, "payload": base64.b64encode(raw).decode(), "signatures": [{**good["signatures"][0], "sig": sig}]}
 
     bodies = [
@@ -573,7 +588,7 @@ def test_the_body_is_bounded_and_every_refusal_is_a_named_4xx(service):
         {"envelope": {**good, "signatures": [{**good["signatures"][0], "sig": "%%%"}]}},
         {"envelope": {**good, "signatures": []}},
         {"envelope": {**good, "signatures": good["signatures"] * 2}},
-        {"envelope": {**good, "payload": "A" * (er.MAX_PAYLOAD_B64 + 4)}},
+        {"envelope": {**good, "payload": "A" * (_er().MAX_PAYLOAD_B64 + 4)}},
         {"envelope": signed(b"[1, 2]")},
         {"envelope": signed(b"\xff\xfe")},
         {"envelope": signed(b"[" * 100000)},
@@ -585,7 +600,7 @@ def test_the_body_is_bounded_and_every_refusal_is_a_named_4xx(service):
         assert resp.content, body
     missing = service.post(f"/api/assurance/deployments/{uuid.uuid4()}/effect-reconciliations/", {"envelope": good}, format="json")
     assert missing.status_code == 404
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
 
 
 def test_only_the_observed_effect_service_may_post(service):
@@ -597,7 +612,7 @@ def test_only_the_observed_effect_service_may_post(service):
     wrong.credentials(HTTP_X_OBSERVED_EFFECT_TOKEN="x" * 48)
     assert wrong.post(url, {"envelope": envelope}, format="json").status_code == 401
     assert _client(_admin()).post(url, {"envelope": envelope}, format="json").status_code == 403
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
 
 
 def test_no_keyring_or_no_effect_key_refuses_intake_and_takes_nothing_in(service, monkeypatch, tmp_path):
@@ -618,7 +633,7 @@ def test_no_keyring_or_no_effect_key_refuses_intake_and_takes_nothing_in(service
         resp = _send(service, dep, envelope)
         assert resp.status_code == 503, resp.content
         assert said in resp.json()["error"]
-    assert EffectReconciliationReceipt.objects.count() == 0
+    assert _receipts().count() == 0
 
 
 # ------------------------------------------------- the read degrades to unknown
@@ -645,7 +660,7 @@ def test_a_column_edited_after_the_fact_proves_nothing(service):
     _record_chain(client, dep, permit.outcome_id)
     row = signed_chains.record_reconciliation(dep, WF, permit.outcome_id, "not_applied")
     assert _produces(_chain(client, dep))["verdict"] == "broken"
-    EffectReconciliationReceipt.objects.filter(pk=row.pk).update(answer="applied", conclusion="committed")
+    _receipts().filter(pk=row.pk).update(answer="applied", conclusion="committed")
     chain = _chain(client, dep)
     assert _codes(_produces(chain)) == ["effect_not_observed"]
     assert chain["reconciliations"][0]["verified"] is False
@@ -656,9 +671,9 @@ def test_a_receipt_is_append_only():
 
     dep, client, permit, _ = world()
     row = signed_chains.record_reconciliation(dep, WF, permit.outcome_id, "applied")
-    with pytest.raises(EffectReconciliationRewriteRefused):
+    with pytest.raises(_rewrite_refused()):
         row.save()
-    with pytest.raises(EffectReconciliationRewriteRefused):
+    with pytest.raises(_rewrite_refused()):
         row.delete()
 
 
@@ -692,20 +707,20 @@ def test_a_receipt_is_its_own_evidence_kind_and_the_effect_key_proves_nothing_ne
     assert kind not in comp.EVIDENCE_KINDS and kind not in comp.IDENTITY_EVIDENCE_KINDS
     assert kind not in set(comp.SIGNER_EVIDENCE.values())
     assert comp.SIGNER_EVIDENCE["achilles-effect"] == comp.EVIDENCE_OBSERVED_EFFECT
-    assert er.EVIDENCE_KIND == kind and er.SIGNER == "achilles-effect"
-    assert er.PAYLOAD_TYPE != oc.OUTCOME_PAYLOAD_TYPE
-    assert observed_outcomes.RECONCILIATION_PAYLOAD_TYPE == er.PAYLOAD_TYPE
+    assert _er().EVIDENCE_KIND == kind and _er().SIGNER == "achilles-effect"
+    assert _er().PAYLOAD_TYPE != oc.OUTCOME_PAYLOAD_TYPE
+    assert observed_outcomes.RECONCILIATION_PAYLOAD_TYPE == _er().PAYLOAD_TYPE
 
 
 def test_the_words_are_the_one_status_vocabulary_and_the_tool_kinds_the_grammar():
-    assert dict(er.CONCLUSIONS) == {
+    assert dict(_er().CONCLUSIONS) == {
         "applied": vocabulary.COMMITTED,
         "not_applied": vocabulary.FAILED,
         "cannot_say": vocabulary.UNKNOWN,
     }
-    assert er.BASIS_OBSERVED == vocabulary.OBSERVED
+    assert _er().BASIS_OBSERVED == vocabulary.OBSERVED
     assert rule.RECONCILED_CONCLUSIONS == {vocabulary.COMMITTED, vocabulary.FAILED, vocabulary.UNKNOWN}
-    assert er.TOOL_KINDS == rule.TOOL_NODE_KINDS
+    assert _er().TOOL_KINDS == rule.TOOL_NODE_KINDS
 
 
 # ------------------------------------------------------------- the shared vector
@@ -724,17 +739,17 @@ def test_this_backend_verifies_every_valid_receipt_achilles_signed_in_the_vector
     v = json.loads(VECTOR.read_text(encoding="utf-8"))
     key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(v["effect_key_phrase"].encode()).digest())
     assert oc.raw_public_key(key).hex() == v["effect_public_key_hex"]
-    assert (v["schema"], v["payload_type"], v["effect_engine"]) == (er.SCHEMA, er.PAYLOAD_TYPE, er.SIGNER)
-    assert v["readback_conclusions"] == dict(er.CONCLUSIONS)
+    assert (v["schema"], v["payload_type"], v["effect_engine"]) == (_er().SCHEMA, _er().PAYLOAD_TYPE, _er().SIGNER)
+    assert v["readback_conclusions"] == dict(_er().CONCLUSIONS)
     keyring = _vector_keyring(v)
     answers = set()
     for case in v["valid"]:
-        document, key_id, why = er.verify_envelope(case["envelope"], keyring)
+        document, key_id, why = _er().verify_envelope(case["envelope"], keyring)
         assert why == "" and document == case["document"], case["name"]
         assert key_id == oc.key_id_for(oc.raw_public_key(key))
         assert oc.canonical_bytes(document) == base64.b64decode(case["envelope"]["payload"])
         answers.add(document["readback"]["answer"])
-    assert answers == set(er.ANSWERS)
+    assert answers == set(_er().ANSWERS)
     assert any(case["document"]["attempt"] > 1 for case in v["valid"])
 
 
@@ -742,9 +757,9 @@ def test_every_invalid_receipt_and_envelope_in_the_vector_is_refused():
     v = json.loads(VECTOR.read_text(encoding="utf-8"))
     assert len(v["invalid_documents"]) >= 40 and len(v["invalid_envelopes"]) >= 14
     for case in v["invalid_documents"]:
-        with pytest.raises(er.ReceiptRefused):
-            er.validate_receipt(case["document"])
+        with pytest.raises(_er().ReceiptRefused):
+            _er().validate_receipt(case["document"])
     keyring = _vector_keyring(v)
     for case in v["invalid_envelopes"]:
-        document, _, why = er.verify_envelope(case["envelope"], keyring)
+        document, _, why = _er().verify_envelope(case["envelope"], keyring)
         assert document is None and why, case["why"]
