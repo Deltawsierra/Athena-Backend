@@ -59,8 +59,12 @@ def write_keyring(path, keys=None) -> None:
     )
 
 
-def record_signed(deployment, workflow, status, observed_at, *, engine="achilles", source="") -> WorkflowChainOutcome:
-    """Record ``status`` for ``workflow`` as a run by ``engine`` reported it, signed."""
+def record_signed(
+    deployment, workflow, status, observed_at, *, engine="achilles", source="", outcome_id=None
+) -> WorkflowChainOutcome:
+    """Record ``status`` for ``workflow`` as a run by ``engine`` reported it, signed.
+    ``outcome_id``: the outcome's id, when a test names it beforehand (a receipt that
+    names a gate decision before the gate decision is on record)."""
     key = ENGINE_KEYS[engine]
     outcome = oc.build_outcome(
         deployment=str(deployment.uuid),
@@ -72,6 +76,7 @@ def record_signed(deployment, workflow, status, observed_at, *, engine="achilles
         evidence_digest="sha256:" + "cd" * 32,
         observed_at=observed_at,
         reason="" if status == oc.HELD else "the run did not establish the chain",
+        outcome_id=outcome_id,
     )
     envelope = oc.sign_outcome(outcome, key)
     return WorkflowChainOutcome.objects.create(
@@ -348,3 +353,88 @@ def record_identity(deployment, kind, envelope, evidence):
     row, refusal = identity_evidence.ingest(deployment, kind, envelope, evidence)
     assert refusal is None, refusal
     return row
+
+
+#: The readback's answers and the conclusion each gives (Achilles' READBACK_CONCLUSIONS).
+RECONCILED = {"applied": "committed", "not_applied": "failed", "cannot_say": "unknown"}
+
+
+def reconciliation(
+    deployment,
+    workflow,
+    gate_outcome_id,
+    answer,
+    *,
+    attempt=1,
+    dispatch_id=None,
+    receipt_id=None,
+    tool=("mcp_server", "crm-mcp"),
+    action="customer:update",
+    action_digest="ab" * 32,
+    permit_digest="sha256:" + "ef" * 32,
+    dispatched_at=None,
+    read_at=None,
+    status_code=None,
+    key=None,
+    payload_type=None,
+    deployment_uuid=None,
+) -> tuple[dict, dict]:
+    """``(envelope, document)``: what Achilles' observed-effect key signs for one readback
+    answer about one attempt of one dispatch -- the ``mythos.effect-reconciliation/v1``
+    receipt (``achilles/observed_effect.py``, ``reconciliation_document`` and
+    ``sign_reconciliation``), in the shape the conformance vector pins. The defaults name
+    the tool, action, action digest and permit :func:`observed_effect` does, so a receipt
+    and an observed effect of one dispatch agree unless a test says otherwise."""
+    from assurance import effect_reconciliation as er
+
+    now = datetime.now(dt_timezone.utc)
+    read = read_at if read_at is not None else now - timedelta(seconds=30)
+    left = dispatched_at if dispatched_at is not None else read - timedelta(minutes=5)
+    document = {
+        "schema": er.SCHEMA,
+        "receipt_id": receipt_id or uuid.uuid4().hex,
+        "deployment": deployment_uuid or str(deployment.uuid),
+        "workflow": workflow,
+        "tool": {"kind": tool[0], "identifier": tool[1]},
+        "action": action,
+        "action_digest": action_digest,
+        "dispatch_id": dispatch_id or uuid.uuid4().hex,
+        "attempt": attempt,
+        "permit_digest": permit_digest,
+        "gate_outcome_id": gate_outcome_id,
+        "dispatched_at": _stamp(left),
+        "readback": {
+            "provider": "crm-provider",
+            "answer": answer,
+            "status_code": status_code if status_code is not None else 200,
+            "response_digest": "sha256:" + "34" * 32,
+            "read_at": _stamp(read),
+        },
+        "conclusion": {"state": RECONCILED[answer], "basis": "observed"},
+        "observer": {"engine": "achilles-effect", "version": "0.1.0"},
+    }
+    signer = key or ENGINE_KEYS["achilles-effect"]
+    payload = oc.canonical_bytes(document)
+    signed_type = payload_type or er.PAYLOAD_TYPE
+    envelope = {
+        "payloadType": signed_type,
+        "payload": base64.b64encode(payload).decode(),
+        "signatures": [
+            {
+                "keyid": oc.key_id_for(oc.raw_public_key(signer)),
+                "sig": base64.b64encode(signer.sign(oc.pae(signed_type, payload))).decode(),
+            }
+        ],
+    }
+    return envelope, document
+
+
+def record_reconciliation(deployment, workflow, gate_outcome_id, answer, **kw):
+    """A reconciliation receipt, recorded the one way one is: verified and taken in
+    (:func:`assurance.effect_reconciliation.ingest`). Returns the row."""
+    from assurance import effect_reconciliation
+
+    envelope, _ = reconciliation(deployment, workflow, gate_outcome_id, answer, **kw)
+    result = effect_reconciliation.ingest(deployment, envelope)
+    assert isinstance(result, tuple) and result[1], result
+    return result[0]

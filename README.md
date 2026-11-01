@@ -317,6 +317,20 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   chain's `produces` hop when the document names that chain's tool and gate decision.
   A v3 document also carries the workflow approval the gate read in force itself,
   which `under_policy` reads as gate-attested.
+- `effect_reconciliation` (F1): a dispatch whose provider answer was lost has no
+  observed effect; Achilles asks the provider's readback what became of it and signs
+  each answer with the same observed-effect key as a `mythos.effect-reconciliation/v1`
+  receipt, under a payload type of its own, so a receipt is never an outcome and no
+  outcome is a receipt. Posted as `{"envelope": ...}` to
+  `POST /api/assurance/deployments/<uuid>/effect-reconciliations/` with the
+  observed-effect service's credential (`assurance/effect_reconciliation.py`); stored
+  once per receipt id (the same envelope again is `200`, other bytes under the id
+  `409`), and kept even before its gate decision is on record. Read back into the
+  `produces` hop of the chain that cites its gate decision: `committed` proves it
+  (`readback`), `failed` breaks it (`effect_not_produced`), `unknown` leaves it
+  unproven, and conflicting or mismatched evidence proves nothing. The authority-chains
+  read serves each chain's receipts (`reconciliations`). No keyring, or none with the
+  `achilles-effect` key, answers `503` and takes nothing in.
 - `unclassified`: signed by a trusted key for an engine not listed above.
 - `attested`: typed in by an operator, or signed by a key the keyring no longer
   trusts.

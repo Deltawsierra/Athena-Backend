@@ -420,6 +420,9 @@ DECISION_INPUTS = {
     # A signed sign-in or delegation record proves a chain's authenticated_as or
     # delegates_to hop (assurance.identity_evidence); a revocation unproves one.
     "assurance.IdentityEvidence": ("deployment",),
+    # A signed reconciliation receipt proves, breaks or unproves a chain's produces hop
+    # (assurance.effect_reconciliation, read by assurance.authority_chain.readback).
+    "assurance.EffectReconciliationReceipt": ("deployment",),
     # The approval in force at a dispatch instant: a chain's under_policy and invokes
     # hops are read against it, as of dispatch (assurance.approval_history). Appended
     # beside the approval write that moves it, which refreshes anyway; watched because

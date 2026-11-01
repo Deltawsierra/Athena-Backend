@@ -75,7 +75,9 @@ in the :data:`HEADER` header, authenticating as the one account
 (:mod:`assurance.closure_evidence`). Read from the environment, as the outcome
 keyring is. With either unset, the token too short, or the account missing, the
 route answers 401; an operator's session, an admin's included, is answered 403. The
-credential is accepted on this route only. Nothing here reads or writes a stop.
+credential is accepted on this route and on the reconciliation-receipt route only (the same
+service posts the readback answers its key signs, :mod:`assurance.effect_reconciliation`).
+Nothing here reads or writes a stop.
 """
 
 from __future__ import annotations
@@ -449,10 +451,10 @@ class ObservedEffectServiceCredential:
 
 
 class ObservedEffectServiceAuthentication(BaseAuthentication):
-    """DRF authentication by the observed-effect credential, on that route only (it
-    is in no other view's authentication classes). Returns None -- the next class
-    decides -- when the credential is absent, does not match, or names no active
-    account."""
+    """DRF authentication by the observed-effect credential, on that route and the
+    effect-reconciliations route only (it is in no other view's authentication
+    classes). Returns None -- the next class decides -- when the credential is absent,
+    does not match, or names no active account."""
 
     def authenticate(self, request):
         django_request = getattr(request, "_request", request)

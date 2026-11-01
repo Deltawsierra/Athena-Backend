@@ -226,6 +226,18 @@ EVIDENCE_DELEGATION = "delegation"
 #: The identity evidence kinds. Disjoint from :data:`EVIDENCE_KINDS`, asserted by test.
 IDENTITY_EVIDENCE_KINDS: frozenset[str] = frozenset({EVIDENCE_AUTHENTICATION, EVIDENCE_DELEGATION})
 
+#: A RECONCILIATION RECEIPT (:mod:`assurance.effect_reconciliation`): the signed answer
+#: one provider readback gave about a dispatch whose effect was unknown
+#: (``mythos.effect-reconciliation/v1``). Signed by the observed-effect key -- the
+#: ``achilles-effect`` signer -- but under a DSSE payload type of its own, which the
+#: pre-authentication encoding binds into the signed bytes: its kind follows from that
+#: type, not from :data:`SIGNER_EVIDENCE`, which maps a signer's OUTCOMES and maps
+#: ``achilles-effect`` to ``observed_effect`` and nothing else. A receipt is neither a
+#: chain outcome nor an observed effect: it is recorded on its own route, read only by
+#: the ``produces`` hop (:func:`assurance.authority_chain.readback`), and is in neither
+#: :data:`EVIDENCE_KINDS` nor :data:`IDENTITY_EVIDENCE_KINDS` -- asserted by test.
+EVIDENCE_EFFECT_RECONCILIATION = "effect_reconciliation"
+
 #: Which signer's outcomes are which kind of evidence, by the engine name a
 #: verified signature binds. Exact names: a signer not listed here is
 #: `unclassified`, never whichever entry it happens to resemble. The keyring binds

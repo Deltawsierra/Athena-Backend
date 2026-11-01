@@ -112,6 +112,26 @@ What each check reads, per hop:
   force cites: ``held`` proves it, ``violated`` breaks it. An observation of another
   tool, another action or another dispatch, or claimed by two chains, is unproven:
   it does not contradict the hop, and it does not support it.
+* ``produces``, READ BACK (F1): a dispatch whose effect was unknown has no observed
+  effect; Achilles asks the provider's readback what became of it and signs each
+  answer as a ``mythos.effect-reconciliation/v1`` receipt
+  (:mod:`assurance.effect_reconciliation`). A receipt naming the gate decision the chain
+  cites (:func:`readback`) is read beside any observed effect: ``committed`` proves the
+  hop (``readback``: proven after the fact, by reading the provider back), ``failed``
+  BREAKS it (``effect_not_produced``: the record says the action did not produce the
+  effect, so the chain is never counted as having produced one), ``unknown`` leaves it
+  unproven (``effect_unknown``). A receipt proves only while it binds: its deployment,
+  workflow, tool and action are the chain's, its gate decision is on record as a permit
+  for that workflow, and it agrees with every other record of its dispatch -- the
+  observed effect and the other receipts -- on the tool, the action and its digest, and,
+  for its attempt, on the permit, the attempt and the instant it left
+  (``reconciliation_mismatch``; one whose gate decision is not on record yet is stored
+  and ``reconciliation_unbound``). Conflicting evidence for one dispatch proves nothing
+  (``effect_evidence_conflicts``): one attempt read both applied and not applied, two
+  attempts read applied, or an attempt read not applied after an earlier one read
+  applied. A retry is the same dispatch id under a later attempt, re-gated: the
+  ``not_applied`` of an earlier attempt is the answer that allowed it, never a conflict
+  with what the retry produced.
 * ``authenticated_as`` (person -> user): a signed ``authentication`` record names
   this person and this principal, and its instant falls inside the chain's window --
   at most :data:`AUTHENTICATION_WINDOW_SECONDS` before the effect's instant (the
@@ -356,6 +376,11 @@ REASONS: Mapping[str, str] = {
         "the dispatch that carried the action out saw the provider complete it, and signed that with "
         "a key mapped to observed effects and nothing else"
     ),
+    "readback": (
+        "the provider's readback answered applied for the dispatch the chain's gate decision let through, in a "
+        "reconciliation receipt the observed-effect key signed: the effect was produced, proven after the fact by "
+        "reading the provider back"
+    ),
     "authentication": (
         "a signed authentication record says this person signed in as this principal inside the chain's "
         "window, in a session still open at the effect"
@@ -435,6 +460,24 @@ REASONS: Mapping[str, str] = {
         "the effect was observed on the dispatch of another gate decision than the one the chain cites"
     ),
     "effect_outcome_cited_twice": "another chain in force cites the same observed effect: one observation proves one chain",
+    "effect_unknown": (
+        "the provider's readback could not say whether the dispatch the chain's gate decision let through was "
+        "applied (a signed reconciliation receipt answering cannot_say): the effect is unknown"
+    ),
+    "effect_evidence_conflicts": (
+        "the evidence for the chain's dispatch conflicts -- one attempt read both applied and not applied, two "
+        "attempts read applied, or an attempt read not applied after an earlier one read applied -- and "
+        "conflicting evidence proves nothing"
+    ),
+    "reconciliation_mismatch": (
+        "a reconciliation receipt about the chain's dispatch names another deployment, workflow, tool, action, "
+        "action digest, permit digest, attempt, gate decision or dispatch than the record holds for it, so it "
+        "proves nothing"
+    ),
+    "reconciliation_unbound": (
+        "a reconciliation receipt names the chain's gate decision, which is not on record here as a permit: it "
+        "is stored, and proves nothing until it binds"
+    ),
     "effect_instant_unknown": (
         "the chain cites no observed effect whose signed document says when the effect happened, so no "
         "sign-in or delegation can be placed against it"
@@ -501,6 +544,10 @@ REASONS: Mapping[str, str] = {
     ),
     "gate_refused": "the Action Gate refused this workflow's action",
     "effect_violated": "the observed-effect outcome cited says the effect was produced outside its authority",
+    "effect_not_produced": (
+        "the provider's readback answered not_applied for the dispatch the chain's gate decision let through, in "
+        "a reconciliation receipt the observed-effect key signed: the action did not produce the effect"
+    ),
 }
 
 
@@ -924,6 +971,49 @@ class ObservedEffect:
     #: the one sign-in and delegation are placed against.
     observed_at: datetime | None = None
     dispatch: DispatchState | None = None
+    #: The digest the permit covers of the canonical action: what a reconciliation
+    #: receipt of the same dispatch must name too.
+    action_digest: str = ""
+
+
+#: A reconciliation receipt's conclusion: the one status vocabulary's words
+#: (``mythos_core.status``), exactly as Achilles signs them -- ``applied`` concludes
+#: ``committed``, ``not_applied`` ``failed``, ``cannot_say`` ``unknown``.
+RECONCILED_COMMITTED = "committed"
+RECONCILED_FAILED = "failed"
+RECONCILED_UNKNOWN = "unknown"
+RECONCILED_CONCLUSIONS: frozenset[str] = frozenset({RECONCILED_COMMITTED, RECONCILED_FAILED, RECONCILED_UNKNOWN})
+
+
+@dataclass(frozen=True)
+class Reconciliation:
+    """A ``mythos.effect-reconciliation/v1`` receipt IN FORCE -- its envelope verifies
+    now under the key the keyring files under ``achilles-effect``, and the row's columns
+    are what it signs (:func:`assurance.effect_reconciliation.in_force`) -- as the rule
+    reads it: one provider readback's answer about one attempt of one dispatch.
+
+    ``dispatch_id`` is the dispatch's idempotency key, the same for every attempt;
+    ``attempt`` is 1 for the dispatch itself and higher for a retry under the same key,
+    each re-gated: ``gate_outcome_id``, ``permit_digest`` and ``dispatched_at`` are that
+    attempt's. ``conclusion`` is :data:`RECONCILED_COMMITTED`, :data:`RECONCILED_FAILED`
+    or :data:`RECONCILED_UNKNOWN`; ``answer`` the readback's own word."""
+
+    receipt_id: str
+    deployment: str
+    workflow: str
+    tool_kind: str
+    tool_identifier: str
+    action: str
+    action_digest: str
+    dispatch_id: str
+    attempt: int
+    permit_digest: str
+    gate_outcome_id: str
+    dispatched_at: datetime
+    answer: str
+    conclusion: str
+    provider: str
+    read_at: datetime
 
 
 @dataclass(frozen=True)
@@ -1009,6 +1099,13 @@ class Inputs:
     #: read against, as of each chain's dispatch instant.
     edge_history: Mapping[tuple[str, str, str], tuple[EdgeVersion, ...]] = field(default_factory=dict)
     edges_noted_from: datetime | None = None
+    #: The reconciliation receipts in force that name a gate decision the chains cite,
+    #: or a dispatch of one -- every attempt of it (:func:`readback`). ``outcomes``
+    #: then also holds the gate decision each names and any observed effect of each
+    #: dispatch, cited by a chain or not: what a receipt is bound against.
+    reconciliations: tuple[Reconciliation, ...] = ()
+    #: The deployment the chains are read on (its uuid): the one a receipt must name.
+    deployment: str = ""
 
 
 # ------------------------------------------------------------------ the verdict
@@ -1034,10 +1131,35 @@ class HopVerdict:
 
 
 @dataclass(frozen=True)
+class ReceiptBinding:
+    """One reconciliation receipt about a chain's dispatch, and whether it BINDS -- can
+    prove or break the chain's ``produces`` hop: ``why`` names what does not match, or
+    that its gate decision is not on record yet; ``""`` when it binds."""
+
+    receipt: Reconciliation
+    binds: bool
+    why: str = ""
+
+
+@dataclass(frozen=True)
+class Readback:
+    """What the reconciliation receipts say about the dispatch a chain's gate decision
+    let through (:func:`readback`): which dispatch, every receipt about any attempt of
+    it with whether each binds, and the readings they add to the ``produces`` hop."""
+
+    dispatch_id: str
+    bindings: tuple[ReceiptBinding, ...] = ()
+    readings: tuple[Reading, ...] = ()
+
+
+@dataclass(frozen=True)
 class ChainVerdict:
     chain: Chain
     verdict: str
     hops: tuple[HopVerdict, ...]
+    #: The reconciliation receipts about the chain's dispatch (:func:`readback`), or
+    #: None when none is on record: what the chain read serves beside ``produces``.
+    readback: Readback | None = None
 
     @property
     def unproven(self) -> tuple[HopVerdict, ...]:
@@ -2052,6 +2174,22 @@ def _same_tool(index: _Index, node: Node, effect: ObservedEffect) -> bool:
 
 
 def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
+    """The observed effect the chain cites (:func:`_observed`), read beside what any
+    reconciliation receipt says of the same dispatch (:func:`readback`). With no receipt
+    on record, exactly the observed effect's readings. A chain that cites no observed
+    effect is read by its receipts alone; one that cites one is read by both, so a
+    receipt can unprove or break what the observation proved, and never lifts an
+    observation that does not bind."""
+    observed = _observed(chain, i, inputs, index)
+    found = readback(chain, inputs, index, i)
+    if found is None or not found.readings:
+        return observed
+    if not chain.effect_outcome_id:
+        return list(found.readings)
+    return [*observed, *found.readings]
+
+
+def _observed(chain, i, inputs, index) -> list[Reading]:
     cited = chain.effect_outcome_id
     if not cited:
         return [
@@ -2184,6 +2322,338 @@ def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
             )
         ]
     return [Reading(UNPROVEN, "effect_not_established", f"the observed-effect outcome {cited} is {outcome.status}")]
+
+
+# ------------------------------------------------- produces, read back (F1)
+
+#: What each conclusion says of an attempt: its effect applied, not applied, or no answer.
+_APPLIED, _NOT_APPLIED, _NO_ANSWER = "applied", "not_applied", "no_answer"
+_BUCKET: Mapping[str, str] = {
+    RECONCILED_COMMITTED: _APPLIED,
+    RECONCILED_FAILED: _NOT_APPLIED,
+    RECONCILED_UNKNOWN: _NO_ANSWER,
+}
+
+
+def _cited_effect(chain: Chain, inputs: Inputs) -> ObservedEffect | None:
+    """The observed effect the chain cites, if it is one in force for the chain's
+    workflow with a document matching its signed digest; else None."""
+    cited = chain.effect_outcome_id
+    outcome = inputs.outcomes.get(cited) if cited else None
+    if (
+        outcome is None
+        or outcome.workflow != chain.workflow
+        or outcome.evidence != _composition.EVIDENCE_OBSERVED_EFFECT
+        or outcome.effect is None
+    ):
+        return None
+    return outcome.effect
+
+
+def _dispatch_fields(r: Reconciliation) -> dict:
+    """What every record of one dispatch names alike, whichever attempt it is of."""
+    return {
+        "deployment": r.deployment,
+        "workflow": r.workflow,
+        "tool": f"{r.tool_kind} {r.tool_identifier!r}",
+        "action": r.action,
+        "action_digest": r.action_digest,
+    }
+
+
+def _attempt_fields(r: Reconciliation) -> dict:
+    """What every record of one attempt names alike: the attempt, its permit, when it left."""
+    return {"attempt": r.attempt, "permit_digest": r.permit_digest, "dispatched_at": _when(r.dispatched_at)}
+
+
+def _receipt_problems(r: Reconciliation, chain: Chain, i: int, inputs: Inputs, index: _Index, about, effects) -> list[str]:
+    """Every way receipt ``r`` does not match what the record holds for its dispatch:
+    the chain it would prove (deployment, workflow, tool, action), its gate decision on
+    record, the observed effect of the same dispatch, and the other receipts of it."""
+    problems: list[str] = []
+    if r.deployment != inputs.deployment:
+        problems.append(f"deployment {r.deployment!r}, not this one ({inputs.deployment or 'unnamed'})")
+    if r.workflow != chain.workflow:
+        problems.append(f"workflow {r.workflow!r}; the chain serves {chain.workflow!r}")
+    tool = f"{r.tool_kind} {r.tool_identifier!r}"
+    invokes = _last_hop_before(chain, i, INVOKES)
+    if invokes is None:
+        problems.append(f"tool {tool}; the chain names no tool in an invokes hop")
+    elif not _same_tool(index, invokes.target, ObservedEffect(r.tool_kind, r.tool_identifier, r.gate_outcome_id)):
+        problems.append(f"tool {tool}; the chain's invokes hop names {invokes.target.kind} {invokes.target.ref!r}")
+    performs = _last_hop_before(chain, i, PERFORMS)
+    if performs is None:
+        problems.append(f"action {r.action!r}; the chain names no action in a performs hop")
+    elif performs.target.ref != r.action:
+        problems.append(f"action {r.action!r}; the chain's performs hop names {performs.target.ref!r}")
+    gate = inputs.outcomes.get(r.gate_outcome_id)
+    if gate is not None:
+        if gate.workflow != r.workflow:
+            problems.append(f"gate_outcome_id {r.gate_outcome_id}: that gate decision is for {gate.workflow!r}")
+        if gate.evidence != _composition.EVIDENCE_AUTHORIZATION_CHECK:
+            problems.append(
+                f"gate_outcome_id {r.gate_outcome_id}: that outcome is {gate.evidence} evidence, not a signed Action "
+                "Gate decision that verifies now"
+            )
+        elif gate.status != _composition.HELD:
+            problems.append(f"gate_outcome_id {r.gate_outcome_id}: that gate decision did not permit it ({gate.status})")
+    mine = _dispatch_fields(r)
+    for outcome, effect in effects:
+        where = f"observed effect {outcome.outcome_id} of the same dispatch"
+        theirs = {
+            "workflow": outcome.workflow,
+            "tool": f"{effect.tool_kind} {effect.tool_identifier!r}",
+            "action": effect.action,
+            "action_digest": effect.action_digest,
+        }
+        problems.extend(f"{name} {mine[name]!r}; {where} names {value!r}" for name, value in theirs.items() if mine[name] != value)
+        if effect.gate_outcome_id == r.gate_outcome_id and effect.permit_digest != r.permit_digest:
+            problems.append(f"permit_digest {r.permit_digest}; {where}, of the same attempt, names {effect.permit_digest}")
+    for other in about:
+        if other.receipt_id == r.receipt_id:
+            continue
+        where = f"receipt {other.receipt_id} of the same dispatch"
+        theirs = _dispatch_fields(other)
+        problems.extend(f"{name} {mine[name]!r}; {where} names {theirs[name]!r}" for name in mine if mine[name] != theirs[name])
+        if other.gate_outcome_id == r.gate_outcome_id:
+            own, same = _attempt_fields(r), _attempt_fields(other)
+            problems.extend(
+                f"{name} {own[name]!r}; {where}, of the same gate decision, names {same[name]!r}"
+                for name in own
+                if own[name] != same[name]
+            )
+        elif other.attempt == r.attempt:
+            problems.append(f"attempt {r.attempt}; {where} names the same attempt under gate decision {other.gate_outcome_id}")
+    return problems
+
+
+def _listed(names: list[str]) -> str:
+    return ", ".join(names)
+
+
+def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int | None = None) -> Readback | None:
+    """What the reconciliation receipts on record say about the dispatch the chain's gate
+    decision let through, as the ``produces`` hop reads it; None when no receipt is
+    about it.
+
+    THE DISPATCH: the one the receipts naming the chain's gate decision name, and the one
+    the cited observed effect names when it was observed on that gate decision. Every
+    receipt of that dispatch is read, whatever attempt it is of: a retry keeps the
+    dispatch id (it is the idempotency key the provider was given) under a later attempt
+    with a gate decision and a permit of its own.
+
+    BINDING (:class:`ReceiptBinding`): a receipt proves only when it names this
+    deployment, the chain's workflow, the tool its invokes hop names and the action its
+    performs hop names; its gate decision is on record as a signed permit for that
+    workflow; and it agrees with every other record of its dispatch -- the observed
+    effect and the other receipts -- on the tool, the action and the action digest, and,
+    for the same attempt, on the permit digest, the attempt and the instant it left. Any
+    mismatch reads ``reconciliation_mismatch`` and nothing about the dispatch proves. A
+    receipt whose gate decision is not on record yet is kept, and binds once it is.
+
+    CONFLICT (``effect_evidence_conflicts``): one attempt read both applied (an observed
+    effect, or a ``committed`` receipt) and not applied (a ``failed`` one); two attempts
+    read applied; or an attempt read not applied after an earlier attempt read applied.
+    Conflicting evidence proves nothing. The ``not_applied`` of an EARLIER attempt is no
+    conflict: it is the answer that allowed the retry (Achilles carries out a retry only
+    after a readback answers not_applied). An observed attempt no receipt numbers is the
+    dispatch's last: Achilles never retries an observed one.
+
+    THE CHAIN'S OWN ATTEMPT (the gate decision it cites): a bound ``committed`` receipt
+    proves the hop (``readback``); a bound ``failed`` one breaks it
+    (``effect_not_produced``) -- the action did not produce the effect, whatever a later
+    attempt did; ``cannot_say`` alone leaves it unproven (``effect_unknown``)."""
+    gate = chain.gate_outcome_id
+    effect = _cited_effect(chain, inputs)
+    own = sorted(
+        (r for r in inputs.reconciliations if gate and r.gate_outcome_id == gate),
+        key=lambda r: (r.attempt, r.read_at, r.receipt_id),
+    )
+    dispatches = {r.dispatch_id for r in own}
+    if effect is not None and gate and effect.gate_outcome_id == gate:
+        dispatches.add(effect.dispatch_id)
+    if not dispatches:
+        return None
+    index = index if index is not None else _Index(inputs.graph, inputs.edge_history)
+    if i is None:
+        i = max((k for k, h in enumerate(chain.hops) if h.relation == PRODUCES), default=len(chain.hops) - 1)
+    if len(dispatches) > 1:
+        why = f"dispatch_id: the evidence of gate decision {gate} names more than one dispatch ({_listed(sorted(dispatches))})"
+        return Readback(
+            dispatch_id="",
+            bindings=tuple(ReceiptBinding(r, False, why) for r in own),
+            readings=(
+                Reading(
+                    UNPROVEN,
+                    "reconciliation_mismatch",
+                    f"{why}: one gate decision lets one dispatch through, and a receipt that does not match the record "
+                    "proves nothing",
+                ),
+            ),
+        )
+    (dispatch,) = dispatches
+    about = sorted(
+        (r for r in inputs.reconciliations if r.dispatch_id == dispatch),
+        key=lambda r: (r.attempt, r.read_at, r.receipt_id),
+    )
+    if not about:
+        return None
+    effects = sorted(
+        (
+            (o, o.effect)
+            for o in inputs.outcomes.values()
+            if o.evidence == _composition.EVIDENCE_OBSERVED_EFFECT and o.effect is not None and o.effect.dispatch_id == dispatch
+        ),
+        key=lambda pair: pair[0].outcome_id,
+    )
+
+    bindings: list[ReceiptBinding] = []
+    mismatched: list[ReceiptBinding] = []
+    for r in about:
+        problems = _receipt_problems(r, chain, i, inputs, index, about, effects)
+        if problems:
+            binding = ReceiptBinding(r, False, "; ".join(problems))
+            mismatched.append(binding)
+        elif r.gate_outcome_id not in inputs.outcomes:
+            binding = ReceiptBinding(
+                r,
+                False,
+                f"its gate decision {r.gate_outcome_id} is not on record here: stored, it proves nothing until it binds",
+            )
+        else:
+            binding = ReceiptBinding(r, True)
+        bindings.append(binding)
+    kept = tuple(bindings)
+    if mismatched:
+        named = " | ".join(f"receipt {b.receipt.receipt_id}: {b.why}" for b in mismatched)
+        return Readback(
+            dispatch,
+            kept,
+            (
+                Reading(
+                    UNPROVEN,
+                    "reconciliation_mismatch",
+                    f"{named}. A receipt that does not match the record proves nothing about dispatch {dispatch}",
+                ),
+            ),
+        )
+
+    # What each attempt of the dispatch reads, by its gate decision.
+    attempts: dict[str, dict] = {}
+    for r in about:
+        entry = attempts.setdefault(r.gate_outcome_id, {"number": r.attempt, _APPLIED: [], _NOT_APPLIED: [], _NO_ANSWER: []})
+        entry[_BUCKET.get(r.conclusion, _NO_ANSWER)].append(f"receipt {r.receipt_id}")
+    for outcome, observed in effects:
+        entry = attempts.setdefault(observed.gate_outcome_id, {"number": None, _APPLIED: [], _NOT_APPLIED: [], _NO_ANSWER: []})
+        entry[_APPLIED].append(f"observed effect {outcome.outcome_id}")
+
+    def label(g: str) -> str:
+        number = attempts[g]["number"]
+        return f"attempt {number} (gate decision {g})" if number is not None else f"the observed attempt (gate decision {g})"
+
+    applied = sorted(g for g, a in attempts.items() if a[_APPLIED])
+    conflicts: list[str] = []
+    if len(applied) > 1:
+        each = "; ".join(f"{label(g)}: {_listed(attempts[g][_APPLIED])}" for g in applied)
+        conflicts.append(f"{len(applied)} attempts of dispatch {dispatch} read applied ({each}), and one dispatch produces its effect once")
+    for g in applied:
+        if attempts[g][_NOT_APPLIED]:
+            conflicts.append(
+                f"{label(g)} read both applied ({_listed(attempts[g][_APPLIED])}) and not_applied "
+                f"({_listed(attempts[g][_NOT_APPLIED])})"
+            )
+    if len(applied) == 1 and attempts[applied[0]]["number"] is not None:
+        first = attempts[applied[0]]["number"]
+        for g in sorted(attempts):
+            later = attempts[g]
+            if g != applied[0] and later[_NOT_APPLIED] and later["number"] is not None and later["number"] > first:
+                conflicts.append(
+                    f"{label(g)} read not_applied ({_listed(later[_NOT_APPLIED])}) after {label(applied[0])} read applied "
+                    f"({_listed(attempts[applied[0]][_APPLIED])})"
+                )
+    if conflicts:
+        return Readback(
+            dispatch,
+            kept,
+            (
+                Reading(
+                    UNPROVEN,
+                    "effect_evidence_conflicts",
+                    f"{'; '.join(conflicts)}: conflicting evidence for one dispatch proves nothing",
+                ),
+            ),
+        )
+
+    mine = attempts.get(gate)
+    if mine is None:
+        return Readback(dispatch, kept, ())
+    bound = {b.receipt.receipt_id for b in bindings if b.binds}
+
+    def of(conclusion: str) -> list[Reconciliation]:
+        return [r for r in own if r.conclusion == conclusion]
+
+    def unbound(receipts: list[Reconciliation]) -> Reading:
+        return Reading(
+            UNPROVEN,
+            "reconciliation_unbound",
+            f"{_listed([f'receipt {r.receipt_id}' for r in receipts])} of dispatch {dispatch} name gate decision {gate}, "
+            "which is not on record here: stored, they prove nothing until it is",
+        )
+
+    if mine[_APPLIED]:
+        committed = of(RECONCILED_COMMITTED)
+        proving = [r for r in committed if r.receipt_id in bound]
+        if proving:
+            r = proving[0]
+            return Readback(
+                dispatch,
+                kept,
+                (
+                    Reading(
+                        PROVEN,
+                        "readback",
+                        f"the provider's readback answered {r.answer} for dispatch {dispatch}, attempt {r.attempt} "
+                        f"(receipt {r.receipt_id}, read from {r.provider} at {_when(r.read_at)}): the action produced the "
+                        "effect, proven after the fact by reading the provider back",
+                    ),
+                ),
+            )
+        # Applied by the observed effect alone (which proves it), or by receipts that do not bind yet.
+        return Readback(dispatch, kept, (unbound(committed),) if committed else ())
+    if mine[_NOT_APPLIED]:
+        failed = of(RECONCILED_FAILED)
+        breaking = [r for r in failed if r.receipt_id in bound]
+        if not breaking:
+            return Readback(dispatch, kept, (unbound(failed),))
+        r = breaking[0]
+        later = f"; {label(applied[0])} of the same dispatch produced it" if applied else ""
+        return Readback(
+            dispatch,
+            kept,
+            (
+                Reading(
+                    BROKEN,
+                    "effect_not_produced",
+                    f"the provider's readback answered {r.answer} for dispatch {dispatch}, attempt {r.attempt} (receipt "
+                    f"{r.receipt_id}, read from {r.provider} at {_when(r.read_at)}): the dispatch this chain's gate "
+                    f"decision let through did not produce the effect{later}",
+                ),
+            ),
+        )
+    r = [r for r in own if _BUCKET.get(r.conclusion, _NO_ANSWER) == _NO_ANSWER][0]
+    return Readback(
+        dispatch,
+        kept,
+        (
+            Reading(
+                UNPROVEN,
+                "effect_unknown",
+                f"the provider could not say whether dispatch {dispatch}, attempt {r.attempt} was applied (receipt "
+                f"{r.receipt_id} answered {r.answer}, read from {r.provider} at {_when(r.read_at)}): the effect stays "
+                "unknown",
+            ),
+        ),
+    )
 
 
 def _effect_instant(chain: Chain, inputs: Inputs) -> datetime | None:
@@ -2436,7 +2906,7 @@ def verify(chain: Chain, inputs: Inputs) -> ChainVerdict:
                 readings += check(chain, i, source, target, inputs, index)
         out.append(_hop_verdict(i, hop, readings))
     verdict = worst(h.verdict for h in out) if out else UNPROVEN
-    return ChainVerdict(chain=chain, verdict=verdict, hops=tuple(out))
+    return ChainVerdict(chain=chain, verdict=verdict, hops=tuple(out), readback=readback(chain, inputs, index))
 
 
 def in_force(records: Sequence[tuple[int, Chain]]) -> tuple[list[int], list[int]]:

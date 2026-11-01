@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from django.db.models import Q
 from mythos_core import outcome as _oc
 
 from . import authority_chain as rule
@@ -168,9 +169,54 @@ def load_graph(deployment, *, coverage: bool = True) -> rule.Graph:
     )
 
 
+def _cited_outcome(row, keyring, deployment_uuid: str) -> rule.CitedOutcome:
+    """A recorded chain outcome as the rule may rely on it: its evidence kind over the
+    basis IN FORCE, and, for an observed effect, what it observed -- only as the signed
+    digest names it: a document that does not match reads as no document."""
+    basis = observed_outcomes.basis_in_force(row, keyring, deployment_uuid=deployment_uuid)
+    evidence = _composition.evidence_kind(basis, row.observer_engine)
+    effect = None
+    if evidence == _composition.EVIDENCE_OBSERVED_EFFECT:
+        document = observed_effects.evidence_in_force(row, deployment_uuid)
+        if document is not None:
+            effect = rule.ObservedEffect(
+                tool_kind=document["tool"]["kind"],
+                tool_identifier=document["tool"]["identifier"],
+                gate_outcome_id=document["gate_outcome_id"],
+                dispatch_id=document["dispatch_id"],
+                permit_digest=document["permit_digest"],
+                action=document["action"],
+                observed_at=observed_outcomes._instant(document["observed_at"]),
+                dispatch=dispatch_state(document, row),
+                action_digest=document["action_digest"],
+            )
+    return rule.CitedOutcome(
+        outcome_id=row.outcome_id,
+        workflow=row.workflow,
+        status=row.status,
+        evidence=evidence,
+        effect=effect,
+    )
+
+
 def load_inputs(
     deployment, cited_ids, keyring, *, effect_citations=None, principals=(), workflows=()
 ) -> rule.Inputs:
+    """Everything :func:`assurance.authority_chain.verify` reads, for ``deployment``
+    (:func:`_load_inputs`, without the receipt rows it read)."""
+    return _load_inputs(
+        deployment,
+        cited_ids,
+        keyring,
+        effect_citations=effect_citations,
+        principals=principals,
+        workflows=workflows,
+    )[0]
+
+
+def _load_inputs(
+    deployment, cited_ids, keyring, *, effect_citations=None, principals=(), workflows=()
+) -> tuple[rule.Inputs, list]:
     """Everything :func:`assurance.authority_chain.verify` reads, for ``deployment``.
 
     ``cited_ids``: the outcome ids the chains cite (their gate decisions and
@@ -184,45 +230,51 @@ def load_inputs(
     the contract history of the tools it bound are read
     (:func:`histories`) -- two queries, none for no workflow. And the graph's edge
     history (:func:`assurance.edge_history.history`), one query: what
-    ``through_identity``, ``performs`` and reach are read against, as of dispatch."""
+    ``through_identity``, ``performs`` and reach are read against, as of dispatch.
+
+    And the reconciliation receipts (:mod:`assurance.effect_reconciliation`) that name a
+    cited outcome as their gate decision, or a cited observed effect's dispatch, with
+    every other receipt of each dispatch they name -- one query, a second only for a
+    dispatch the first did not ask for, none when nothing is cited -- each in force
+    under the same keyring; and then, only when there are receipts, the gate decisions
+    they name and the observed effects of their dispatches that no chain cites, one
+    query: what each receipt is bound against. Returns the inputs and the receipt rows
+    read, verified or not, for the chain read to serve."""
     from . import edge_history
 
     graph = load_graph(deployment)
 
     outcomes = {}
     ids = sorted({i for i in cited_ids if i})
+    deployment_uuid = str(deployment.uuid)
     if ids:
-        deployment_uuid = str(deployment.uuid)
         for row in WorkflowChainOutcome.objects.filter(deployment=deployment, outcome_id__in=ids):
-            basis = observed_outcomes.basis_in_force(row, keyring, deployment_uuid=deployment_uuid)
-            evidence = _composition.evidence_kind(basis, row.observer_engine)
-            effect = None
-            if evidence == _composition.EVIDENCE_OBSERVED_EFFECT:
-                # What it observed, only as the signed digest names it: a document
-                # that does not match reads as no document.
-                document = observed_effects.evidence_in_force(row, deployment_uuid)
-                if document is not None:
-                    effect = rule.ObservedEffect(
-                        tool_kind=document["tool"]["kind"],
-                        tool_identifier=document["tool"]["identifier"],
-                        gate_outcome_id=document["gate_outcome_id"],
-                        dispatch_id=document["dispatch_id"],
-                        permit_digest=document["permit_digest"],
-                        action=document["action"],
-                        observed_at=observed_outcomes._instant(document["observed_at"]),
-                        dispatch=dispatch_state(document, row),
-                    )
-            outcomes[row.outcome_id] = rule.CitedOutcome(
-                outcome_id=row.outcome_id,
-                workflow=row.workflow,
-                status=row.status,
-                evidence=evidence,
-                effect=effect,
-            )
+            outcomes[row.outcome_id] = _cited_outcome(row, keyring, deployment_uuid)
+    reconciliations: tuple[rule.Reconciliation, ...] = ()
+    receipt_rows: list = []
+    if ids:
+        # Imported here, not with this module: the URLconf loads this module on whatever
+        # request comes first, a stop included, and nothing of the receipts is loaded
+        # before a chain is read.
+        from . import effect_reconciliation
+
+        dispatches = {o.effect.dispatch_id for o in outcomes.values() if o.effect is not None}
+        receipt_rows = effect_reconciliation.rows_for(deployment, ids, dispatches)
+        documents = [effect_reconciliation.in_force(row, keyring) for row in receipt_rows]
+        reconciliations = tuple(effect_reconciliation.as_reconciliation(d) for d in documents if d is not None)
+        if reconciliations:
+            gates = sorted({r.gate_outcome_id for r in reconciliations} - set(outcomes))
+            their = sorted({r.dispatch_id for r in reconciliations})
+            for row in (
+                WorkflowChainOutcome.objects.filter(deployment=deployment)
+                .filter(Q(outcome_id__in=gates) | Q(effect_dispatch_id__in=their))
+                .exclude(outcome_id__in=sorted(outcomes))
+            ):
+                outcomes[row.outcome_id] = _cited_outcome(row, keyring, deployment_uuid)
     authentications, delegations = identity_evidence.records_for(deployment, principals, keyring)
     approval_history, contract_history = histories(deployment, workflows)
     edges_noted_from, edges = edge_history.history(deployment)
-    return rule.Inputs(
+    inputs = rule.Inputs(
         graph=graph,
         outcomes=outcomes,
         effect_citations=dict(effect_citations or {}),
@@ -232,7 +284,10 @@ def load_inputs(
         contract_history=contract_history,
         edge_history=edges,
         edges_noted_from=edges_noted_from,
+        reconciliations=reconciliations,
+        deployment=deployment_uuid,
     )
+    return inputs, receipt_rows
 
 
 def dispatch_state(document: dict, row) -> rule.DispatchState | None:
@@ -338,6 +393,9 @@ class Recorded:
     standing: bool
     basis: str
     verdict: rule.ChainVerdict
+    #: The reconciliation receipts about the dispatch the chain's gate decision let
+    #: through, as the chain read serves them (:func:`assurance.effect_reconciliation.served`).
+    reconciliations: tuple = ()
 
 
 def basis_in_force(row, keyring, deployment_uuid: str) -> str:
@@ -401,7 +459,7 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
         cited = chains[pk].effect_outcome_id
         if cited:
             citations[cited] = citations.get(cited, 0) + 1
-    inputs = load_inputs(
+    inputs, receipt_rows = _load_inputs(
         deployment,
         {i for row in rows for i in (row.gate_outcome_id, row.effect_outcome_id)},
         keyring,
@@ -411,15 +469,24 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
     )
     deployment_uuid = str(deployment.uuid)
     stands = set(standing)
-    return [
-        Recorded(
-            row=row,
-            standing=row.pk in stands,
-            basis=basis_in_force(row, keyring, deployment_uuid),
-            verdict=rule.verify(chains[row.pk], inputs),
+    read = []
+    for row in rows:
+        verdict = rule.verify(chains[row.pk], inputs)
+        served = ()
+        if receipt_rows:
+            from . import effect_reconciliation
+
+            served = tuple(effect_reconciliation.served(chains[row.pk], verdict.readback, receipt_rows))
+        read.append(
+            Recorded(
+                row=row,
+                standing=row.pk in stands,
+                basis=basis_in_force(row, keyring, deployment_uuid),
+                verdict=verdict,
+                reconciliations=served,
+            )
         )
-        for row in rows
-    ]
+    return read
 
 
 def read_approved(deployment) -> dict:
@@ -627,6 +694,12 @@ def chain_payload(recorded: Recorded) -> dict:
         "unproven_hops": [h.index for h in verdict.unproven],
         "broken_hops": [h.index for h in verdict.broken],
         "hops": [hop_payload(h) for h in verdict.hops],
+        # F1: every reconciliation receipt recorded about the dispatch the chain's gate
+        # decision let through -- id, dispatch, attempt, gate decision, answer,
+        # conclusion, when and from which provider it was read, whether it verifies now
+        # and whether it binds -- beside the produces evidence it is read with. Empty
+        # when none is on record.
+        "reconciliations": list(recorded.reconciliations),
     }
 
 

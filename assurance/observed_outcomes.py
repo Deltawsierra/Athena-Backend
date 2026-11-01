@@ -87,6 +87,9 @@ BATCH_LIMIT = 20
 MAX_BODY_BYTES = BATCH_LIMIT * (oc.MAX_PAYLOAD_B64 + 2048)
 
 _SLUG = re.compile(r"^[-a-zA-Z0-9_]{1,200}$")
+#: A reconciliation receipt's DSSE payload type (assurance.effect_reconciliation),
+#: spelled here so a refusal can name where one goes without importing that module.
+RECONCILIATION_PAYLOAD_TYPE = "application/vnd.mythos.effect-reconciliation+json"
 
 
 class KeyringUnavailable(Exception):
@@ -317,6 +320,13 @@ def _examine(envelope: Any, deployment, keyring, now: datetime) -> tuple[dict | 
     ``(None, None, why)``."""
     verdict = oc.verify_outcome(envelope, keyring)
     if verdict.verdict != oc.AUTHENTIC:
+        if isinstance(envelope, dict) and envelope.get("payloadType") == RECONCILIATION_PAYLOAD_TYPE:
+            # Named, so the poster is told where it goes: a receipt is no chain outcome
+            # (assurance.effect_reconciliation), and its signature is over its own type.
+            return None, None, (
+                f"{verdict.verdict}: {verdict.reason}; a reconciliation receipt is recorded on the "
+                "effect-reconciliations route, and posted here it would prove nothing"
+            )
         return None, None, f"{verdict.verdict}: {verdict.reason}"
     outcome = verdict.outcome
     if outcome["deployment"] != str(deployment.uuid):

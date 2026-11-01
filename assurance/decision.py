@@ -827,11 +827,37 @@ def _hops_named(records, verdict: str) -> str:
     return " | ".join(parts)
 
 
+#: The one broken reading that says an effect was NOT produced (F1): a provider's
+#: signed readback answered not_applied (assurance.authority_chain.readback).
+_NOT_PRODUCED = "effect_not_produced"
+
+
 def _broken_chains_note(records) -> str:
+    codes = {
+        reading.code
+        for record in records
+        for hop in record.verdict.hops
+        if hop.verdict == "broken"
+        for reading in hop.reasons
+        if reading.verdict == "broken"
+    }
+    authority = (
+        " The effect was produced through authority this deployment's own graph, approvals or Action Gate say it "
+        "did not have."
+    )
+    readback = (
+        " A provider's signed readback says the effect was not produced: record the chain the effect was produced "
+        "through, if it was."
+    )
+    if codes == {_NOT_PRODUCED}:
+        said = readback
+    elif _NOT_PRODUCED in codes:
+        said = authority + readback
+    else:
+        said = authority
     return (
         f"Held at 'needs remediation' by {len(records)} authority chain(s) the record contradicts: "
-        f"{_hops_named(records, 'broken')}. The effect was produced through authority this "
-        "deployment's own graph, approvals or Action Gate say it did not have."
+        f"{_hops_named(records, 'broken')}.{said}"
     )
 
 

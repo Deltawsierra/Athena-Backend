@@ -4049,6 +4049,72 @@ class IdentityEvidence(models.Model):
         return f"{self.kind} record {self.outcome_id} ({self.principal})"
 
 
+class EffectReconciliationRewriteRefused(ValueError):
+    """A recorded reconciliation receipt was asked to change or go away. The record is
+    append-only: a later readback is a new receipt."""
+
+
+class EffectReconciliationReceipt(models.Model):
+    """One signed reconciliation receipt (:mod:`assurance.effect_reconciliation`): the
+    answer one provider readback gave about a dispatch whose effect was unknown
+    (``mythos.effect-reconciliation/v1``), what an authority chain's ``produces`` hop is
+    read back by.
+
+    Not a :class:`WorkflowChainOutcome`: a receipt is no outcome of any workflow's chain,
+    and is signed under a payload type of its own. Written only by the
+    effect-reconciliations route, with the envelope it rests on kept whole (the document
+    is its payload); re-verified on every read against the keyring in force, so a column
+    edited after the fact proves nothing. Stored once per ``receipt_id``, whether or not
+    its gate decision is on record yet: it proves nothing until it binds.
+
+    APPEND-ONLY: a later readback of the same dispatch is a new receipt.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="effect_reconciliations")
+    # The receipt's own id: unique, so it is stored once, and the same id with other
+    # bytes is refused.
+    receipt_id = models.CharField(max_length=32, unique=True)
+    # The dispatch's id (its idempotency key, the same for every attempt) and the
+    # attempt and gate decision this readback is of, as signed: what a chain's
+    # produces hop finds its receipts by, one indexed read.
+    dispatch_id = models.CharField(max_length=32)
+    attempt = models.PositiveIntegerField()
+    gate_outcome_id = models.CharField(max_length=32)
+    workflow = models.CharField(max_length=200)
+    # The readback's answer in its own words, and the conclusion it gives.
+    answer = models.CharField(max_length=16)
+    conclusion = models.CharField(max_length=16)
+    provider = models.CharField(max_length=200)
+    read_at = models.DateTimeField()
+    observer_key_id = models.CharField(max_length=64)
+    # sha256 over the envelope's canonical JSON: the same envelope posted again is the
+    # same receipt; another one under this receipt id is refused.
+    envelope_digest = models.CharField(max_length=71)
+    envelope = models.JSONField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        indexes = [
+            models.Index(fields=["deployment", "gate_outcome_id"], name="assurance_reconcile_gate"),
+            models.Index(fields=["deployment", "dispatch_id"], name="assurance_reconcile_dispatch"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise EffectReconciliationRewriteRefused(
+                "A recorded reconciliation receipt is never rewritten; a later readback is a new receipt."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise EffectReconciliationRewriteRefused("A recorded reconciliation receipt is never deleted.")
+
+    def __str__(self) -> str:
+        return f"reconciliation receipt {self.receipt_id} ({self.answer}, dispatch {self.dispatch_id})"
+
+
 # ---------------------------------------------------------------------------
 # Achilles scan results (owner freeze exception 22, second half)
 # ---------------------------------------------------------------------------

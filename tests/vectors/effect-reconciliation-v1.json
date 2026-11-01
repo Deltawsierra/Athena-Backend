@@ -1,0 +1,2067 @@
+{
+  "about": "Conformance vectors for the mythos.effect-reconciliation/v1 receipt: the signed answer of one provider readback about a dispatch whose effect was unknown, generated from achilles-engine (achilles/observed_effect.py: reconciliation_document, sign_reconciliation) and carried byte for byte in athena-backend. Every valid case verified, and every invalid case was refused, by Achilles' own verify_reconciliation / validate_reconciliation when this file was written; achilles_refusal records Achilles' words. Envelopes are written as posted (DSSE, base64 payload and sig). Each key is Ed25519 with the private seed SHA-256 of its phrase: test keys, public by construction, never a real one.",
+  "effect_engine": "achilles-effect",
+  "effect_key_phrase": "mythos.effect-reconciliation/v1 conformance vector: the observed-effect test key, never a real one",
+  "effect_public_key_hex": "2b0b1cf3209641ee768c2cd6c0eadad85a4764415266b17a74cee3007d9099c7",
+  "gate_key_phrase": "mythos.effect-reconciliation/v1 conformance vector: the gate's outcome test key, never a real one",
+  "gate_public_key_hex": "6649c7e81d56cd6ce53f9945e167b5887c4739ad2aadc55d22eb4f7440c63c42",
+  "invalid_documents": [
+    {
+      "achilles_refusal": "a reconciliation receipt is an object",
+      "document": [
+        {
+          "action": "crm.update",
+          "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "attempt": 1,
+          "conclusion": {
+            "basis": "observed",
+            "state": "committed"
+          },
+          "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+          "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+          "dispatched_at": "2026-10-08T12:00:00.023456Z",
+          "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+          "observer": {
+            "engine": "achilles-effect",
+            "version": "0.1.0"
+          },
+          "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+          "readback": {
+            "answer": "applied",
+            "provider": "crm-provider",
+            "read_at": "2026-10-08T12:05:00.000000Z",
+            "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+            "status_code": 200
+          },
+          "receipt_id": "a1000000000000000000000000000001",
+          "schema": "mythos.effect-reconciliation/v1",
+          "tool": {
+            "identifier": "crm-mcp",
+            "kind": "mcp_server"
+          },
+          "workflow": "crm-update"
+        }
+      ],
+      "why": "a list, not an object"
+    },
+    {
+      "achilles_refusal": "schema is 'mythos.effect-reconciliation/v1'",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "another schema"
+    },
+    {
+      "achilles_refusal": "schema is 'mythos.effect-reconciliation/v1'",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.observed-effect/v3",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "the observed-effect schema"
+    },
+    {
+      "achilles_refusal": "a mythos.effect-reconciliation/v1 receipt has exactly the fields ['action', 'action_digest', 'attempt', 'conclusion', 'deployment', 'dispatch_id', 'dispatched_at', 'gate_outcome_id', 'observer', 'permit_digest', 'readback', 'receipt_id', 'schema', 'tool', 'workflow']; missing ['receipt_id'], unexpected []",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "receipt_id missing"
+    },
+    {
+      "achilles_refusal": "a mythos.effect-reconciliation/v1 receipt has exactly the fields ['action', 'action_digest', 'attempt', 'conclusion', 'deployment', 'dispatch_id', 'dispatched_at', 'gate_outcome_id', 'observer', 'permit_digest', 'readback', 'receipt_id', 'schema', 'tool', 'workflow']; missing [], unexpected ['extra']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "extra": "x",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "an unexpected field"
+    },
+    {
+      "achilles_refusal": "receipt_id is a 32-character hex uuid",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "A1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "receipt_id in upper case"
+    },
+    {
+      "achilles_refusal": "receipt_id is a 32-character hex uuid",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001\n",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "receipt_id with a trailing newline"
+    },
+    {
+      "achilles_refusal": "receipt_id is a 32-character hex uuid",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a100000000000000000000000000000",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "receipt_id of 31 characters"
+    },
+    {
+      "achilles_refusal": "deployment is a deployment token",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10 0000",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "deployment with a space"
+    },
+    {
+      "achilles_refusal": "workflow is a workflow slug",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm/update"
+      },
+      "why": "workflow that is not a slug"
+    },
+    {
+      "achilles_refusal": "tool.kind is one of ['mcp_server', 'skill', 'tool']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "agent"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "tool.kind outside the tool kinds"
+    },
+    {
+      "achilles_refusal": "tool has exactly the fields ['identifier', 'kind']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server",
+          "version": "1"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "tool with an extra field"
+    },
+    {
+      "achilles_refusal": "tool.identifier is non-empty text with no surrounding whitespace",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": " crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "tool.identifier with surrounding whitespace"
+    },
+    {
+      "achilles_refusal": "tool.identifier contains a control character",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm\u0007mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "tool.identifier with a control character"
+    },
+    {
+      "achilles_refusal": "action is non-empty text with no surrounding whitespace",
+      "document": {
+        "action": "",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "action empty"
+    },
+    {
+      "achilles_refusal": "action is at most 200 characters",
+      "document": {
+        "action": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "action over 200 characters"
+    },
+    {
+      "achilles_refusal": "action_digest is 64 lowercase hex characters",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "action_digest in upper case"
+    },
+    {
+      "achilles_refusal": "action_digest is 64 lowercase hex characters",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "action_digest with a trailing newline"
+    },
+    {
+      "achilles_refusal": "dispatch_id is a 32-character hex uuid",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7\n",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "dispatch_id with a trailing newline"
+    },
+    {
+      "achilles_refusal": "attempt is a whole number, 1 for the dispatch itself",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 0,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "attempt 0"
+    },
+    {
+      "achilles_refusal": "attempt is a whole number, 1 for the dispatch itself",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": true,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "attempt true (a bool is not a whole number here)"
+    },
+    {
+      "achilles_refusal": "attempt is a whole number, 1 for the dispatch itself",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": "1",
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "attempt as text"
+    },
+    {
+      "achilles_refusal": "attempt is a whole number, 1 for the dispatch itself",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1.0,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "attempt as a float"
+    },
+    {
+      "achilles_refusal": "permit_digest is a sha256 digest",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "permit_digest without its sha256: prefix"
+    },
+    {
+      "achilles_refusal": "permit_digest is a sha256 digest",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba\n",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "permit_digest with a trailing newline"
+    },
+    {
+      "achilles_refusal": "gate_outcome_id is a 32-character hex uuid",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "gate_outcome_id that is not hex"
+    },
+    {
+      "achilles_refusal": "dispatched_at is YYYY-MM-DDTHH:MM:SS.ffffffZ",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "dispatched_at without microseconds"
+    },
+    {
+      "achilles_refusal": "dispatched_at is YYYY-MM-DDTHH:MM:SS.ffffffZ",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456+00:00",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "dispatched_at with an offset, not Z"
+    },
+    {
+      "achilles_refusal": "readback has exactly the fields ['answer', 'provider', 'read_at', 'response_digest', 'status_code']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback missing a field"
+    },
+    {
+      "achilles_refusal": "readback has exactly the fields ['answer', 'provider', 'read_at', 'response_digest', 'status_code']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "detail": "x",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback with an extra field"
+    },
+    {
+      "achilles_refusal": "readback.provider is a provider name token",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.provider that is not a token"
+    },
+    {
+      "achilles_refusal": "readback.answer is one of ['applied', 'not_applied', 'cannot_say']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "maybe",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.answer outside the answers"
+    },
+    {
+      "achilles_refusal": "readback.status_code 503 is not one 'applied' is read from",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 503
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.status_code 503 for applied"
+    },
+    {
+      "achilles_refusal": "readback.status_code 404 is not one 'applied' is read from",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 404
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.status_code 404"
+    },
+    {
+      "achilles_refusal": "readback.status_code is an HTTP status",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": "200"
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.status_code as text"
+    },
+    {
+      "achilles_refusal": "readback.response_digest is a sha256 digest",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:xyz",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.response_digest that is not a digest"
+    },
+    {
+      "achilles_refusal": "readback.read_at is YYYY-MM-DDTHH:MM:SS.ffffffZ",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08 12:05:00",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.read_at that is not an instant"
+    },
+    {
+      "achilles_refusal": "conclusion.state is 'committed' for a readback that answered 'applied'",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "failed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "conclusion.state failed for applied"
+    },
+    {
+      "achilles_refusal": "conclusion.state is 'committed' for a readback that answered 'applied'",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "unknown"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "conclusion.state unknown for applied"
+    },
+    {
+      "achilles_refusal": "conclusion.basis is 'observed': the readback was read",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "inferred",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "conclusion.basis inferred"
+    },
+    {
+      "achilles_refusal": "conclusion has exactly the fields ['basis', 'state']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "detail": "x",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "conclusion with an extra field"
+    },
+    {
+      "achilles_refusal": "observer.engine is 'achilles-effect'",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "observer.engine achilles (the outcome key's name)"
+    },
+    {
+      "achilles_refusal": "observer.version is non-empty text with no surrounding whitespace",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": ""
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "observer.version empty"
+    },
+    {
+      "achilles_refusal": "observer has exactly the fields ['engine', 'version']",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "run_id": "r",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "observer with an extra field"
+    },
+    {
+      "achilles_refusal": "readback.status_code 503 is not one 'not_applied' is read from",
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "failed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "not_applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:008545c87d53cb9a83f693cf6b830eab92006055a4947c4385a1526270ff2b83",
+          "status_code": 503
+        },
+        "receipt_id": "a1000000000000000000000000000002",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "readback.status_code 503 for not_applied"
+    }
+  ],
+  "invalid_envelopes": [
+    {
+      "achilles_refusal": "the envelope declares 'application/vnd.mythos.chain-outcome+json', not a reconciliation receipt",
+      "envelope": {
+        "payload": "eyJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZXZpZGVuY2VfZGlnZXN0Ijoic2hhMjU2OmNhY2FjYWNhY2FjYWNhY2FjYWNhY2FjYWNhY2FjYWNhY2FjYWNhY2FjYWNhY2FjYWNhY2FjYWNhY2FjYWNhY2EiLCJvYnNlcnZlZF9hdCI6IjIwMjYtMTAtMDhUMTI6MDA6MDAuMTIzNDU2WiIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInJ1bl9pZCI6InJ1bi12ZWN0b3IiLCJ2ZXJzaW9uIjoiMC4xLjAifSwib3V0Y29tZV9pZCI6IjdhNmY1ZTRkM2MyYjRhMGY5ZThkN2M2YjVhNDkzODM4IiwicmVhc29uIjoiIiwic2NoZW1hIjoibXl0aG9zLmNoYWluLW91dGNvbWUvdjEiLCJzdGF0dXMiOiJoZWxkIiwid29ya2Zsb3ciOiJjcm0tdXBkYXRlIn0=",
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "3Iq5ozuBrOJ6ijuJOY9ueZ4FUybIBly3exXSkT8vgA+pok/Cka1+1uxV+4ZypgtiY0ZlTehoJgmI2NPadiLpCw=="
+          }
+        ]
+      },
+      "why": "an observed effect: a chain outcome the same effect key signed, under the chain-outcome payload type"
+    },
+    {
+      "achilles_refusal": "the envelope declares 'application/vnd.mythos.chain-outcome+json', not a reconciliation receipt",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          }
+        ]
+      },
+      "why": "a receipt declared under the chain-outcome payload type, its signature over the receipt type"
+    },
+    {
+      "achilles_refusal": "the envelope declares 'application/vnd.mythos.chain-outcome+json', not a reconciliation receipt",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "WXd4e2viyto5bWbkbJqP9hPP8HYkNDk2iMV3sl8DRa0c4EyW13EnCCOqtWzVS8MEgJRxE7ug/eCc9y9POBb2BQ=="
+          }
+        ]
+      },
+      "why": "a receipt's bytes signed as a chain outcome (the chain-outcome payload type in the signed bytes and declared)"
+    },
+    {
+      "achilles_refusal": "the signature does not verify under the key",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "WXd4e2viyto5bWbkbJqP9hPP8HYkNDk2iMV3sl8DRa0c4EyW13EnCCOqtWzVS8MEgJRxE7ug/eCc9y9POBb2BQ=="
+          }
+        ]
+      },
+      "why": "a receipt declared as one, its signature made over the chain-outcome payload type"
+    },
+    {
+      "achilles_refusal": "the receipt is signed by another key",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:ad5a94992bdeab87781a3c1bc26ffd07",
+            "sig": "pTjZZ6EWQ/tzSpwhX7IcBOtW8aSyiOGOBdv8ZnVpCpo4OeSCX8at9CvcT1avruuWm6/frHLAjosUmYtMRjVxDA=="
+          }
+        ]
+      },
+      "why": "signed by another key (the gate's outcome key)"
+    },
+    {
+      "achilles_refusal": "the signature does not verify under the key",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "pTjZZ6EWQ/tzSpwhX7IcBOtW8aSyiOGOBdv8ZnVpCpo4OeSCX8at9CvcT1avruuWm6/frHLAjosUmYtMRjVxDA=="
+          }
+        ]
+      },
+      "why": "the effect key's id, signed by another key"
+    },
+    {
+      "achilles_refusal": "a receipt envelope carries exactly one signature",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          },
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          }
+        ]
+      },
+      "why": "two signatures"
+    },
+    {
+      "achilles_refusal": "a receipt envelope carries exactly one signature",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": []
+      },
+      "why": "no signature"
+    },
+    {
+      "achilles_refusal": "an envelope has exactly payloadType, payload and signatures",
+      "envelope": {
+        "extra": "x",
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          }
+        ]
+      },
+      "why": "an extra envelope field"
+    },
+    {
+      "achilles_refusal": "the signature does not verify under the key",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoyLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          }
+        ]
+      },
+      "why": "a tampered payload (attempt 1 rewritten to 2)"
+    },
+    {
+      "achilles_refusal": "the envelope could not be read (Error)",
+      "envelope": {
+        "payload": "not base64!",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          }
+        ]
+      },
+      "why": "a payload that is not base64"
+    },
+    {
+      "achilles_refusal": "payload is a base64 string of at most 65536 characters",
+      "envelope": {
+        "payload": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          }
+        ]
+      },
+      "why": "a payload over 64 KiB of base64"
+    },
+    {
+      "achilles_refusal": "signed, but the payload is not the canonical serialisation of the receipt",
+      "envelope": {
+        "payload": "ewogICJhY3Rpb24iOiAiY3JtLnVwZGF0ZSIsCiAgImFjdGlvbl9kaWdlc3QiOiAiZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZCIsCiAgImF0dGVtcHQiOiAxLAogICJjb25jbHVzaW9uIjogewogICAgImJhc2lzIjogIm9ic2VydmVkIiwKICAgICJzdGF0ZSI6ICJjb21taXR0ZWQiCiAgfSwKICAiZGVwbG95bWVudCI6ICI3ZjNjMmExMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwZjEiLAogICJkaXNwYXRjaF9pZCI6ICJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsCiAgImRpc3BhdGNoZWRfYXQiOiAiMjAyNi0xMC0wOFQxMjowMDowMC4wMjM0NTZaIiwKICAiZ2F0ZV9vdXRjb21lX2lkIjogIjJkOGU2YTRjMGIzZjRlNWQ5YzdhNWY4ZTZkNWM0YjMxIiwKICAib2JzZXJ2ZXIiOiB7CiAgICAiZW5naW5lIjogImFjaGlsbGVzLWVmZmVjdCIsCiAgICAidmVyc2lvbiI6ICIwLjEuMCIKICB9LAogICJwZXJtaXRfZGlnZXN0IjogInNoYTI1Njo3OTk1NjZlOTFiYmVmODI2NzhkNzM1Zjk1MTI2MmJkY2U2ODRkNjc5YjQ1ZTdlZjZjZmQwYmUzYzZjZTE1NmJhIiwKICAicmVhZGJhY2siOiB7CiAgICAiYW5zd2VyIjogImFwcGxpZWQiLAogICAgInByb3ZpZGVyIjogImNybS1wcm92aWRlciIsCiAgICAicmVhZF9hdCI6ICIyMDI2LTEwLTA4VDEyOjA1OjAwLjAwMDAwMFoiLAogICAgInJlc3BvbnNlX2RpZ2VzdCI6ICJzaGEyNTY6ZjYyYThkOTE4Njg2ZmNhNWU4ZTg3Y2NkODM3YWUwMzNmYjA4NTJjODRiYjdjNDNjYjZkYWU1NzI1YTRlYmEwZSIsCiAgICAic3RhdHVzX2NvZGUiOiAyMDAKICB9LAogICJyZWNlaXB0X2lkIjogImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwKICAic2NoZW1hIjogIm15dGhvcy5lZmZlY3QtcmVjb25jaWxpYXRpb24vdjEiLAogICJ0b29sIjogewogICAgImlkZW50aWZpZXIiOiAiY3JtLW1jcCIsCiAgICAia2luZCI6ICJtY3Bfc2VydmVyIgogIH0sCiAgIndvcmtmbG93IjogImNybS11cGRhdGUiCn0=",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "z6naYkkAudR7b1rTj7id2AHeAR8NITjtMjnZB7J7smAJFZpixS8NLwzaYGpXPNOHIiVry2xTGXt7gl0VJbifDw=="
+          }
+        ]
+      },
+      "why": "signed, but not the canonical serialisation of the receipt"
+    },
+    {
+      "achilles_refusal": "signed, but not a reconciliation receipt: conclusion.state is 'committed' for a readback that answered 'applied'",
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImZhaWxlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "XNn7JE6f4GR0ueJXDsbeZkzWAhsD9PT0SmoUuUjz3Q9asD/e18bHSRiTGe5l40XcQnM/4OiYiyQfaZLFen2wDQ=="
+          }
+        ]
+      },
+      "why": "signed, but not a valid receipt (conclusion failed for applied)"
+    }
+  ],
+  "payload_type": "application/vnd.mythos.effect-reconciliation+json",
+  "readback_conclusions": {
+    "applied": "committed",
+    "cannot_say": "unknown",
+    "not_applied": "failed"
+  },
+  "schema": "mythos.effect-reconciliation/v1",
+  "valid": [
+    {
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000001",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjowNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "khccFpa61zKCtImk4Yk45xaEopeGGK8e4OHmPq3fxufJrvd55ttplAh6IBO97mcS5h/DyZ1oxV6yF4PEaWqnDQ=="
+          }
+        ]
+      },
+      "name": "applied: the readback answered applied (HTTP 200), concluded committed"
+    },
+    {
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "failed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "not_applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:05:00.000000Z",
+          "response_digest": "sha256:008545c87d53cb9a83f693cf6b830eab92006055a4947c4385a1526270ff2b83",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000002",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImZhaWxlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjAwOjAwLjAyMzQ1NloiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMSIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2Ojc5OTU2NmU5MWJiZWY4MjY3OGQ3MzVmOTUxMjYyYmRjZTY4NGQ2NzliNDVlN2VmNmNmZDBiZTNjNmNlMTU2YmEiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJub3RfYXBwbGllZCIsInByb3ZpZGVyIjoiY3JtLXByb3ZpZGVyIiwicmVhZF9hdCI6IjIwMjYtMTAtMDhUMTI6MDU6MDAuMDAwMDAwWiIsInJlc3BvbnNlX2RpZ2VzdCI6InNoYTI1NjowMDg1NDVjODdkNTNjYjlhODNmNjkzY2Y2YjgzMGVhYjkyMDA2MDU1YTQ5NDdjNDM4NWExNTI2MjcwZmYyYjgzIiwic3RhdHVzX2NvZGUiOjIwMH0sInJlY2VpcHRfaWQiOiJhMTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMiIsInNjaGVtYSI6Im15dGhvcy5lZmZlY3QtcmVjb25jaWxpYXRpb24vdjEiLCJ0b29sIjp7ImlkZW50aWZpZXIiOiJjcm0tbWNwIiwia2luZCI6Im1jcF9zZXJ2ZXIifSwid29ya2Zsb3ciOiJjcm0tdXBkYXRlIn0=",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "FZys0c5FqHbrP8Z3WSajNHOIZt80unTM9ZRN2gl2//NF5jSMm3G8Qp9FuCauHB5R9IOaZqg8O/fUaLkCTgtnAQ=="
+          }
+        ]
+      },
+      "name": "not_applied: the readback answered not_applied (HTTP 200), concluded failed"
+    },
+    {
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "unknown"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "cannot_say",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:04:00.000000Z",
+          "response_digest": "sha256:1d89f5802d2574efae91f5f17ffd3225e88553240c3280aef695e0b83ab6d803",
+          "status_code": 503
+        },
+        "receipt_id": "a1000000000000000000000000000003",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6InVua25vd24ifSwiZGVwbG95bWVudCI6IjdmM2MyYTEwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDBmMSIsImRpc3BhdGNoX2lkIjoiZTNmNGE1YjZjN2Q4NGU5ZmEwYjFjMmQzZTRmNWE2YjciLCJkaXNwYXRjaGVkX2F0IjoiMjAyNi0xMC0wOFQxMjowMDowMC4wMjM0NTZaIiwiZ2F0ZV9vdXRjb21lX2lkIjoiMmQ4ZTZhNGMwYjNmNGU1ZDljN2E1ZjhlNmQ1YzRiMzEiLCJvYnNlcnZlciI6eyJlbmdpbmUiOiJhY2hpbGxlcy1lZmZlY3QiLCJ2ZXJzaW9uIjoiMC4xLjAifSwicGVybWl0X2RpZ2VzdCI6InNoYTI1Njo3OTk1NjZlOTFiYmVmODI2NzhkNzM1Zjk1MTI2MmJkY2U2ODRkNjc5YjQ1ZTdlZjZjZmQwYmUzYzZjZTE1NmJhIiwicmVhZGJhY2siOnsiYW5zd2VyIjoiY2Fubm90X3NheSIsInByb3ZpZGVyIjoiY3JtLXByb3ZpZGVyIiwicmVhZF9hdCI6IjIwMjYtMTAtMDhUMTI6MDQ6MDAuMDAwMDAwWiIsInJlc3BvbnNlX2RpZ2VzdCI6InNoYTI1NjoxZDg5ZjU4MDJkMjU3NGVmYWU5MWY1ZjE3ZmZkMzIyNWU4ODU1MzI0MGMzMjgwYWVmNjk1ZTBiODNhYjZkODAzIiwic3RhdHVzX2NvZGUiOjUwM30sInJlY2VpcHRfaWQiOiJhMTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMyIsInNjaGVtYSI6Im15dGhvcy5lZmZlY3QtcmVjb25jaWxpYXRpb24vdjEiLCJ0b29sIjp7ImlkZW50aWZpZXIiOiJjcm0tbWNwIiwia2luZCI6Im1jcF9zZXJ2ZXIifSwid29ya2Zsb3ciOiJjcm0tdXBkYXRlIn0=",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "A6IOWbHFLgvnNZKGh3PNFXAzjFfDepTa1AW5Ii8sFLU7gVPUPtMEGpQsn30IW/FhnjWAvmexVAcumxn9WQs+Aw=="
+          }
+        ]
+      },
+      "name": "cannot_say over HTTP 503 (the one status allowed besides 200, and only for this answer), concluded unknown"
+    },
+    {
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 1,
+        "conclusion": {
+          "basis": "observed",
+          "state": "unknown"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:00:00.023456Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b31",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:799566e91bbef82678d735f951262bdce684d679b45e7ef6cfd0be3c6ce156ba",
+        "readback": {
+          "answer": "cannot_say",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:04:30.000000Z",
+          "response_digest": "sha256:1d89f5802d2574efae91f5f17ffd3225e88553240c3280aef695e0b83ab6d803",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000004",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoxLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6InVua25vd24ifSwiZGVwbG95bWVudCI6IjdmM2MyYTEwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDBmMSIsImRpc3BhdGNoX2lkIjoiZTNmNGE1YjZjN2Q4NGU5ZmEwYjFjMmQzZTRmNWE2YjciLCJkaXNwYXRjaGVkX2F0IjoiMjAyNi0xMC0wOFQxMjowMDowMC4wMjM0NTZaIiwiZ2F0ZV9vdXRjb21lX2lkIjoiMmQ4ZTZhNGMwYjNmNGU1ZDljN2E1ZjhlNmQ1YzRiMzEiLCJvYnNlcnZlciI6eyJlbmdpbmUiOiJhY2hpbGxlcy1lZmZlY3QiLCJ2ZXJzaW9uIjoiMC4xLjAifSwicGVybWl0X2RpZ2VzdCI6InNoYTI1Njo3OTk1NjZlOTFiYmVmODI2NzhkNzM1Zjk1MTI2MmJkY2U2ODRkNjc5YjQ1ZTdlZjZjZmQwYmUzYzZjZTE1NmJhIiwicmVhZGJhY2siOnsiYW5zd2VyIjoiY2Fubm90X3NheSIsInByb3ZpZGVyIjoiY3JtLXByb3ZpZGVyIiwicmVhZF9hdCI6IjIwMjYtMTAtMDhUMTI6MDQ6MzAuMDAwMDAwWiIsInJlc3BvbnNlX2RpZ2VzdCI6InNoYTI1NjoxZDg5ZjU4MDJkMjU3NGVmYWU5MWY1ZjE3ZmZkMzIyNWU4ODU1MzI0MGMzMjgwYWVmNjk1ZTBiODNhYjZkODAzIiwic3RhdHVzX2NvZGUiOjIwMH0sInJlY2VpcHRfaWQiOiJhMTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwNCIsInNjaGVtYSI6Im15dGhvcy5lZmZlY3QtcmVjb25jaWxpYXRpb24vdjEiLCJ0b29sIjp7ImlkZW50aWZpZXIiOiJjcm0tbWNwIiwia2luZCI6Im1jcF9zZXJ2ZXIifSwid29ya2Zsb3ciOiJjcm0tdXBkYXRlIn0=",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "yFI9PKmP9X1NxL/FryazzbvKQKQpaZXgJi1WabRvyzRZl1cMJ80yrquh/v98eoOxchgKcUN6r4Ao2Qz1IlYkAQ=="
+          }
+        ]
+      },
+      "name": "cannot_say over HTTP 200, concluded unknown"
+    },
+    {
+      "document": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attempt": 2,
+        "conclusion": {
+          "basis": "observed",
+          "state": "committed"
+        },
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000f1",
+        "dispatch_id": "e3f4a5b6c7d84e9fa0b1c2d3e4f5a6b7",
+        "dispatched_at": "2026-10-08T12:10:00.000001Z",
+        "gate_outcome_id": "2d8e6a4c0b3f4e5d9c7a5f8e6d5c4b32",
+        "observer": {
+          "engine": "achilles-effect",
+          "version": "0.1.0"
+        },
+        "permit_digest": "sha256:b69e65660c350e5265d435351cefef9c4225d2344b90df9aaaf9c12302bd0ce2",
+        "readback": {
+          "answer": "applied",
+          "provider": "crm-provider",
+          "read_at": "2026-10-08T12:15:00.000000Z",
+          "response_digest": "sha256:f62a8d918686fca5e8e87ccd837ae033fb0852c84bb7c43cb6dae5725a4eba0e",
+          "status_code": 200
+        },
+        "receipt_id": "a1000000000000000000000000000005",
+        "schema": "mythos.effect-reconciliation/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "envelope": {
+        "payload": "eyJhY3Rpb24iOiJjcm0udXBkYXRlIiwiYWN0aW9uX2RpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJhdHRlbXB0IjoyLCJjb25jbHVzaW9uIjp7ImJhc2lzIjoib2JzZXJ2ZWQiLCJzdGF0ZSI6ImNvbW1pdHRlZCJ9LCJkZXBsb3ltZW50IjoiN2YzYzJhMTAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGYxIiwiZGlzcGF0Y2hfaWQiOiJlM2Y0YTViNmM3ZDg0ZTlmYTBiMWMyZDNlNGY1YTZiNyIsImRpc3BhdGNoZWRfYXQiOiIyMDI2LTEwLTA4VDEyOjEwOjAwLjAwMDAwMVoiLCJnYXRlX291dGNvbWVfaWQiOiIyZDhlNmE0YzBiM2Y0ZTVkOWM3YTVmOGU2ZDVjNGIzMiIsIm9ic2VydmVyIjp7ImVuZ2luZSI6ImFjaGlsbGVzLWVmZmVjdCIsInZlcnNpb24iOiIwLjEuMCJ9LCJwZXJtaXRfZGlnZXN0Ijoic2hhMjU2OmI2OWU2NTY2MGMzNTBlNTI2NWQ0MzUzNTFjZWZlZjljNDIyNWQyMzQ0YjkwZGY5YWFhZjljMTIzMDJiZDBjZTIiLCJyZWFkYmFjayI6eyJhbnN3ZXIiOiJhcHBsaWVkIiwicHJvdmlkZXIiOiJjcm0tcHJvdmlkZXIiLCJyZWFkX2F0IjoiMjAyNi0xMC0wOFQxMjoxNTowMC4wMDAwMDBaIiwicmVzcG9uc2VfZGlnZXN0Ijoic2hhMjU2OmY2MmE4ZDkxODY4NmZjYTVlOGU4N2NjZDgzN2FlMDMzZmIwODUyYzg0YmI3YzQzY2I2ZGFlNTcyNWE0ZWJhMGUiLCJzdGF0dXNfY29kZSI6MjAwfSwicmVjZWlwdF9pZCI6ImExMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA1Iiwic2NoZW1hIjoibXl0aG9zLmVmZmVjdC1yZWNvbmNpbGlhdGlvbi92MSIsInRvb2wiOnsiaWRlbnRpZmllciI6ImNybS1tY3AiLCJraW5kIjoibWNwX3NlcnZlciJ9LCJ3b3JrZmxvdyI6ImNybS11cGRhdGUifQ==",
+        "payloadType": "application/vnd.mythos.effect-reconciliation+json",
+        "signatures": [
+          {
+            "keyid": "sha256:932110d1db21a817507903fe92ec3ff1",
+            "sig": "O4KTrnMphmpXJrjkb77Pc+AA2mjul9Zpax+dcl1pB1GgCjhz7FeaXGPqi/JPK6OF3UfjyuC+soIIK/Ozr88RBg=="
+          }
+        ]
+      },
+      "name": "a retry: attempt 2 under the same dispatch id (the same idempotency key), its own gate decision and permit, read back applied"
+    }
+  ]
+}
