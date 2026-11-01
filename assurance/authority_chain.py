@@ -1156,9 +1156,6 @@ class ChainVerdict:
     chain: Chain
     verdict: str
     hops: tuple[HopVerdict, ...]
-    #: The reconciliation receipts about the chain's dispatch (:func:`readback`), or
-    #: None when none is on record: what the chain read serves beside ``produces``.
-    readback: Readback | None = None
 
     @property
     def unproven(self) -> tuple[HopVerdict, ...]:
@@ -2907,7 +2904,7 @@ def verify(chain: Chain, inputs: Inputs) -> ChainVerdict:
                 readings += check(chain, i, source, target, inputs, index)
         out.append(_hop_verdict(i, hop, readings))
     verdict = worst(h.verdict for h in out) if out else UNPROVEN
-    return ChainVerdict(chain=chain, verdict=verdict, hops=tuple(out), readback=readback(chain, inputs, index))
+    return ChainVerdict(chain=chain, verdict=verdict, hops=tuple(out))
 
 
 def in_force(records: Sequence[tuple[int, Chain]]) -> tuple[list[int], list[int]]:

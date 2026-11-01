@@ -393,9 +393,6 @@ class Recorded:
     standing: bool
     basis: str
     verdict: rule.ChainVerdict
-    #: The reconciliation receipts about the dispatch the chain's gate decision let
-    #: through, as the chain read serves them (:func:`assurance.effect_reconciliation.served`).
-    reconciliations: tuple = ()
 
 
 def basis_in_force(row, keyring, deployment_uuid: str) -> str:
@@ -425,13 +422,18 @@ def basis_in_force(row, keyring, deployment_uuid: str) -> str:
     return _composition.BASIS_DEMONSTRATED if covers else _composition.BASIS_ATTESTED
 
 
-def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_recorder: bool = False) -> list[Recorded]:
+def read_chains(
+    deployment, keyring=observed_outcomes.READ_KEYRING, *, with_recorder: bool = False, reconciliations=None
+) -> list[Recorded]:
     """Every chain recorded for ``deployment``, oldest first, each verified.
 
     One query when there is none. Otherwise the graph, access, coverage, approvals
     and cited outcomes are read ONCE for all of them. ``with_recorder`` joins who
     recorded each chain, for a route that publishes it; the decision never reads it,
-    so it reads no user table."""
+    so it reads no user table. ``reconciliations``: a dict, for a route that publishes
+    the receipts each chain's ``produces`` hop is read back by
+    (:func:`assurance.effect_reconciliation.served`), filled by each chain's row id;
+    the decision never asks for them."""
     rows = AuthorityChain.objects.filter(deployment=deployment).order_by("id")
     rows = list(rows.select_related("recorded_by") if with_recorder else rows)
     if not rows:
@@ -469,24 +471,23 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
     )
     deployment_uuid = str(deployment.uuid)
     stands = set(standing)
-    read = []
-    for row in rows:
-        verdict = rule.verify(chains[row.pk], inputs)
-        served = ()
-        if receipt_rows:
-            from . import effect_reconciliation
+    if reconciliations is not None and receipt_rows:
+        from . import effect_reconciliation
 
-            served = tuple(effect_reconciliation.served(chains[row.pk], verdict.readback, receipt_rows))
-        read.append(
-            Recorded(
-                row=row,
-                standing=row.pk in stands,
-                basis=basis_in_force(row, keyring, deployment_uuid),
-                verdict=verdict,
-                reconciliations=served,
+        for row in rows:
+            chain = chains[row.pk]
+            reconciliations[row.pk] = tuple(
+                effect_reconciliation.served(chain, rule.readback(chain, inputs), receipt_rows)
             )
+    return [
+        Recorded(
+            row=row,
+            standing=row.pk in stands,
+            basis=basis_in_force(row, keyring, deployment_uuid),
+            verdict=rule.verify(chains[row.pk], inputs),
         )
-    return read
+        for row in rows
+    ]
 
 
 def read_approved(deployment) -> dict:
@@ -666,10 +667,11 @@ def hop_payload(h: rule.HopVerdict) -> dict:
     }
 
 
-def chain_payload(recorded: Recorded) -> dict:
+def chain_payload(recorded: Recorded, reconciliations=()) -> dict:
     """One recorded chain as the route publishes it: the chain, every hop with its
     verdict and why, and which hops are unproven or broken -- named, so a reader can
-    go to the hop rather than infer it."""
+    go to the hop rather than infer it. ``reconciliations``: the receipts its
+    ``produces`` hop is read back by (:func:`read_chains`)."""
     row, verdict = recorded.row, recorded.verdict
     return {
         "uuid": str(row.uuid),
@@ -699,7 +701,7 @@ def chain_payload(recorded: Recorded) -> dict:
         # conclusion, when and from which provider it was read, whether it verifies now
         # and whether it binds -- beside the produces evidence it is read with. Empty
         # when none is on record.
-        "reconciliations": list(recorded.reconciliations),
+        "reconciliations": list(reconciliations),
     }
 
 

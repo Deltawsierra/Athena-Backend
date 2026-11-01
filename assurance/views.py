@@ -2506,7 +2506,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             except observed_outcomes.KeyringUnavailable as exc:
                 return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             created = True
-        read = authority_chain_records.read_chains(deployment, with_recorder=True)
+        receipts: dict = {}
+        read = authority_chain_records.read_chains(deployment, with_recorder=True, reconciliations=receipts)
         newest_first = list(reversed(read))
         page = newest_first[: self.AUTHORITY_CHAIN_PAGE_SIZE]
         approvals = {}
@@ -2521,7 +2522,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         effects = authority_chain_records.approved_effects(deployment, [r for r in read if r.standing])
         return Response(
             {
-                "chains": [authority_chain_records.chain_payload(r) for r in page],
+                "chains": [authority_chain_records.chain_payload(r, receipts.get(r.row.pk, ())) for r in page],
                 "returned": len(page),
                 "truncated": len(page) < len(read),
                 "page_size": self.AUTHORITY_CHAIN_PAGE_SIZE,

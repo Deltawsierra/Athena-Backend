@@ -562,15 +562,15 @@ def _stamp(value: datetime) -> str:
     return value.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def served(chain: rule.Chain, verdict_readback: rule.Readback | None, rows) -> list[dict]:
+def served(chain: rule.Chain, found: rule.Readback | None, rows) -> list[dict]:
     """The receipts the chain read serves beside a chain's ``produces`` evidence: every
     receipt recorded about the dispatch its gate decision let through, each with its
     id, dispatch, attempt, gate decision, answer, conclusion, when and from which
     provider it was read, whether it verifies now and whether it binds (and why not).
     A receipt that does not verify under the keyring in force is served from its row
     with ``verified`` false: it binds nothing. Oldest attempt first."""
-    bindings = {b.receipt.receipt_id: b for b in (verdict_readback.bindings if verdict_readback else ())}
-    dispatches = {verdict_readback.dispatch_id} if verdict_readback and verdict_readback.dispatch_id else set()
+    bindings = {b.receipt.receipt_id: b for b in (found.bindings if found else ())}
+    dispatches = {found.dispatch_id} if found and found.dispatch_id else set()
     gate = chain.gate_outcome_id
     dispatches |= {row.dispatch_id for row in rows if gate and row.gate_outcome_id == gate}
     entries = []
