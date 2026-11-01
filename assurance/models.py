@@ -3814,6 +3814,13 @@ class ApprovalVersion(models.Model):
     returns to an earlier digest is appended again: the history says it moved and came
     back. Keyed by the workflow's slug rather than a foreign key, so withdrawing the
     approval never deletes the record of what it was.
+
+    WHO DECLARED IT (``declared_by``): the signed-in person whose write moved the
+    approval to this version, as ``ToolContractBinding.bound_by`` records who bound a
+    tool. Null where nobody is on record, read as "not recorded" and never as a person.
+    That covers a version noted with no person behind it, a version noted before the
+    column existed (never backfilled) and a declarer whose account has since been
+    removed.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -3826,6 +3833,21 @@ class ApprovalVersion(models.Model):
     tools = models.JSONField(default=list)
     in_force_from = models.DateTimeField()
     recorded_at = models.DateTimeField(default=timezone.now)
+    # Who declared this version (assurance.approval_history.note_approvals): the person
+    # behind the approved-workflows PUT that wrote it, or the actor code binding a
+    # workflow's tools was given. Null when nobody was: the decision refresh's catch-up
+    # note, a shell, a data fix. Never inferred, so a version noted before this column
+    # existed stays null. The approval's `approved_by` is who last declared it as it
+    # stands, not who moved it to an older version. SET_NULL, as `bound_by` is, so
+    # removing an account is never held back by a version it declared. That nulling is
+    # the one change a recorded version takes, and it reads as "not recorded".
+    declared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="declared_approval_versions",
+    )
 
     class Meta:
         ordering = ["deployment", "workflow", "in_force_from", "id"]

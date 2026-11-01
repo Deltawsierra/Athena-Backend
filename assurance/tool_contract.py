@@ -41,11 +41,13 @@ or writes a stop, a pause or a revocation. A REVOKED claim is never invalidated.
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 from django.db import transaction
 from django.utils import timezone
 
+from .approval_history import declaring
 from .graph_refs import in_graph
 from .models import (
     ApprovedWorkflow,
@@ -217,10 +219,20 @@ def bind_claim(claim: AssuranceClaim, tool: Asset, *, actor=None, now=None) -> T
     return _bind(claim.deployment, tool, actor=actor, now=now, claim=claim)
 
 
+def _declaring_as(actor):
+    """While a workflow's tools are bound, the approval versions the bindings note name
+    ``actor`` as who declared them (:func:`assurance.approval_history.declaring`), as
+    the bindings name it as who bound them. With no actor, the context is left as it
+    is: whoever is declaring on it already, or no one."""
+    return declaring(actor) if actor is not None else contextlib.nullcontext()
+
+
 def bind_workflow(workflow: ApprovedWorkflow, tool: Asset, *, actor=None, now=None) -> ToolContractBinding:
     """Record that the approval of ``workflow`` covers ``tool`` under the tool's
-    contract in force now. Re-approving under a changed contract is binding again."""
-    return _bind(workflow.deployment, tool, actor=actor, now=now, workflow=workflow)
+    contract in force now. Re-approving under a changed contract is binding again.
+    The approval version it moves to names ``actor`` as who declared it."""
+    with _declaring_as(actor):
+        return _bind(workflow.deployment, tool, actor=actor, now=now, workflow=workflow)
 
 
 #: The most tools one approved workflow may name. The approved set is read on
@@ -260,11 +272,12 @@ def approve_workflow_tools(workflow: ApprovedWorkflow, entries, *, actor=None, n
 
     A tool listed again under an unchanged contract keeps its binding (no new
     row). Refusals raise :class:`ToolApprovalRefused` inside this call's
-    transaction, so a refused approval binds and releases nothing.
+    transaction, so a refused approval binds and releases nothing. Every approval
+    version a release or a bind here moves to names ``actor`` as who declared it.
     """
     now = now or timezone.now()
     deployment = workflow.deployment
-    with transaction.atomic():
+    with transaction.atomic(), _declaring_as(actor):
         tools = current_tools(deployment, assets=Asset.objects.filter(deployment=deployment))
         errors: dict[int, str] = {}
         resolved: list[tuple[int, Asset, str | None]] = []

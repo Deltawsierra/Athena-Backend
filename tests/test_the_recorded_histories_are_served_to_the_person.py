@@ -207,6 +207,8 @@ def test_each_approval_version_is_served_as_recorded_and_what_was_never_recorded
             ),
         ]
     )
+    # No version names who declared it: none is on record, though the approval names its
+    # approver (`declared_by` is never inferred from `approved_by`).
     ApprovalVersion.objects.bulk_create(
         [
             # `export` was approved, then withdrawn: withdrawing deleted its bindings, so
@@ -235,18 +237,18 @@ def test_each_approval_version_is_served_as_recorded_and_what_was_never_recorded
             {
                 "version": ids[("export", at(30))], "workflow": "export", "digest": None, "withdrawn": True,
                 "in_force_from": stamp(at(30)), "in_force_until": None, "recorded_at": stamp(at(30)),
-                "tools": [],
+                "declared_by": None, "tools": [],
             },
             {
                 "version": ids[("refund", at(20))], "workflow": "refund", "digest": "b" * 64, "withdrawn": False,
                 "in_force_from": stamp(at(20)), "in_force_until": None, "recorded_at": stamp(at(21)),
-                "tools": [{"kind": "tool", "identifier": "refund@payments", "contract_digest": C2,
+                "declared_by": None, "tools": [{"kind": "tool", "identifier": "refund@payments", "contract_digest": C2,
                            **unbound, "bound_at": stamp(at(20))}],
             },
             {
                 "version": ids[("refund", at(10))], "workflow": "refund", "digest": "a" * 64, "withdrawn": False,
                 "in_force_from": stamp(at(10)), "in_force_until": stamp(at(20)), "recorded_at": stamp(at(10)),
-                "tools": [{"kind": "tool", "identifier": "refund@payments", "contract_digest": C1,
+                "declared_by": None, "tools": [{"kind": "tool", "identifier": "refund@payments", "contract_digest": C1,
                            "bound_at": stamp(at(10)), "bound_by": "binder", "released_at": stamp(at(20)),
                            "invalidated_at": stamp(at(15)),
                            "invalidation_reason": "Tool contract changed: refund@payments"}],
@@ -254,7 +256,7 @@ def test_each_approval_version_is_served_as_recorded_and_what_was_never_recorded
             {
                 "version": ids[("export", at(5))], "workflow": "export", "digest": "e" * 64, "withdrawn": False,
                 "in_force_from": stamp(at(5)), "in_force_until": stamp(at(30)), "recorded_at": stamp(at(5)),
-                "tools": [{"kind": "mcp_server", "identifier": "files-mcp", "contract_digest": C3, **unbound}],
+                "declared_by": None, "tools": [{"kind": "mcp_server", "identifier": "files-mcp", "contract_digest": C3, **unbound}],
             },
         ],
         "version_count": 4,
@@ -364,6 +366,8 @@ def test_the_history_the_approved_workflows_route_writes_is_served_with_who_boun
     assert [v["version"] for v in served["versions"]] == [str(r.id) for r in recorded]
     assert [v["digest"] for v in served["versions"]] == [r.digest for r in recorded]
     assert served["version_count"] == len(recorded)
+    # Each version the PUTs wrote names the admin who made them.
+    assert [v["declared_by"] for v in served["versions"]] == ["approver"] * len(recorded)
     newest, oldest = served["versions"][0], served["versions"][-1]
     assert newest["tools"] == [
         {"kind": "tool", "identifier": "refund@payments", "contract_digest": second_digest,
