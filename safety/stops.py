@@ -521,6 +521,13 @@ NOT_STOPS = {
     "deployment-observed-effects": {
         "POST": "the observed-effect service records a signed observed effect: evidence, and it stops nothing"
     },
+    # A reconciliation receipt (assurance.effect_reconciliation): what a provider's
+    # readback said became of a dispatch whose effect was unknown. Evidence for a
+    # chain's produces hop; nothing a stop reads or writes reads it.
+    "deployment-effect-reconciliations": {
+        "POST": "the observed-effect service records a signed reconciliation receipt: evidence, and it starts and "
+        "stops nothing"
+    },
     "deployment-achilles-scan-results": {
         "GET": _READ,
         "POST": "records a signed Achilles scan result as findings (assurance.achilles_results): evidence, and it "

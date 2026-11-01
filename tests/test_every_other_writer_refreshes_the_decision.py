@@ -450,9 +450,11 @@ def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
         metadata={"permissions": ["refund:issue"]},
     )
     bind_workflow(workflow, refund)
-    record_signed(dep, "refund-over-limit", oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=5))
+    gate = record_signed(dep, "refund-over-limit", oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=5))
     # A recorded chain that starts at a person, so the sign-in and delegation records
-    # its first hops are proven by (assurance.identity_evidence) are read too.
+    # its first hops are proven by (assurance.identity_evidence) are read too. It cites
+    # the gate decision, so the reconciliation receipts its produces hop is read back by
+    # (assurance.effect_reconciliation) are read too.
     from assurance.models import AuthorityChain
 
     person, user = {"kind": "person", "ref": "employee"}, {"kind": "user", "ref": "support-user"}
@@ -468,6 +470,7 @@ def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
             {"from": action, "relation": "produces", "to": {"kind": "effect", "ref": "refund"}},
         ],
         digest="sha256:" + "0" * 64,
+        gate_outcome_id=gate.outcome_id,
     )
     derive_claims(dep)
     with CaptureQueriesContext(connection) as queries:

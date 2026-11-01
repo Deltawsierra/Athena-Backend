@@ -1867,6 +1867,11 @@ ROUTES.update(
         "deployment-achilles-scan-results": _DOCS + "records a signed Achilles scan result; its findings are "
         "read as finding-list, and its own read lists only what was posted to it",
         "deployment-observed-effects": _READ,
+        # F1: the observed-effect service posts a signed reconciliation receipt; the
+        # answer names what it recorded (ids, attempt, answer, conclusion), read as
+        # authority-chains reads it -- no stored credential is ever in it.
+        "deployment-effect-reconciliations": _DOCS + "records a signed reconciliation receipt; answers what it "
+        "recorded, as authority-chains reads it",
         "deployment-recompute": _DOCS + "recomputes the decision; read as deployment-detail",
         "deployment-recompute-claims": _DOCS + "re-derives the claims; read as assurance-claims",
         "deployment-record-bom-drift": _DOCS + "records the BOM's drift; read as bom-drift",

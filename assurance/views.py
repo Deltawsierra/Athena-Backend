@@ -2027,6 +2027,99 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     @action(
         detail=True,
         methods=["post"],
+        url_path="effect-reconciliations",
+        # The observed-effect service's credential: the same service, and the same
+        # signer, as the observed effects. An operator's session after it, so an
+        # operator is told 403 -- refused -- rather than 401.
+        authentication_classes=[
+            observed_effects.ObservedEffectServiceAuthentication,
+            *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+        ],
+        permission_classes=[observed_effects.IsObservedEffectService],
+        parser_classes=[SafeJSONParser],
+    )
+    def effect_reconciliations(self, request, uuid=None):
+        """Record one reconciliation receipt: the ``mythos.effect-reconciliation/v1``
+        answer a provider readback gave about a dispatch whose effect was unknown, signed
+        by Achilles' observed-effect key under a payload type of its own
+        (:mod:`assurance.effect_reconciliation`). The only writer of one.
+
+        ``{"envelope": <DSSE envelope>}`` -- the ``reconciliation`` Achilles' reconcile
+        answer carries. Refused with a 4xx naming why, nothing recorded: an envelope that
+        is not a receipt (a chain outcome -- an observed effect or a gate decision --
+        included), one that does not verify under the key filed under
+        ``achilles-effect``, a document that is not a receipt, a receipt for another
+        deployment or outside the clock window, and a receipt id already recorded with
+        other bytes (409). The same envelope again is 200, recorded once. A receipt whose
+        gate decision is not on record yet is recorded, and proves nothing until it
+        binds. What it proves is read at read time: a chain's ``produces`` hop
+        (:func:`assurance.authority_chain.readback`). Evidence: it stops nothing."""
+        # Imported here, not with this module: the URLconf loads on whatever request
+        # comes first, a stop included, and nothing of this route is loaded before it.
+        from . import effect_reconciliation
+
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"body": "Content-Length is not a number"}) from None
+        if declared > effect_reconciliation.MAX_BODY_BYTES:
+            return Response(
+                {"error": "the request is larger than one reconciliation receipt can be"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
+            return Response(
+                {"error": "a reconciliation receipt is posted as application/json"},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
+        # Not ``get_object``: the service account sees no deployment, and needs none.
+        valid = _valid_uuid(uuid)
+        deployment = Deployment.objects.filter(uuid=valid).first() if valid else None
+        if deployment is None:
+            return Response({"error": "no such deployment"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            envelope = effect_reconciliation.read_body(request.data)
+        except effect_reconciliation.BodyRefused as exc:
+            raise ValidationError(exc.errors) from None
+        try:
+            # The row and the decision it moves commit together, as on the
+            # observed-effect route.
+            with transaction.atomic():
+                result = effect_reconciliation.ingest(deployment, envelope)
+                if isinstance(result, tuple) and result[1]:
+                    _refresh_stored_decision(deployment)
+        except observed_outcomes.KeyringUnavailable as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if isinstance(result, effect_reconciliation.Refusal):
+            return Response(
+                {"recorded": 0, "refused": [{"index": 0, "reason": result.reason}]},
+                status=result.status,
+            )
+        row, created = result
+        return Response(
+            {
+                "recorded": 1 if created else 0,
+                "already_recorded": not created,
+                "receipt_id": row.receipt_id,
+                "workflow": row.workflow,
+                "dispatch_id": row.dispatch_id,
+                "attempt": row.attempt,
+                "gate_outcome_id": row.gate_outcome_id,
+                "answer": row.answer,
+                "conclusion": row.conclusion,
+                "evidence_kind": effect_reconciliation.EVIDENCE_KIND,
+                # Whether the gate decision it names is on record here yet. A receipt
+                # binds a chain only once it is (assurance.authority_chain.readback).
+                "gate_decision_recorded": WorkflowChainOutcome.objects.filter(
+                    deployment=deployment, outcome_id=row.gate_outcome_id
+                ).exists(),
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
         url_path="observed-effects",
         # The observed-effect service's credential first; an operator's session after
         # it, so an operator is told 403 -- refused -- rather than 401.
@@ -2413,7 +2506,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             except observed_outcomes.KeyringUnavailable as exc:
                 return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             created = True
-        read = authority_chain_records.read_chains(deployment, with_recorder=True)
+        receipts: dict = {}
+        read = authority_chain_records.read_chains(deployment, with_recorder=True, reconciliations=receipts)
         newest_first = list(reversed(read))
         page = newest_first[: self.AUTHORITY_CHAIN_PAGE_SIZE]
         approvals = {}
@@ -2428,7 +2522,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         effects = authority_chain_records.approved_effects(deployment, [r for r in read if r.standing])
         return Response(
             {
-                "chains": [authority_chain_records.chain_payload(r) for r in page],
+                "chains": [authority_chain_records.chain_payload(r, receipts.get(r.row.pk, ())) for r in page],
                 "returned": len(page),
                 "truncated": len(page) < len(read),
                 "page_size": self.AUTHORITY_CHAIN_PAGE_SIZE,

@@ -184,6 +184,36 @@ def _observe_the_effect_a_chain_cites():
     return dep, write
 
 
+def _read_back_the_effect_a_chain_cites():
+    """Achilles' observed-effect service posts the reconciliation receipt of the dispatch
+    a recorded chain's gate decision let through: the provider's readback answered
+    not_applied, so the chain's produces hop goes from unproven to broken and the
+    decision it held at needs more evidence goes to needs remediation
+    (assurance.effect_reconciliation)."""
+    import os
+    from unittest import mock
+
+    from tests import signed_chains
+    from tests.test_spine_authority_chain import WF, _chain_body, _post, _world
+
+    dep, operator, permit, _ = _world()
+    assert _post(operator, dep, _chain_body(operator, dep, permit)).status_code == 201
+    recompute_decision(Deployment.objects.get(pk=dep.pk))
+    envelope, _ = signed_chains.reconciliation(dep, WF, permit.outcome_id, "not_applied")
+    account = User.objects.create_user(username="effect-service", role=User.Roles.VIEWER)
+    token = "observed-effect-service-test-only-000000000"  # pragma: allowlist secret
+
+    def write(caller):
+        service = APIClient()
+        service.raise_request_exception = getattr(caller, "raise_request_exception", True)
+        service.credentials(HTTP_X_OBSERVED_EFFECT_TOKEN=token)
+        env = {"ASSURANCE_OBSERVED_EFFECT_TOKEN": token, "ASSURANCE_OBSERVED_EFFECT_USER": account.username}
+        with mock.patch.dict(os.environ, env):
+            return service.post(_base(dep) + "effect-reconciliations/", {"envelope": envelope}, format="json")
+
+    return dep, write
+
+
 def _record_an_achilles_failure():
     """Achilles' scan-result key signs a critical failure of a capability screened for
     the release that found it (assurance.achilles_results): the finding it makes takes
@@ -522,6 +552,9 @@ MOVES = {
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
     ("DeploymentViewSet", "observed_chain_outcomes", "post"): _sign_a_violation,
     ("DeploymentViewSet", "observed_effects", "post"): _observe_the_effect_a_chain_cites,
+    # A signed reconciliation receipt (F1) breaks, proves or unproves the produces hop of
+    # the chain that cites its gate decision; the row and the refresh are one transaction.
+    ("DeploymentViewSet", "effect_reconciliations", "post"): _read_back_the_effect_a_chain_cites,
     # A signed Achilles scan result's screened failure is a finding (owner freeze
     # exception 22); the findings and the refresh are one transaction.
     ("DeploymentViewSet", "achilles_scan_results", "post"): _record_an_achilles_failure,
