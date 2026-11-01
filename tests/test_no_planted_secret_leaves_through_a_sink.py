@@ -1674,7 +1674,10 @@ class World:
         try:
             with pytest.MonkeyPatch.context() as mp:
                 mp.setattr(economics_feeds, "base_url", lambda feed: fake.base)
-                self.command(docs, "fetch_financial_source", "fred-cpiaucsl")
+                # As of the recording's own date: with no --as-of the command asks for
+                # the 13 months before today, which the recording stops covering as the
+                # calendar moves on (it refused as feed_partial from 1 Nov 2026).
+                self.command(docs, "fetch_financial_source", "fred-cpiaucsl", "--as-of", "2026-10-13")
                 signals["client_request_line"] = "/fred/series/observations?" in "".join(self.lines._parts)
                 with _in_mode(fake, "echo"):
                     refused, _ = self.command(docs, "fetch_financial_source", "bls-ppi-final-demand", raises=True)
