@@ -35,7 +35,7 @@ from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
 from . import gate_approval, history_reads, identity_evidence, observability, observed_effects, observed_outcomes
-from .approval_history import note_approvals
+from .approval_history import declaring, note_approvals
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -1749,7 +1749,11 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             # Withdrawn workflows still leave, taking their bindings with them:
             # an approval that is gone has nothing left to hold.
             now = timezone.now()
-            with transaction.atomic():
+            # Every approval version this PUT writes names the person who made it:
+            # the ones the signals note between its own writes (a workflow
+            # withdrawn, a tool released, a tool bound) by `declaring`, and the one
+            # its final note writes by `declared_by` (assurance.approval_history).
+            with transaction.atomic(), declaring(request.user):
                 kept = {
                     w.slug: w
                     for w in deployment.approved_workflows.select_for_update()
@@ -1810,7 +1814,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 # approvals' versions are noted here, in this transaction, so the
                 # history a chain is read against as of dispatch never lags this PUT
                 # (assurance.approval_history).
-                note_approvals(deployment, now=now)
+                note_approvals(deployment, now=now, declared_by=request.user)
                 _refresh_stored_decision(deployment)
         # `select_related` because `approved_by` is read per row: without it a
         # thousand-row set issues a thousand extra user queries. The live tool

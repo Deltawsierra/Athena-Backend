@@ -24,12 +24,25 @@ approval no write moved since this history began is noted too. ``in_force_from``
 when the platform NOTICED: at or after the change. A dispatch before the first note
 of an approval reads as one whose state nothing recorded, never as covered.
 
+WHO DECLARED IT (``ApprovalVersion.declared_by``). Each version names the person whose
+write moved the approval to it, or no one. The approved-workflows PUT is a signed-in
+person's: its final note is given them, and it runs its writes inside
+:func:`declaring`, so every version a signal notes between them (a workflow withdrawn,
+a tool released, a tool bound) is theirs too. Code that binds a workflow's tools with
+an actor (:mod:`assurance.tool_contract`) declares as that actor. Everything else
+names no one: the refresh's catch-up note always, since what it catches up is a change
+no write noted and whose it was is not known, and a signal outside any declaration (a
+shell, a data fix, the invalidation engine marking a binding). Never inferred from the
+approval's ``approved_by``, which is who last declared the approval as it stands.
+
 Never on a stop path. No stop writes an approval, and the refresh's note never
 raises: a failure is logged and the next note takes it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 from collections.abc import Iterable
 
@@ -37,6 +50,28 @@ from django.db import transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+#: The person declaring the approved set on this context (:func:`declaring`), whom a
+#: version a signal notes names; None outside a declaration.
+_DECLARING: contextvars.ContextVar = contextvars.ContextVar("assurance_approval_declaring", default=None)
+
+
+@contextlib.contextmanager
+def declaring(person):
+    """While this runs, every approval version a signal notes on this context names
+    ``person`` as who declared it (:func:`who_is_declaring`). For a write that moves an
+    approval more than once, so that each version noted between its own writes is the
+    person's, as the one its final note writes is."""
+    token = _DECLARING.set(person)
+    try:
+        yield
+    finally:
+        _DECLARING.reset(token)
+
+
+def who_is_declaring():
+    """The person declaring on this context (:func:`declaring`), or None: nobody is."""
+    return _DECLARING.get()
 
 
 def approvals_now(deployment) -> dict[str, tuple[str, list[list[str]]]]:
@@ -73,13 +108,17 @@ def latest_versions(deployment) -> dict[str, object]:
     return latest
 
 
-def note_approvals(deployment, *, now=None) -> list:
+def note_approvals(deployment, *, now=None, declared_by=None) -> list:
     """Append an :class:`~assurance.models.ApprovalVersion` for every approval of
     ``deployment`` whose digest differs from the last one recorded for it (or that has
     none recorded), and a withdrawn version (blank digest) for every workflow whose last
     recorded version is an approval that no longer exists. Idempotent: an unchanged
     approval appends nothing. Returns the rows appended. Runs in the caller's
-    transaction."""
+    transaction.
+
+    ``declared_by``: the person whose write this note follows, named on every version
+    it appends; None (the default) names no one. It is never read off the context here:
+    a caller passes the declarer it has (a signal, :func:`who_is_declaring`)."""
     from .models import ApprovalVersion
 
     now = now or timezone.now()
@@ -98,7 +137,12 @@ def note_approvals(deployment, *, now=None) -> list:
         instant = now if last is None or now >= last.in_force_from else last.in_force_from
         appended.append(
             ApprovalVersion.objects.create(
-                deployment=deployment, workflow=slug, digest=digest, tools=tools, in_force_from=instant
+                deployment=deployment,
+                workflow=slug,
+                digest=digest,
+                tools=tools,
+                in_force_from=instant,
+                declared_by=declared_by,
             )
         )
     return appended
@@ -108,7 +152,10 @@ def note_approvals_quietly(deployment, *, now=None) -> None:
     """:func:`note_approvals`, for the decision refresh, which must not fail for it.
     A failure is logged and rolled back to before the note, and costs only that: the
     next note sees the change instead, and a late note only ever leaves a dispatch
-    before it unrecorded. Never raises."""
+    before it unrecorded. Never raises.
+
+    It names no one, even inside a :func:`declaring`: it is the system's catch-up for
+    a change no write noted, and whose that change was is not on record."""
     try:
         with transaction.atomic():
             note_approvals(deployment, now=now)

@@ -341,7 +341,12 @@ those reads (`assurance/history_reads.py`). Each is a GET, newest first, bounded
   when it was in force, and every tool it bound with the contract digest, `bound_at`,
   `bound_by`, `released_at` and invalidation of the binding live then. Withdrawing an
   approval deletes its bindings, so an older version of one names its tools and no
-  binding. A version records no actor, so who declared it is not served.
+  binding. Each version names who declared it (`declared_by`, a username): the person
+  whose approved-workflows PUT wrote it, including each version noted between that
+  PUT's own writes. It is `null` where nobody is on record: a version noted with no
+  person behind it (the decision refresh's catch-up note, a shell or a data fix), one
+  recorded before the column existed (never backfilled) and one whose declarer's
+  account was removed.
 - `GET .../tool-contracts/` (`?kind=`, `?identifier=`): every recorded tool contract,
   when it was recorded and superseded, the contract in force now (`null` for a tool no
   longer registered) and whether this is it, for every tool, bound or not.

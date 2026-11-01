@@ -30,10 +30,13 @@ account is gone, and a tool's binding where none is on record any more (withdraw
 approval deletes its bindings with it, so an earlier version of an approval withdrawn
 since names its tools and digests, and no ``bound_at``).
 
-NOT RECORDED, SO NOT SERVED. An approval version records no actor, so who declared each
-version is not on record and nothing here infers it. What is on record is served: who
-bound each tool (``bound_by``) and when (``bound_at``). The approved-workflows read keeps
-serving who last declared the approval as it stands (``approved_by``, ``approved_at``).
+WHO DECLARED EACH VERSION is served as recorded (``declared_by``, the declarer's
+username): the person whose write moved the approval to it. It is ``None`` where nobody
+is on record, and nothing here infers one. That covers a version noted with nobody
+behind it, one noted before the column existed and a declarer whose account is gone.
+Beside it, who bound each tool (``bound_by``) and when (``bound_at``). The
+approved-workflows read keeps serving who last declared the approval as it stands
+(``approved_by``, ``approved_at``), unchanged.
 """
 
 from __future__ import annotations
@@ -101,13 +104,15 @@ def approval_history(deployment, *, workflow: str | None, offset: int, page_size
     Each version: its id (the one the gate route names), the workflow, its digest
     (``None`` once withdrawn), when it came into force and until when (the next version
     of the same workflow's ``in_force_from``; ``None`` while no later version is
-    recorded), when it was recorded, and every tool it bound with the contract digest
-    each was bound under -- and, from the binding live when the version came into force,
+    recorded), when it was recorded, who declared it (``declared_by``; ``None`` where
+    nobody is on record), and every tool it bound with the contract digest each was
+    bound under -- and, from the binding live when the version came into force,
     ``bound_at``, ``bound_by``, ``released_at``, ``invalidated_at`` and
     ``invalidation_reason``, all ``None`` where no binding of it is on record.
 
     Three queries: the count, the page (the next version is a correlated subquery, so it
-    is read with it), and the bindings its tools name -- bounded by the page's own tools.
+    is read with it, and the declarer is joined), and the bindings its tools name --
+    bounded by the page's own tools.
     """
     rows = ApprovalVersion.objects.filter(deployment=deployment)
     if workflow is not None:
@@ -121,7 +126,9 @@ def approval_history(deployment, *, workflow: str | None, offset: int, page_size
         .order_by("in_force_from", "id")
     )
     page, total = _page(
-        rows.annotate(in_force_until=Subquery(later.values("in_force_from")[:1])).order_by("-in_force_from", "-id"),
+        rows.annotate(in_force_until=Subquery(later.values("in_force_from")[:1]))
+        .select_related("declared_by")
+        .order_by("-in_force_from", "-id"),
         offset,
         page_size,
     )
@@ -179,6 +186,7 @@ def approval_history(deployment, *, workflow: str | None, offset: int, page_size
                 "in_force_from": version.in_force_from,
                 "in_force_until": version.in_force_until,
                 "recorded_at": version.recorded_at,
+                "declared_by": _username(version.declared_by_id, version.declared_by),
                 "tools": served_tools,
             }
         )
