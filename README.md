@@ -331,6 +331,28 @@ closure-evidence service's token, or the failsafe's `FAILSAFE_SERVICE_TOKEN` or
 version's id and digest (`200`), `404` for none in force, or `409` while its history
 is not level with it (`assurance/gate_approval.py`). It reads only.
 
+A signed-in person reads the histories behind the approved-workflows, authority-chains
+and decision-support reads with the same sign-in and the same per-deployment access as
+those reads (`assurance/history_reads.py`). Each is a GET, newest first, bounded, with
+`returned`, `truncated`, `page_size`, the whole count and `?offset=` for the rest:
+
+- `GET .../approval-history/` (`?workflow=<slug>` for one approval): every recorded
+  version of each approval, with its digest (`null` once withdrawn), from and until
+  when it was in force, and every tool it bound with the contract digest, `bound_at`,
+  `bound_by`, `released_at` and invalidation of the binding live then. Withdrawing an
+  approval deletes its bindings, so an older version of one names its tools and no
+  binding. A version records no actor, so who declared it is not served.
+- `GET .../tool-contracts/` (`?kind=`, `?identifier=`): every recorded tool contract,
+  when it was recorded and superseded, the contract in force now (`null` for a tool no
+  longer registered) and whether this is it, for every tool, bound or not.
+- `GET .../tool-contract-bindings/` (`?kind=`, `?identifier=`): every binding of an
+  approval or a claim to a tool contract, live or released, with `invalidated_at` and
+  `invalidation_reason`.
+- `GET .../decision-history/`: every accepted change of the decision (revision, from,
+  to, basis digest, when, and when a consumer confirmed it).
+
+The gate's approval-in-force route is unchanged and stays the gate's alone.
+
 Two more signers sign records that are not chain outcomes, each on its own route
 with its own service credential (`assurance/identity_evidence.py`), and each proving
 one hop of an authority chain that starts at a person:

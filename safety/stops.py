@@ -702,6 +702,14 @@ NOT_STOPS = {
     "deployment-recompute-claims": {"POST": _REFRESH},
     "deployment-retest-requirements": _get(),
     "deployment-decision-support": _get(),
+    # The histories behind the approved-workflows, authority-chains and decision-support
+    # reads (assurance.history_reads, field guide G10): approval versions, tool contracts
+    # and their bindings, and the decision's transitions, each read as recorded. GET only;
+    # they write, recompute and repair nothing.
+    "deployment-approval-history": _get(),
+    "deployment-tool-contracts": _get(),
+    "deployment-tool-contract-bindings": _get(),
+    "deployment-decision-history": _get(),
     "deployment-coverage-manifest-view": _get(),
     "deployment-revalidation-plan": _get(),
     "deployment-check-invalidations": {

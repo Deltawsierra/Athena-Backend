@@ -34,7 +34,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import gate_approval, identity_evidence, observability, observed_effects, observed_outcomes
+from . import gate_approval, history_reads, identity_evidence, observability, observed_effects, observed_outcomes
 from .approval_history import note_approvals
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
@@ -66,7 +66,7 @@ from .decision import (
 from .dispatch import OwedRecorder, log_later, schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
-from .tool_contract import ToolApprovalRefused, approve_workflow_tools
+from .tool_contract import TOOL_KINDS, ToolApprovalRefused, approve_workflow_tools
 from .tool_contract import current_digests as current_tool_digests
 from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
@@ -2756,6 +2756,132 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # before that transaction, and an operator's pause landing in between was
         # published as a live READY under the revision that recorded the pause.
         return Response(decision_support(deployment))
+
+    # ---- The histories behind the current-state reads (field guide G10) ----------
+    #
+    # The approved-workflows, authority-chains and decision-support reads above serve
+    # each record as it stands; these serve what it was (assurance.history_reads). The
+    # same viewset, so the same authentication and permission classes, and each resolves
+    # its deployment through `get_object()` -- the per-user queryset -- before anything
+    # else, so a deployment the person cannot read is answered exactly as those reads
+    # answer it. GET only: no write is routed here, and nothing here is on a stop path.
+
+    #: How many rows a history read returns, newest first, the rest from ``?offset=``:
+    #: the page the chain-outcome and authority-chain reads and a claim's evidence
+    #: return.
+    HISTORY_PAGE_SIZE = 100
+    #: The approval history's page is half that: each version carries up to
+    #: ``tool_contract.MAX_TOOLS_PER_WORKFLOW`` tools, each resolved to its binding.
+    APPROVAL_HISTORY_PAGE_SIZE = 50
+    #: The largest ``?offset=`` a history read takes: a claim's evidence read's bound,
+    #: for its reason -- past it the value never reaches the database.
+    HISTORY_MAX_OFFSET = 2**31 - 1
+    #: The workflow slugs ``?workflow=`` names: the pattern the approval-in-force route
+    #: takes a slug in.
+    _HISTORY_WORKFLOW = re.compile(r"[-a-zA-Z0-9_]{1,200}")
+    #: The longest ``?identifier=`` a tool read takes: the column's own length.
+    _HISTORY_IDENTIFIER_MAX = 1024
+
+    def _history_offset(self, request) -> int:
+        """``?offset=`` as a history read takes it: plain ASCII digits (no sign, no
+        spaces, no separators), at most :attr:`HISTORY_MAX_OFFSET`, default 0. Anything
+        else is a 400, as a claim's evidence read answers it."""
+        raw = request.query_params.get("offset", "0")
+        offset = int(raw) if _PLAIN_DIGITS.fullmatch(raw or "") and len(raw) <= 12 else -1
+        if not 0 <= offset <= self.HISTORY_MAX_OFFSET:
+            raise ValidationError(
+                {
+                    "offset": (
+                        f"must be a non-negative integer no greater than {self.HISTORY_MAX_OFFSET}, "
+                        f"not {raw[:40]!r}."
+                    )
+                }
+            )
+        return offset
+
+    def _history_tool_filter(self, request) -> tuple[str | None, str | None]:
+        """``?kind=`` and ``?identifier=``, each optional: a registration kind that
+        carries a tool contract, and an identifier of at most the column's length."""
+        kind = request.query_params.get("kind")
+        identifier = request.query_params.get("identifier")
+        errors = {}
+        if kind is not None and kind not in {str(k) for k in TOOL_KINDS}:
+            errors["kind"] = f"must be one of {sorted(str(k) for k in TOOL_KINDS)}, not {kind[:40]!r}."
+        if identifier is not None and not 0 < len(identifier) <= self._HISTORY_IDENTIFIER_MAX:
+            errors["identifier"] = f"must be 1 to {self._HISTORY_IDENTIFIER_MAX} characters."
+        if errors:
+            raise ValidationError(errors)
+        return kind, identifier
+
+    @action(detail=True, methods=["get"], url_path="approval-history")
+    def approval_history(self, request, uuid=None):
+        """Every recorded version of the deployment's workflow approvals, newest first
+        (:func:`assurance.history_reads.approval_history`): the workflow, its digest
+        (``null`` once withdrawn), from when and until when it was in force, and every
+        tool it bound with the contract digest each was bound under and the binding's
+        ``bound_at``, ``bound_by``, ``released_at`` and invalidation where one is on
+        record. ``?workflow=<slug>`` narrows it to one approval; ``?offset=`` pages it.
+
+        The person's read of what the gate's approval-in-force route answers Achilles
+        with one version of. That route is unchanged and is still the gate's alone.
+        Who declared each version is not recorded on it, so it is not served."""
+        deployment = self.get_object()
+        offset = self._history_offset(request)
+        workflow = request.query_params.get("workflow")
+        if workflow is not None and not self._HISTORY_WORKFLOW.fullmatch(workflow):
+            raise ValidationError({"workflow": "must be a workflow slug: letters, digits, '-' and '_', at most 200."})
+        return Response(
+            history_reads.approval_history(
+                deployment, workflow=workflow, offset=offset, page_size=self.APPROVAL_HISTORY_PAGE_SIZE
+            )
+        )
+
+    @action(detail=True, methods=["get"], url_path="tool-contracts")
+    def tool_contracts(self, request, uuid=None):
+        """Every tool contract recorded for the deployment, newest first
+        (:func:`assurance.history_reads.tool_contract_history`): the registration, its
+        digest and canonical descriptor, when it was recorded and superseded, the
+        registration's contract in force now (``null`` for a tool no longer registered)
+        and whether this is it -- for every tool, whether or not an approval binds it.
+        ``?kind=`` and ``?identifier=`` narrow it to one registration; ``?offset=``
+        pages it."""
+        deployment = self.get_object()
+        offset = self._history_offset(request)
+        kind, identifier = self._history_tool_filter(request)
+        return Response(
+            history_reads.tool_contract_history(
+                deployment, kind=kind, identifier=identifier, offset=offset, page_size=self.HISTORY_PAGE_SIZE
+            )
+        )
+
+    @action(detail=True, methods=["get"], url_path="tool-contract-bindings")
+    def tool_contract_bindings(self, request, uuid=None):
+        """Every binding of an approval or a claim to a tool contract on the deployment,
+        live, released and invalidated alike, newest first
+        (:func:`assurance.history_reads.tool_contract_bindings`): what it binds, the
+        digest it was bound under and the one in force, whether it is live and
+        superseded, who bound it and when, when it was released, and when and why the
+        invalidation engine first found it superseded. ``?kind=`` and ``?identifier=``
+        narrow it to one registration; ``?offset=`` pages it."""
+        deployment = self.get_object()
+        offset = self._history_offset(request)
+        kind, identifier = self._history_tool_filter(request)
+        return Response(
+            history_reads.tool_contract_bindings(
+                deployment, kind=kind, identifier=identifier, offset=offset, page_size=self.HISTORY_PAGE_SIZE
+            )
+        )
+
+    @action(detail=True, methods=["get"], url_path="decision-history")
+    def decision_history(self, request, uuid=None):
+        """Every accepted change of the deployment's decision, newest first by revision
+        (:func:`assurance.history_reads.decision_history`): from what, to what, on what
+        basis, when, and whether a downstream consumer confirmed it. The transition log
+        as it stands: it reconciles, recomputes and repairs nothing, and the decision in
+        force stays decision-support's to publish. ``?offset=`` pages it."""
+        deployment = self.get_object()
+        offset = self._history_offset(request)
+        return Response(history_reads.decision_history(deployment, offset=offset, page_size=self.HISTORY_PAGE_SIZE))
 
     @action(detail=True, methods=["get"], url_path="coverage-manifest")
     def coverage_manifest_view(self, request, uuid=None):

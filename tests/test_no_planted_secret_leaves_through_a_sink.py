@@ -1837,6 +1837,9 @@ _DEPLOYMENT_READS = (
     "personal-context", "posture", "repo-posture", "retest-requirements", "revalidation-plan",
     "ripple-effect", "route-map", "secrets-posture", "training-reuse", "vendor-assurance",
     "vendor-packet-candidates", "connector-config", "posture-config", "approval-in-force",
+    # The histories behind approved-workflows, authority-chains and decision-support
+    # (field guide G10): searched like them, over every deployment the paths made.
+    "approval-history", "tool-contracts", "tool-contract-bindings", "decision-history",
 )
 ROUTES.update({f"deployment-{name}": _READ for name in _DEPLOYMENT_READS})
 ROUTES.update(
