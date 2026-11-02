@@ -311,12 +311,22 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
 - `observed_effect`: signed by Achilles' observed-effect key (observer
   `achilles-effect`, a key that signs nothing else): the dispatch that carried a
   permitted action out saw its provider complete it. Recorded only with its
-  `mythos.observed-effect` evidence document (v1, v2 or v3), through
+  `mythos.observed-effect` evidence document (v1, v2, v3 or v4), through
   `POST /api/assurance/deployments/<uuid>/observed-effects/` and the observed-effect
   service's credential (`assurance/observed_effects.py`); it proves an authority
   chain's `produces` hop when the document names that chain's tool and gate decision.
   A v3 document also carries the workflow approval the gate read in force itself,
-  which `under_policy` reads as gate-attested.
+  which `under_policy` reads as gate-attested. A v4 document (G6) is v3 with
+  `dispatch.verified` holding exactly four fields: v3's two, `tool_contract` (the
+  contract the gate verified itself for the dispatched tool at its dispatch re-read,
+  `null` with no link) and `approval_recipients` (the permit's approval-recipient
+  entries, without their nonces). `invokes` reads `tool_contract` as gate-attested
+  against the binding of the approval version the gate read, as of the dispatch
+  (`contract_attested_in_force_at_dispatch`; a mismatch is `broken`,
+  `contract_digest_contradicts_gate`), and the effect's read
+  (`GET .../chain-outcomes/`) serves `approval_recipients` as signed: each says
+  whether the approval was recipient-bound (`"bound"`) or legacy (`"unbound"`), and
+  it is `null` on every row that is not a v4 observed effect.
 - `effect_reconciliation` (F1): a dispatch whose provider answer was lost has no
   observed effect; Achilles asks the provider's readback what became of it and signs
   each answer with the same observed-effect key as a `mythos.effect-reconciliation/v1`
@@ -344,6 +354,21 @@ closure-evidence service's token, or the failsafe's `FAILSAFE_SERVICE_TOKEN` or
 `FAILSAFE_POLL_TOKEN`, is treated as unset) answers the approval
 version's id and digest (`200`), `404` for none in force, or `409` while its history
 is not level with it (`assurance/gate_approval.py`). It reads only.
+`?include=tools` (G6) adds `tools`: each tool binding of the approval in force as
+`{"kind", "identifier", "digest"}` (the binding's contract digest), sorted by kind and
+identifier, `[]` for an approval binding none -- exactly the set the digest was taken
+over, read in the same transaction, and the history row the version names must record
+those tools as well as the digest, or the answer is `409`. Any other `include` value is
+`400` (`unknown_include`). Without it the answer is byte for byte what it was.
+
+Deploy order for G6, the gate verifying the tool contract it dispatches under:
+1. Athena-Backend first: it serves `?include=tools` and accepts
+   `mythos.observed-effect/v4`.
+2. Then Achilles.
+
+An Achilles with the link on, pointed at an Athena-Backend that does not serve `tools`,
+refuses every linked decide as `workflow_approval_unreadable` ("athena-backend does not
+serve the approval's tools; upgrade it first"): fail closed, with the reason named.
 
 A signed-in person reads the histories behind the approved-workflows, authority-chains
 and decision-support reads with the same sign-in and the same per-deployment access as
@@ -370,7 +395,8 @@ those reads (`assurance/history_reads.py`). Each is a GET, newest first, bounded
 - `GET .../decision-history/`: every accepted change of the decision (revision, from,
   to, basis digest, when, and when a consumer confirmed it).
 
-The gate's approval-in-force route is unchanged and stays the gate's alone.
+These history reads leave the gate's approval-in-force route as it was, and it stays
+the gate's alone.
 
 Two more signers sign records that are not chain outcomes, each on its own route
 with its own service credential (`assurance/identity_evidence.py`), and each proving

@@ -497,6 +497,10 @@ def test_the_payload_shapes_are_pinned():
         "observer_engine",
         "observer_key_id",
         "evidence_digest",
+        # G6: a v4 observed effect's approval recipients, as signed -- whether each
+        # approval it rests on was recipient-bound or legacy. Null on every other row,
+        # this typed-in one included. Added to this pinned set deliberately.
+        "approval_recipients",
     }
     assert set(outcome.data["composition"]) == {
         "signal",

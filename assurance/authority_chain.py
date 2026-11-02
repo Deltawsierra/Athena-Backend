@@ -184,6 +184,26 @@ or the history does not cover the dispatch with it (``dispatch_state_unrecorded`
 Only a caller-presented digest -- a v2 document, or a v3 one from a gate with no link
 -- is read exactly as before, and its readings say it was presented.
 
+THE TOOL CONTRACT THE GATE VERIFIED ITSELF (G6). With the link on, Achilles' gate
+re-reads the approval in force at dispatch, with its tools (``?include=tools``,
+:mod:`assurance.gate_approval`), refuses a dispatch whose tool or contract the approval
+does not bind or that moved since the decide, and signs the contract it verified for
+the dispatched tool into the observed effect (``mythos.observed-effect/v4``,
+``dispatch.verified.tool_contract``). ``invokes`` reads it as GATE-ATTESTED, the way
+``under_policy`` reads the approval: it is compared with the binding of that tool in the
+approval version the gate read (``workflow_approval.version``) as of ``dispatched_at``
+-- never the newest binding. That version must be on record, bind this tool under that
+contract, and the dispatcher must not have presented another digest for it, or the hop
+is BROKEN (``contract_digest_contradicts_gate``); then it is proven when that version was
+the one in force at the dispatch instant and that contract was the tool's then
+(``contract_attested_in_force_at_dispatch``), and unproven when either had been
+superseded by then (``dispatched_under_superseded_contract``, or
+``dispatched_under_superseded_policy`` when only the approval moved) or the history does
+not cover the dispatch with it (``dispatch_state_unrecorded``). An attestation of
+another tool than the one this hop invokes speaks for nothing here (``effect_other_tool``).
+A v1 to v3 document, or a v4 one whose ``tool_contract`` is null, reads exactly as
+before, as presented.
+
 THE GRAPH'S EDGES ARE READ AS OF DISPATCH TOO (the follow-up to part 5). The edges
 ``through_identity``, ``performs`` and reach read -- an agent's identity, a component's
 permission, a principal's reach to a tool (:func:`graph_edges`) -- are kept as an
@@ -402,6 +422,11 @@ REASONS: Mapping[str, str] = {
         "the approval in force at dispatch names this tool under the contract that was in force at the "
         "dispatch instant, the one the gate signed"
     ),
+    "contract_attested_in_force_at_dispatch": (
+        "the gate verified this tool's contract itself at dispatch, re-reading the approval in force from this "
+        "platform, and signed it into the dispatch: the approval version the gate read binds this tool under "
+        "that contract, was the version in force at the dispatch instant, and that contract was the tool's then"
+    ),
     "route_at_dispatch": "the served route at the dispatch instant is on record, and is the one the gate signed",
     # unproven
     "no_record": "this platform holds no record of this kind of hop",
@@ -529,6 +554,11 @@ REASONS: Mapping[str, str] = {
         "the approval the gate read from this platform and signed contradicts this platform's record: the "
         "version it names is not on record for this workflow with that digest, or the dispatcher presented "
         "another digest beside it"
+    ),
+    "contract_digest_contradicts_gate": (
+        "the tool contract the gate verified at dispatch and signed contradicts this platform's record: the "
+        "approval version the gate read is not on record, or does not bind this tool under that contract, or the "
+        "dispatcher presented another contract digest beside it"
     ),
     "unreachable": (
         "at the dispatch instant, by the graph's edge history -- or, with no dispatch recorded, in the graph as it "
@@ -913,6 +943,11 @@ class DispatchState:
     route_at_dispatch: str = ""
     #: What the gate read itself (v3), or None: a v2 document, or a gate with no link.
     gate_approval: GateApproval | None = None
+    #: The contract the gate verified ITSELF for the dispatched tool, from its dispatch
+    #: re-read of the approval in force (v4's ``dispatch.verified.tool_contract``), as
+    #: ``(kind, identifier, contract digest)``; None for v1 to v3, and for a v4 document
+    #: from a gate with no link or a permit naming no chain.
+    tool_contract: tuple[str, str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -1570,7 +1605,10 @@ def _under_gate_attested_policy(chain, policy, dispatch: DispatchState, readings
 def _approved_at_dispatch(chain: Chain, node: Node, target, dispatch: DispatchState, inputs: Inputs) -> list[Reading]:
     """The approval and contract half of ``invokes``, as of dispatch: the approval in
     force at the dispatch instant names this tool, under the contract in force at that
-    instant, which is the one the gate signed."""
+    instant, which is the one the gate signed. When the gate verified the contract
+    itself (v4), that is read instead (:func:`_contract_attested_at_dispatch`)."""
+    if dispatch.tool_contract is not None and dispatch.gate_approval is not None:
+        return _contract_attested_at_dispatch(chain, node, target, dispatch, inputs)
     at = _when(dispatch.dispatched_at)
     approval, _ = _version_at(
         inputs.approval_history.get(chain.workflow, ()), dispatch.dispatched_at, lambda v: v.in_force_from
@@ -1642,6 +1680,139 @@ def _approved_at_dispatch(chain: Chain, node: Node, target, dispatch: DispatchSt
             f"approved under contract {approved_digest}, the contract in force at the dispatch at {at}, as presented",
         )
     ]
+
+
+def _binding_of(version: ApprovalVersion, kind: str, identifier: str) -> str | None:
+    """The contract digest ``version`` binds the tool ``(kind, identifier)`` under, or
+    None: it binds no such tool."""
+    return next((t[2] for t in version.tools if len(t) == 3 and (t[0], t[1]) == (kind, identifier)), None)
+
+
+def _contract_attested_at_dispatch(
+    chain: Chain, node: Node, target, dispatch: DispatchState, inputs: Inputs
+) -> list[Reading]:
+    """The approval and contract half of ``invokes`` read against the contract the GATE
+    verified itself at dispatch (``mythos.observed-effect/v4``'s
+    ``dispatch.verified.tool_contract``): compared with the binding of that tool in the
+    approval version the gate read (``workflow_approval.version``, a history row), as of
+    ``dispatched_at`` -- never the newest binding, never the approval as it stands now.
+    A contradiction with this backend's own record is broken, the binding of the version
+    in force at the dispatch instant under the contract in force then is proven, and
+    anything else is unproven, naming why."""
+    gate = dispatch.gate_approval
+    kind, identifier, digest = dispatch.tool_contract
+    at = _when(dispatch.dispatched_at)
+    verified = (
+        f"the gate verified contract {digest} of {kind} {identifier!r} at the dispatch at {at}, under version "
+        f"{gate.version} of {chain.workflow!r} it read"
+    )
+    keys = {(node.kind, node.ref)}
+    if target is not None:
+        keys.add((target.kind, target.identifier))
+    if (kind, identifier) not in keys:
+        return [
+            Reading(
+                UNPROVEN,
+                "effect_other_tool",
+                f"{verified}; this hop invokes {node.kind} {node.ref!r}, so that attestation speaks for another tool",
+            )
+        ]
+    if gate.workflow != chain.workflow:
+        return [
+            Reading(
+                BROKEN,
+                "contract_digest_contradicts_gate",
+                f"{verified}, for workflow {gate.workflow!r}; this chain serves {chain.workflow!r}",
+            )
+        ]
+    versions = inputs.approval_history.get(chain.workflow, ())
+    cited_at = next((n for n, v in enumerate(versions) if v.record == gate.version), None)
+    if cited_at is None:
+        return [
+            Reading(
+                BROKEN,
+                "contract_digest_contradicts_gate",
+                f"{verified}; no version {gate.version} of {chain.workflow!r} is on record here",
+            )
+        ]
+    cited = versions[cited_at]
+    bound = _binding_of(cited, kind, identifier)
+    if bound != digest:
+        held = f"under contract {bound}" if bound is not None else "no such tool"
+        return [
+            Reading(
+                BROKEN,
+                "contract_digest_contradicts_gate",
+                f"{verified}; version {gate.version} is on record here binding {held} "
+                f"(from {_when(cited.in_force_from)})",
+            )
+        ]
+    presented = dispatch.contracts.get((kind, identifier))
+    if presented is not None and presented != digest:
+        return [
+            Reading(
+                BROKEN,
+                "contract_digest_contradicts_gate",
+                f"{verified}; the dispatcher presented contract {presented} of it beside it",
+            )
+        ]
+    readings: list[Reading] = []
+    contract, _ = _version_at(
+        inputs.contract_history.get((kind, identifier), ()), dispatch.dispatched_at, lambda v: v.recorded_at
+    )
+    if contract is None:
+        readings.append(_unrecorded(f"no contract of {kind} {identifier!r} is recorded at or before the dispatch at {at}"))
+    elif contract.digest != digest:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_contract",
+                f"{verified}, attested by the gate; the contract of {kind} {identifier!r} in force at the dispatch "
+                f"was {contract.digest} (from {_when(contract.recorded_at)})",
+            )
+        )
+    current, _ = _version_at(versions, dispatch.dispatched_at, lambda v: v.in_force_from)
+    current_at = None if current is None else versions.index(current)
+    if current is None or current_at < cited_at:
+        readings.append(
+            _unrecorded(
+                f"{verified}, attested by the gate; this platform's history notes that version from "
+                f"{_when(cited.in_force_from)}, and so does not cover the dispatch at {at} with it"
+            )
+        )
+    elif current_at > cited_at:
+        moved = _binding_of(current, kind, identifier)
+        if moved == digest:
+            readings.append(
+                Reading(
+                    UNPROVEN,
+                    "dispatched_under_superseded_policy",
+                    f"{verified}, attested by the gate; version {gate.version} had been superseded by version "
+                    f"{current.record} (from {_when(current.in_force_from)}) by the dispatch, which binds it under "
+                    "the same contract",
+                )
+            )
+        else:
+            readings.append(
+                Reading(
+                    UNPROVEN,
+                    "dispatched_under_superseded_contract",
+                    f"{verified}, attested by the gate; version {gate.version} had been superseded by version "
+                    f"{current.record} (from {_when(current.in_force_from)}) by the dispatch, which binds "
+                    f"{f'it under contract {moved}' if moved is not None else 'no such tool'}",
+                )
+            )
+    elif not readings:
+        readings.append(
+            Reading(
+                PROVEN,
+                "contract_attested_in_force_at_dispatch",
+                f"{verified} and signed it into observed effect {chain.effect_outcome_id}; version {cited.record} "
+                f"is on record here binding it under that contract, in force (from {_when(cited.in_force_from)}) "
+                f"at the dispatch, and that contract was the tool's then",
+            )
+        )
+    return readings
 
 
 def _route_at_dispatch(dispatch: DispatchState) -> Reading:

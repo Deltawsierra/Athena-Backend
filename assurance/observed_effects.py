@@ -18,11 +18,11 @@ to ``observed_effect`` and to nothing else. The keyring already refuses one key 
 under two engines, so the outcome key and the effect key can never be one key here.
 
 THE DOCUMENT. The signed outcome names, as its evidence digest, a
-``mythos.observed-effect/v3`` document (:func:`validate_evidence`) -- or a ``v2`` or
-``v1`` one, which stay readable -- defined here and in Achilles alike and held to the
-same conformance vectors (``tests/vectors/observed-effect-v1.json``, ``-v2.json`` and
-``-v3.json`` in both repositories) -- no code is shared, and nothing here imports
-Achilles:
+``mythos.observed-effect/v4`` document (:func:`validate_evidence`) -- or a ``v3``,
+``v2`` or ``v1`` one, which stay readable exactly as before -- defined here and in
+Achilles alike and held to the same conformance vectors
+(``tests/vectors/observed-effect-v1.json``, ``-v2.json`` and ``-v3.json`` in both
+repositories) -- no code is shared, and nothing here imports Achilles:
 
 - ``deployment``, ``workflow``: the outcome's own, repeated;
 - ``tool``: ``{"kind", "identifier"}``, the tool the action went through;
@@ -51,6 +51,23 @@ Achilles:
   link to this backend. ``under_policy`` reads it as gate-attested
   (:mod:`assurance.authority_chain`); a v2 document, or a v3 one whose reading is
   null, is read exactly as before, as presented.
+- v4 only (G6), ``dispatch.verified`` holds exactly four fields
+  (:data:`VERIFIED_FIELDS_V4`): v3's two, and ``tool_contract`` -- ``null`` when the
+  gate has no link or the permit names no chain, otherwise ``{"kind", "identifier",
+  "digest"}``, the contract the gate itself verified for the dispatched tool from its
+  dispatch re-read of the approval in force (``?include=tools``); so it names the
+  document's own ``tool``, and only beside a ``workflow_approval`` reading -- and
+  ``approval_recipients``, the approval-recipient entries the permit binds inside its
+  MAC, in the MAC's order, each ``{"obligation", "approval", "recipient",
+  "destination", "tenant"}``: ``recipient`` ``"bound"`` (the approval's MAC binds the
+  destination and tenant it names) or ``"unbound"`` (a legacy approval, which binds
+  neither, both ``null``); ``[]`` when the permit rests on no approval. The nonce is
+  left out on purpose: this backend needs no revocation handle, so an entry carrying
+  one is refused. The order is Achilles' MAC order, which sorts by the nonce too, so it
+  is not re-checked here; the list is kept and served exactly as signed, by the
+  effect's read (``GET .../chain-outcomes/``, ``approval_recipients``). ``invokes``
+  reads ``tool_contract`` as gate-attested (:mod:`assurance.authority_chain`); a v4
+  document whose ``tool_contract`` is null reads exactly as v3 does.
 
 WHAT IS REFUSED, at the route (:func:`examine`, through
 :func:`assurance.observed_outcomes.ingest`): every check a signed outcome already
@@ -105,11 +122,20 @@ logger = logging.getLogger(__name__)
 #: v3 is v2 and ``dispatch.verified``: what the gate verified itself (authority chain
 #: short 3) -- its own approvals' digest, and this backend's workflow approval as the
 #: gate read it in force (:data:`VERIFIED_FIELDS`). v2 and v1 stay readable, exactly
-#: as before.
+#: as before. ``EVIDENCE_SCHEMA`` has named v3 since then and still does, so what
+#: reads that name reads exactly what it did; a dispatch signs v4 once Achilles' G6
+#: half ships (:data:`EVIDENCE_SCHEMA_V4`).
 EVIDENCE_SCHEMA = "mythos.observed-effect/v3"
+EVIDENCE_SCHEMA_V3 = EVIDENCE_SCHEMA
+#: v4 (G6) is v3 with ``dispatch.verified`` holding two more fields
+#: (:data:`VERIFIED_FIELDS_V4`): the tool contract the gate verified itself at dispatch,
+#: and the permit's approval-recipient entries without their nonces.
+EVIDENCE_SCHEMA_V4 = "mythos.observed-effect/v4"
 EVIDENCE_SCHEMA_V2 = "mythos.observed-effect/v2"
 EVIDENCE_SCHEMA_V1 = "mythos.observed-effect/v1"
-EVIDENCE_SCHEMAS: tuple[str, ...] = (EVIDENCE_SCHEMA_V1, EVIDENCE_SCHEMA_V2, EVIDENCE_SCHEMA)
+EVIDENCE_SCHEMAS: tuple[str, ...] = (EVIDENCE_SCHEMA_V1, EVIDENCE_SCHEMA_V2, EVIDENCE_SCHEMA, EVIDENCE_SCHEMA_V4)
+#: The documents whose ``dispatch`` block carries ``verified``.
+VERIFIED_SCHEMAS: frozenset[str] = frozenset({EVIDENCE_SCHEMA_V3, EVIDENCE_SCHEMA_V4})
 #: The tool kinds an ``invokes`` hop may name (``authority_chain.TOOL_NODE_KINDS``),
 #: spelled out so the schema is this module's to read, and pinned equal by test.
 TOOL_KINDS: frozenset[str] = frozenset({"tool", "mcp_server", "skill"})
@@ -146,6 +172,18 @@ PRESENTED_FIELDS = frozenset({"approval_digest", "contracts", "route_fingerprint
 CONTRACT_FIELDS = frozenset({"kind", "identifier", "digest"})
 #: v3's ``dispatch.verified``: what the gate verified itself, exactly these fields.
 VERIFIED_FIELDS = frozenset({"approvals_digest", "workflow_approval"})
+#: v4's ``dispatch.verified``: v3's, the tool contract the gate verified for the
+#: dispatched tool, and the permit's approval recipients -- exactly these four.
+VERIFIED_FIELDS_V4 = VERIFIED_FIELDS | {"tool_contract", "approval_recipients"}
+#: One approval-recipient entry of a v4 document: the permit's, without its nonce.
+RECIPIENT_FIELDS = frozenset({"obligation", "approval", "recipient", "destination", "tenant"})
+#: An approval whose MAC binds the destination and tenant it names, and a legacy one
+#: that binds neither -- Achilles' words (``achilles.action_gate.RECIPIENT_BOUND``).
+RECIPIENT_BOUND = "bound"
+RECIPIENT_UNBOUND = "unbound"
+#: The most approval-recipient entries one dispatch may carry: a write bound, as
+#: :data:`MAX_PRESENTED_CONTRACTS` is.
+MAX_APPROVAL_RECIPIENTS = 100
 #: The gate's reading of this backend's workflow approval in force, exactly these.
 READING_FIELDS = frozenset({"deployment", "workflow", "version", "digest", "read_at"})
 _VERSION = re.compile(r"^[1-9][0-9]{0,18}$")
@@ -172,7 +210,7 @@ MAX_BODY_BYTES = oc.MAX_PAYLOAD_B64 + 16 * 1024
 
 
 class EvidenceRefused(ValueError):
-    """A document that is not a ``mythos.observed-effect`` evidence document (v1, v2 or v3)."""
+    """A document that is not a ``mythos.observed-effect`` evidence document (v1 to v4)."""
 
 
 # ----------------------------------------------------------------- the document
@@ -239,19 +277,11 @@ def _fullmatch(value: Any, pattern: re.Pattern[str], name: str, what: str) -> st
     return value
 
 
-def _validate_verified(raw: Any) -> None:
-    """v3's ``dispatch.verified``, exactly as Achilles spells it: ``approvals_digest``
-    null or a ``sha256:`` digest; ``workflow_approval`` null or the gate's reading --
-    its fields matched whole, so a trailing newline is not a digest."""
-    name = "dispatch.verified"
-    if not isinstance(raw, dict) or set(raw) != VERIFIED_FIELDS:
-        raise EvidenceRefused(f"{name} has exactly the fields {sorted(VERIFIED_FIELDS)}")
-    if raw["approvals_digest"] is not None:
-        _fullmatch(raw["approvals_digest"], _DIGEST, f"{name}.approvals_digest", "null or a sha256 digest")
-    reading = raw["workflow_approval"]
+def _validate_reading(reading: Any, where: str) -> None:
+    """The gate's reading of the approval in force, as v3 and v4 spell it: null, or
+    exactly :data:`READING_FIELDS`, each matched whole."""
     if reading is None:
         return
-    where = f"{name}.workflow_approval"
     if not isinstance(reading, dict) or set(reading) != READING_FIELDS:
         raise EvidenceRefused(f"{where} is null or has exactly the fields {sorted(READING_FIELDS)}")
     _fullmatch(reading["deployment"], _TOKEN, f"{where}.deployment", "a deployment token")
@@ -261,8 +291,85 @@ def _validate_verified(raw: Any) -> None:
     _fullmatch(reading["read_at"], _INSTANT, f"{where}.read_at", "YYYY-MM-DDTHH:MM:SS.ffffffZ")
 
 
+def _validate_tool_contract(raw: Any, where: str) -> None:
+    """v4's ``tool_contract``: null, or exactly ``{"kind", "identifier", "digest"}`` --
+    a tool kind, the tool's identifier and a 64-hex contract digest, matched whole."""
+    if raw is None:
+        return
+    if not isinstance(raw, dict) or set(raw) != CONTRACT_FIELDS:
+        raise EvidenceRefused(f"{where} is null or has exactly the fields {sorted(CONTRACT_FIELDS)}")
+    if raw["kind"] not in TOOL_KINDS:
+        raise EvidenceRefused(f"{where}.kind is one of {sorted(TOOL_KINDS)}")
+    _text(raw["identifier"], f"{where}.identifier")
+    _fullmatch(raw["digest"], _HEX64, f"{where}.digest", "64 lowercase hex characters")
+
+
+def _validate_recipients(raw: Any, where: str) -> None:
+    """v4's ``approval_recipients``: a list (``[]`` for a permit resting on no
+    approval) of exactly :data:`RECIPIENT_FIELDS` -- no nonce -- each naming its
+    obligation, the approval (``""`` or a ``sha256:`` id), and whether its MAC binds
+    the recipient: ``"bound"`` with the destination and tenant it binds (text, empty
+    allowed), or ``"unbound"`` with both null."""
+    if not isinstance(raw, list) or len(raw) > MAX_APPROVAL_RECIPIENTS:
+        raise EvidenceRefused(f"{where} is a list of at most {MAX_APPROVAL_RECIPIENTS}")
+    for i, entry in enumerate(raw):
+        at = f"{where}[{i}]"
+        if not isinstance(entry, dict) or set(entry) != RECIPIENT_FIELDS:
+            raise EvidenceRefused(f"{at} has exactly the fields {sorted(RECIPIENT_FIELDS)}")
+        _text(entry["obligation"], f"{at}.obligation")
+        if entry["approval"] != "":
+            _fullmatch(entry["approval"], _DIGEST, f"{at}.approval", "empty or a sha256 digest")
+        word = entry["recipient"]
+        if word == RECIPIENT_UNBOUND:
+            if entry["destination"] is not None or entry["tenant"] is not None:
+                raise EvidenceRefused(f"{at} is unbound: a legacy approval binds no destination and no tenant")
+        elif word == RECIPIENT_BOUND:
+            _text(entry["destination"], f"{at}.destination", allow_empty=True)
+            _text(entry["tenant"], f"{at}.tenant", allow_empty=True)
+        else:
+            raise EvidenceRefused(f"{at}.recipient is {RECIPIENT_BOUND!r} or {RECIPIENT_UNBOUND!r}")
+    order = [_recipient_order(entry) for entry in raw]
+    if order != sorted(order):
+        raise EvidenceRefused(f"{where} is sorted by {list(RECIPIENT_ORDER)}")
+
+
+#: The fields v4's ``approval_recipients`` is sorted by, in this order: Achilles'
+#: ``observed_effect.VERIFIED_RECIPIENT_FIELDS``. Never the permit MAC's order, which
+#: is keyed by the nonces the document leaves out.
+RECIPIENT_ORDER: tuple[str, ...] = ("obligation", "approval", "recipient", "destination", "tenant")
+
+
+def _recipient_order(entry: dict) -> tuple[str, ...]:
+    """An entry's sort key, as Achilles' ``observed_effect.recipient_order`` takes it:
+    each field of :data:`RECIPIENT_ORDER` as text, a null as ``""``."""
+    return tuple("" if entry[name] is None else str(entry[name]) for name in RECIPIENT_ORDER)
+
+
+def _validate_verified(raw: Any, schema: str = EVIDENCE_SCHEMA_V3) -> None:
+    """v3's ``dispatch.verified``, exactly as Achilles spells it: ``approvals_digest``
+    null or a ``sha256:`` digest; ``workflow_approval`` null or the gate's reading --
+    its fields matched whole, so a trailing newline is not a digest. v4's: exactly
+    those and ``tool_contract`` and ``approval_recipients``, no more, no fewer."""
+    name = "dispatch.verified"
+    fields = VERIFIED_FIELDS_V4 if schema == EVIDENCE_SCHEMA_V4 else VERIFIED_FIELDS
+    if not isinstance(raw, dict) or set(raw) != fields:
+        raise EvidenceRefused(f"{name} has exactly the fields {sorted(fields)}")
+    if raw["approvals_digest"] is not None:
+        _fullmatch(raw["approvals_digest"], _DIGEST, f"{name}.approvals_digest", "null or a sha256 digest")
+    _validate_reading(raw["workflow_approval"], f"{name}.workflow_approval")
+    if schema != EVIDENCE_SCHEMA_V4:
+        return
+    _validate_tool_contract(raw["tool_contract"], f"{name}.tool_contract")
+    if raw["tool_contract"] is not None and raw["workflow_approval"] is None:
+        raise EvidenceRefused(
+            f"{name}.tool_contract is the contract the gate verified under the approval it read, so it is null "
+            "when workflow_approval is"
+        )
+    _validate_recipients(raw["approval_recipients"], f"{name}.approval_recipients")
+
+
 def _validate_dispatch(block: Any, schema: str = EVIDENCE_SCHEMA_V2) -> None:
-    fields = DISPATCH_FIELDS | {"verified"} if schema == EVIDENCE_SCHEMA else DISPATCH_FIELDS
+    fields = DISPATCH_FIELDS | {"verified"} if schema in VERIFIED_SCHEMAS else DISPATCH_FIELDS
     if not isinstance(block, dict) or set(block) != fields:
         raise EvidenceRefused(f"dispatch has exactly the fields {sorted(fields)}")
     _match(block["dispatched_at"], _INSTANT, "dispatch.dispatched_at", "YYYY-MM-DDTHH:MM:SS.ffffffZ")
@@ -274,16 +381,17 @@ def _validate_dispatch(block: Any, schema: str = EVIDENCE_SCHEMA_V2) -> None:
         if block[name] != "":
             _match(block[name], _DIGEST, f"dispatch.{name}", "empty or a sha256 digest")
     _validate_presented(block["presented"])
-    if schema == EVIDENCE_SCHEMA:
-        _validate_verified(block["verified"])
+    if schema in VERIFIED_SCHEMAS:
+        _validate_verified(block["verified"], schema)
 
 
 def validate_evidence(document: Any) -> dict[str, Any]:
-    """``document`` if it is a ``mythos.observed-effect/v3`` evidence document -- or a
-    ``v2`` one, which is v3 without ``dispatch.verified``, or a ``v1`` one, which is v2
-    without its ``dispatch`` block -- else :class:`EvidenceRefused` naming the first
-    thing wrong. Exactly the fields, no more, at every level -- Achilles' own rules,
-    checked against the same vectors."""
+    """``document`` if it is a ``mythos.observed-effect/v4`` evidence document -- or a
+    ``v3`` one, whose ``dispatch.verified`` holds two of v4's four fields, a ``v2`` one,
+    which is v3 without ``dispatch.verified``, or a ``v1`` one, which is v2 without its
+    ``dispatch`` block -- else :class:`EvidenceRefused` naming the first thing wrong.
+    Exactly the fields, no more, at every level -- Achilles' own rules, checked against
+    the same vectors."""
     if not isinstance(document, dict):
         raise EvidenceRefused("the evidence is an object")
     schema = document.get("schema")
@@ -300,7 +408,7 @@ def validate_evidence(document: Any) -> dict[str, Any]:
         _validate_dispatch(document["dispatch"], schema)
     _match(document["deployment"], _TOKEN, "deployment", "a deployment token")
     _match(document["workflow"], _SLUG, "workflow", "a workflow slug")
-    if schema == EVIDENCE_SCHEMA:
+    if schema in VERIFIED_SCHEMAS:
         reading = document["dispatch"]["verified"]["workflow_approval"]
         if reading is not None and (
             reading["deployment"] != document["deployment"] or reading["workflow"] != document["workflow"]
@@ -314,6 +422,13 @@ def validate_evidence(document: Any) -> dict[str, Any]:
     if tool["kind"] not in TOOL_KINDS:
         raise EvidenceRefused(f"tool.kind is one of {sorted(TOOL_KINDS)}")
     _text(tool["identifier"], "tool.identifier")
+    if schema == EVIDENCE_SCHEMA_V4:
+        contract = document["dispatch"]["verified"]["tool_contract"]
+        if contract is not None and (contract["kind"], contract["identifier"]) != (tool["kind"], tool["identifier"]):
+            raise EvidenceRefused(
+                "dispatch.verified.tool_contract is the contract of the dispatched tool, and names another tool "
+                "than the document's"
+            )
     _text(document["action"], "action")
     _match(document["action_digest"], _HEX64, "action_digest", "64 lowercase hex characters")
     _match(document["permit_digest"], _DIGEST, "permit_digest", "'sha256:' and 64 hex characters")
@@ -385,6 +500,19 @@ def evidence_in_force(row, deployment_uuid: str) -> dict | None:
     ):
         return None
     return document
+
+
+def approval_recipients(row, deployment_uuid: str) -> list[dict] | None:
+    """The approval-recipient entries the permit of ``row``'s dispatch bound, exactly
+    as a v4 document signs them (``dispatch.verified.approval_recipients``; ``[]`` for a
+    permit resting on no approval) -- read from the document its signed digest names
+    (:func:`evidence_in_force`), never from a column of its own. ``None`` for every
+    other row: a v1, v2 or v3 document records none, and a row with no document in
+    force has nothing to say."""
+    document = evidence_in_force(row, deployment_uuid)
+    if document is None or document["schema"] != EVIDENCE_SCHEMA_V4:
+        return None
+    return [dict(entry) for entry in document["dispatch"]["verified"]["approval_recipients"]]
 
 
 # ---------------------------------------------------------------- the body
@@ -489,6 +617,8 @@ class IsObservedEffectService(BasePermission):
 
 __all__ = [
     "EVIDENCE_SCHEMA",
+    "EVIDENCE_SCHEMA_V3",
+    "EVIDENCE_SCHEMA_V4",
     "HEADER",
     "MAX_BODY_BYTES",
     "TOKEN_ENV",
@@ -497,6 +627,7 @@ __all__ = [
     "EvidenceRefused",
     "IsObservedEffectService",
     "ObservedEffectServiceAuthentication",
+    "approval_recipients",
     "evidence_in_force",
     "examine",
     "read_body",
