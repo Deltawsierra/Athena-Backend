@@ -59,14 +59,9 @@ class HistoryQuerySet(models.QuerySet):
     ):
         if update_conflicts:
             raise self.refused(self.rewritten)
-        return super().bulk_create(
-            objs,
-            batch_size=batch_size,
-            ignore_conflicts=ignore_conflicts,
-            update_conflicts=update_conflicts,
-            update_fields=update_fields,
-            unique_fields=unique_fields,
-        )
+        # Not an upsert. Django reads update_fields and unique_fields only for one, so
+        # they are not passed on, and this override names no column it could write.
+        return super().bulk_create(objs, batch_size=batch_size, ignore_conflicts=ignore_conflicts)
 
 
 def _refused_move(manager):

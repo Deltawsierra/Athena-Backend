@@ -3868,12 +3868,13 @@ class ApprovalVersion(models.Model):
     (:class:`ApprovalVersionRewriteRefused`; :mod:`assurance.append_only`). A
     gate-attested hop names its version by this row's id (the version Achilles' gate
     read from :mod:`assurance.gate_approval` and signed), so the row must go on saying
-    what was signed. Two writes still reach a recorded row, both through the base manager, which
-    stays Django's plain one: the deployment's cascade removes it, and removing a
-    declarer's account nulls ``declared_by`` (below) -- a stop, never held back by this
-    history. An approval that returns to an earlier digest is appended again: the history
-    says it moved and came back. Keyed by the workflow's slug rather than a foreign key,
-    so withdrawing the approval never deletes the record of what it was.
+    what was signed. Two writes still reach a recorded row, both through the base
+    manager, which stays Django's plain one: the deployment's cascade removes it, and
+    removing a declarer's account nulls ``declared_by`` (below) -- a stop, never held
+    back by this history. An approval that returns to an earlier digest is appended
+    again: the history says it moved and came back. Keyed by the workflow's slug rather
+    than a foreign key, so withdrawing the approval never deletes the record of what it
+    was.
 
     WHO DECLARED IT (``declared_by``): the signed-in person whose write moved the
     approval to this version, as ``ToolContractBinding.bound_by`` records who bound a

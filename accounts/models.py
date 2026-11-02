@@ -101,8 +101,8 @@ class RoleGrant(models.Model):
     username, never a foreign key, so removing an operator (a stop) neither cascades
     here nor writes anything. Written only on a promotion, never on a demotion, a
     deactivation or a removal; append-only (its ``save`` refuses an update, its queryset
-    an upsert). An account given its role before grants
-    were recorded has none, and no approval is refused for it by this rule.
+    an upsert). An account given its role before grants were recorded has none, and no
+    approval is refused for it by this rule.
 
     A grant that names its granter is also emitted, once it commits, as a signed
     delegation record (assurance.identity_emitter, authority chain short 2); a record
