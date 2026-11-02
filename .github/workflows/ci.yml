@@ -139,8 +139,10 @@ jobs:
   # The owner runs this service on Windows (PowerShell, Python 3.12). This job installs
   # it there, imports what Windows used to refuse to import (mythos_core.http and
   # mythos_core.failsafe, which the pentest app -- the scan's Stop route -- and the
-  # failsafe plane load at start), and runs the tests that must pass there: the pin
-  # guard on Windows paths, the stop paths, and the Windows-equivalent tests for the
+  # failsafe plane load at start), and runs the tests that must pass there: the wiring
+  # of the shared pin guard (Mythos-Core's pinguard, which starts every pytest run here
+  # and judges this Windows install by Windows path rules; its own tests run on
+  # windows-latest in Mythos-Core), the stop paths, and the Windows-equivalent tests for the
   # two places this service used POSIX-only calls (economics/capacity.py without fcntl,
   # oplog.py without select on stderr). It does not run tests/test_economics_run_cap.py
   # as a file: that file asserts the flock slots themselves, which Windows has no fcntl
@@ -188,8 +190,7 @@ jobs:
         shell: bash
         run: |
           pytest \
-            tests/test_mythos_core_pin.py \
-            tests/test_mythos_core_provenance.py \
+            tests/test_pin_guard.py \
             tests/test_economics_run_cap_without_fcntl.py \
             tests/test_oplog_without_select.py \
             tests/test_failsafe_control_plane.py \
