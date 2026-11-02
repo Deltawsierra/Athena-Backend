@@ -66,7 +66,7 @@ from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from accounts.models import RoleGrant
-from assurance import gate_approval, observed_effects
+from assurance import gate_approval, observed_effects, recovery_record
 from assurance.economics import models as econ
 from assurance.models import (
     AchillesScanRefusal,
@@ -86,6 +86,8 @@ from assurance.models import (
     Finding,
     IdentityEvidence,
     IdentityEvidenceRewriteRefused,
+    RecoveryRecord,
+    RecoveryRecordRewriteRefused,
     RepairContract,
     RetestCheck,
     RetestClosureEvidence,
@@ -119,6 +121,7 @@ APPEND_ONLY = {
     EffectReconciliationReceipt: EffectReconciliationRewriteRefused,
     AchillesScanResult: AchillesScanRewriteRefused,
     AchillesScanRefusal: AchillesScanRewriteRefused,
+    RecoveryRecord: RecoveryRecordRewriteRefused,
     **{
         model: econ.EconomicsRewriteRefused
         for model in (
@@ -208,6 +211,9 @@ class World:
         self.grantee = User.objects.create_user(username="grantee", password="x", role="analyst")
         self.finding = self._finding("fp-kept")
         self.asset = Asset.objects.create(deployment=self.dep, kind=Asset.Kind.MCP_SERVER, name="crm", identifier="crm-mcp")
+        # A recovery step is the first of its own incident's, so each built one is
+        # derived and its build reads nothing (the imposter is built inside a capture).
+        self.incidents = {n: self._finding(f"fp-incident-{n}") for n in range(1, 10)}
         self.rows = {}
         for model, (build, _field, _value) in RECORDS.items():
             self.rows[model] = build(self, 1)
@@ -338,6 +344,16 @@ def _scan_refusal(w, n):
     return AchillesScanRefusal(deployment=w.dep, code="tampered", reason=f"the signed digest does not match ({n})")
 
 
+def _recovery_record(w, n, finding=None):
+    finding = finding or w.incidents[n]
+    links = {
+        "incident": str(finding.uuid), "evidence": [], "permits": [], "receipts": [], "decision": None,
+        "repair_contract": None, "closure_evidence": None, "unknowns": [], "gaps": [], "restrictions": [],
+        "uncertainty": [],
+    }
+    return recovery_record.draft(finding, version=1, links=links, recorded_by=w.leaver, recorded_at=NOW)
+
+
 #: Every append-only record outside economics: an unsaved row of it (the n-th, so
 #: several can be written), the column an upsert would rewrite, and what to.
 RECORDS = {
@@ -351,6 +367,8 @@ RECORDS = {
     EffectReconciliationReceipt: (_reconciliation, "answer", "not_applied"),
     AchillesScanResult: (_scan_result, "scan_status", "aborted"),
     AchillesScanRefusal: (_scan_refusal, "reason", "nothing was refused"),
+    # Not `state`: every derived field is refused at save unless derived, before the key is.
+    RecoveryRecord: (_recovery_record, "recorded_at", NOW - timedelta(days=1)),
 }
 
 ECONOMICS_ROWS = (
@@ -626,7 +644,7 @@ def test_removing_an_operator_nulls_every_history_column_naming_them_and_nothing
             if field.related_model is User and getattr(row, field.attname) == leaver.pk:
                 named.setdefault(model, []).append(field.attname)
     assert set(named) >= {
-        ApprovalVersion, AuthorityChain, RepairContract, econ.FinancialSource, econ.ModelInventoryEntry,
+        ApprovalVersion, AuthorityChain, RepairContract, RecoveryRecord, econ.FinancialSource, econ.ModelInventoryEntry,
         econ.FinancialScenario, econ.ScenarioReview, econ.SensitiveOverride, econ.OverrideApproval,
         econ.OverrideRevocation,
     }, named
@@ -654,6 +672,8 @@ def test_the_deployments_cascade_still_takes_its_history_and_only_its_own(world)
         row = build(world, 6)
         if model is RepairContract:
             row.finding = world._finding("fp-elsewhere", deployment=world.other)
+        elif model is RecoveryRecord:
+            row = _recovery_record(world, 6, world._finding("fp-incident-elsewhere", deployment=world.other))
         elif hasattr(row, "deployment_id"):
             row.deployment = world.other
         if model is ToolContract:
@@ -662,6 +682,7 @@ def test_the_deployments_cascade_still_takes_its_history_and_only_its_own(world)
         elsewhere[model] = (row, _stored(row))
     gone = {model: row.pk for model, row in world.rows.items() if getattr(row, "deployment_id", 0) == world.dep.pk}
     gone[RepairContract] = world.rows[RepairContract].pk
+    gone[RecoveryRecord] = world.rows[RecoveryRecord].pk
     assert set(gone) >= set(RECORDS) - {RoleGrant}
 
     world.dep.delete()
