@@ -385,7 +385,11 @@ those reads (`assurance/history_reads.py`). Each is a GET, newest first, bounded
   PUT's own writes. It is `null` where nobody is on record: a version noted with no
   person behind it (the decision refresh's catch-up note, a shell or a data fix), one
   recorded before the column existed (never backfilled) and one whose declarer's
-  account was removed.
+  account was removed. The history is append-only, as the graph's edge history is: a
+  recorded version is never rewritten or deleted, one row or in bulk (a queryset
+  `update()`, `bulk_update()` or `delete()` is refused), because a gate-attested hop
+  cites it by its `version` id. It goes only with its deployment, and removing a
+  declarer's account (a stop) only nulls `declared_by`; neither is held back.
 - `GET .../tool-contracts/` (`?kind=`, `?identifier=`): every recorded tool contract,
   when it was recorded and superseded, the contract in force now (`null` for a tool no
   longer registered) and whether this is it, for every tool, bound or not.

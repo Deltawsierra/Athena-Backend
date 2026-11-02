@@ -268,7 +268,9 @@ def test_the_history_level_check_covers_the_tools_as_well_as_the_digest(gate):
     approval: the version the gate signs must bind exactly the tools it was told."""
     dep, _client, _permit, _ = _world()
     latest = _latest(dep)
-    ApprovalVersion.objects.filter(pk=latest.pk).update(tools=[["mcp_server", "crm-mcp", "f0" * 32]])
+    # The history refuses a queryset update to every writer; the row is moved past the
+    # refusals (the base manager) to make it disagree.
+    ApprovalVersion._base_manager.filter(pk=latest.pk).update(tools=[["mcp_server", "crm-mcp", "f0" * 32]])
 
     stale = gate.get(_url(dep, "?include=tools"))
 

@@ -470,7 +470,7 @@ def _chains(dep, rank: int, client, clock: Clock):
     assert put.status_code == 200, put.content
     # The approval, contracts, route and edges as noted an hour before the dispatch.
     earlier = clock.now() - timedelta(hours=1)
-    ApprovalVersion.objects.filter(deployment=dep).update(in_force_from=earlier)
+    ApprovalVersion._base_manager.filter(deployment=dep).update(in_force_from=earlier)
     ToolContract.objects.filter(deployment=dep).update(recorded_at=earlier)
     ServedRouteNote.objects.filter(deployment=dep).update(since=earlier)
     AuthorityEdgeVersion._base_manager.filter(deployment=dep).update(noticed_at=earlier)
