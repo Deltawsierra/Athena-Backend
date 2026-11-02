@@ -36,11 +36,18 @@ no write noted and whose it was is not known, and a signal outside any declarati
 shell, a data fix, the invalidation engine marking a binding). Never inferred from the
 approval's ``approved_by``, which is who last declared the approval as it stands.
 
-Never on a stop path. No stop writes an approval, and the refresh's note never
-raises: a failure is logged and the next note takes it. The one stop that reaches a
-recorded version is an operator's removal, which nulls the ``declared_by`` of every
-version they declared through the base manager, past the history's refusals, so the
-history never holds it back.
+Never on a stop path, and never holding one back. What each stop writes here:
+
+- Removing an operator (``accounts:user-detail`` DELETE) is the ONE stop that writes a
+  recorded version, and one column of it: ``declared_by`` is nulled on every version
+  that operator declared (``SET_NULL``, which Django runs as an ``UPDATE`` through the
+  base manager, past the history's refusals, so the history never holds it back).
+  Every other column stays, and no version is appended.
+- No stop notes a version. A version is noted for an approved workflow saved or
+  deleted and for a workflow's tool binding saved, and no stop route writes either; a
+  pause issues no approval-history SQL at all.
+- The decision refresh's catch-up note (:func:`note_approvals_quietly`), wherever it
+  runs, never raises: a failure is logged and the next note takes it.
 """
 
 from __future__ import annotations

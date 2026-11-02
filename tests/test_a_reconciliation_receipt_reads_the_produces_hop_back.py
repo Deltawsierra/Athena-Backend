@@ -660,7 +660,9 @@ def test_a_column_edited_after_the_fact_proves_nothing(service):
     _record_chain(client, dep, permit.outcome_id)
     row = signed_chains.record_reconciliation(dep, WF, permit.outcome_id, "not_applied")
     assert _produces(_chain(client, dep))["verdict"] == "broken"
-    _receipts().filter(pk=row.pk).update(answer="applied", conclusion="committed")
+    # Past the receipt's refusals (its queryset refuses an update): the base manager, as
+    # a shell or a data fix would write.
+    _receipts().model._base_manager.filter(pk=row.pk).update(answer="applied", conclusion="committed")
     chain = _chain(client, dep)
     assert _codes(_produces(chain)) == ["effect_not_observed"]
     assert chain["reconciliations"][0]["verified"] is False

@@ -485,8 +485,11 @@ def test_a_record_edited_after_it_was_recorded_proves_nothing(collectors):
     dep, client, hops, _ = _chain_after(collectors, _sign_in, [_grant])
     assert hops["authenticated_as"]["verdict"] == "proven"
     row = IdentityEvidence.objects.get(kind="authentication")
-    # The append-only model refuses a save; a queryset update is what a shell could do.
-    IdentityEvidence.objects.filter(pk=row.pk).update(document={**row.document, "expires_at": "2999-01-01T00:00:00.000000Z"})
+    # The append-only model refuses a save and its queryset an update; the base manager
+    # is what a shell could still write through.
+    IdentityEvidence._base_manager.filter(pk=row.pk).update(
+        document={**row.document, "expires_at": "2999-01-01T00:00:00.000000Z"}
+    )
     assert _codes(_hops(_chains(client, dep)[0])["authenticated_as"]) == ["no_authentication_record"]
 
 

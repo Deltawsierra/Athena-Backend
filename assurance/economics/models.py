@@ -13,8 +13,11 @@ The rules themselves are pure functions in :mod:`assurance.economics.engine.gove
 each model calls them on save and refuses a write with the rule's code
 (:class:`EconomicsRefused`). Every model here is APPEND-ONLY, as the assurance
 history is: a recorded row is never edited or deleted (:class:`EconomicsRewriteRefused`),
-its queryset refuses a bulk update, delete or create, and a row goes only with its
-deployment. A change is a new row: a new version of a source, a new revision of an
+its queryset refuses a bulk update, delete or create (an upsert among them), no foreign
+key's reverse accessor moves one (:mod:`assurance.append_only`: most keys have none, and
+the six read -- ``superseded_by``, ``reviews``, ``approvals``, ``revocations``,
+``fx_observations``, ``cost_index_observations`` -- refuse a move), and a row goes only
+with its deployment. A change is a new row: a new version of a source, a new revision of an
 inventory entry, a scenario that supersedes another.
 
 The refusals guard the ORM paths code is written against, not the table. The base
@@ -50,6 +53,7 @@ from django.db import models, transaction
 from django.db.models import F, Max, Q
 from django.utils import timezone
 
+from ..append_only import HistoryForeignKey, HistoryQuerySet
 from . import row_mac as _row_mac
 from .engine import cost_index, figure_normalization, formulas, fx, governance, money, parameters
 from .engine import pack_inputs as pack_schemas
@@ -240,9 +244,15 @@ class SourceNotUsableForProduction(EconomicsRefused):
     :func:`runs_in_production`) a source still trusted as ``unverified``."""
 
 
-class AppendOnlyQuerySet(models.QuerySet):
+class AppendOnlyQuerySet(HistoryQuerySet):
     """Refuses every bulk write: a recorded row is never rewritten or deleted, and a
-    new one is written through ``save``, where its model's checks run."""
+    new one is written through ``save``, where its model's checks run. So an upsert is
+    refused with every other ``bulk_create``, and a reverse accessor that reads these
+    records refuses a move with :class:`EconomicsRewriteRefused`
+    (:mod:`assurance.append_only`)."""
+
+    refused = EconomicsRewriteRefused
+    rewritten = "Economics records are never rewritten; record a new row."
 
     def update(self, **kwargs):
         raise EconomicsRewriteRefused("Economics records are never rewritten; record a new row.")
@@ -487,7 +497,7 @@ class FinancialSource(_AppendOnly):
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        related_name="financial_sources",
+        related_name="+",
     )
     source_key = models.SlugField(max_length=200)
     version = models.PositiveIntegerField()
@@ -526,7 +536,7 @@ class FinancialSource(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_sources_recorded",
+        related_name="+",
     )
     recorded_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
@@ -862,7 +872,7 @@ class FinancialSourceTrustRaise(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    from_version = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="trust_raises")
+    from_version = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="+")
     # The version the raise recorded: empty until it is done.
     to_version = models.OneToOneField(
         FinancialSource, on_delete=models.CASCADE, null=True, blank=True, related_name="raised_by"
@@ -878,7 +888,7 @@ class FinancialSourceTrustRaise(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_trust_raises_requested",
+        related_name="+",
     )
     requested_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     requested_at = models.DateTimeField(default=timezone.now)
@@ -887,7 +897,7 @@ class FinancialSourceTrustRaise(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_trust_raises_approved",
+        related_name="+",
     )
     approved_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     approved_at = models.DateTimeField(null=True, blank=True)
@@ -896,7 +906,7 @@ class FinancialSourceTrustRaise(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_trust_raises_withdrawn",
+        related_name="+",
     )
     withdrawn_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     withdrawn_at = models.DateTimeField(null=True, blank=True)
@@ -1268,7 +1278,7 @@ class ModelInventoryEntry(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_inventory_recorded",
+        related_name="+",
     )
     recorded_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
@@ -1331,7 +1341,7 @@ class FinancialScenario(_AppendOnly):
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
     deployment = models.ForeignKey(
-        "assurance.Deployment", on_delete=models.CASCADE, related_name="financial_scenarios"
+        "assurance.Deployment", on_delete=models.CASCADE, related_name="+"
     )
     title = models.CharField(max_length=255)
     system_fingerprint = models.CharField(max_length=64, blank=True)
@@ -1339,7 +1349,7 @@ class FinancialScenario(_AppendOnly):
     # where the version was recorded before the builder recorded any).
     system_fingerprint_unavailable = models.TextField(blank=True, default="")
     causal_effect = models.CharField(max_length=71, blank=True)
-    supersedes = models.ForeignKey(
+    supersedes = HistoryForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="superseded_by"
     )
     # Null when a machine drafted the version; see ScenarioReview.
@@ -1348,7 +1358,7 @@ class FinancialScenario(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_scenarios_authored",
+        related_name="+",
     )
     author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
@@ -1439,13 +1449,13 @@ class ScenarioReview(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="reviews")
+    scenario = HistoryForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="reviews")
     reviewer = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_reviews",
+        related_name="+",
     )
     reviewer_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     verdict = models.CharField(max_length=16, choices=Verdict.choices)
@@ -1622,7 +1632,7 @@ class SensitiveOverride(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="sensitive_overrides")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
     # What is overridden: a parameter's or a value's name.
     subject = models.CharField(max_length=200)
     reason = models.TextField()
@@ -1631,7 +1641,7 @@ class SensitiveOverride(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_overrides_requested",
+        related_name="+",
     )
     requested_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     requested_at = models.DateTimeField(default=timezone.now)
@@ -1735,13 +1745,13 @@ class OverrideApproval(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    override = models.ForeignKey(SensitiveOverride, on_delete=models.CASCADE, related_name="approvals")
+    override = HistoryForeignKey(SensitiveOverride, on_delete=models.CASCADE, related_name="approvals")
     approver = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_override_approvals",
+        related_name="+",
     )
     approver_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     approved_at = models.DateTimeField(default=timezone.now)
@@ -1805,13 +1815,13 @@ class OverrideRevocation(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    override = models.ForeignKey(SensitiveOverride, on_delete=models.CASCADE, related_name="revocations")
+    override = HistoryForeignKey(SensitiveOverride, on_delete=models.CASCADE, related_name="revocations")
     revoked_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_override_revocations",
+        related_name="+",
     )
     revoked_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     reason = models.TextField(blank=True, default="")
@@ -1897,7 +1907,7 @@ class FXObservation(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    source = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="fx_observations")
+    source = HistoryForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="fx_observations")
     base_currency = models.CharField(max_length=3)
     quote_currency = models.CharField(max_length=3)
     rate = models.DecimalField(max_digits=RATE_DIGITS, decimal_places=RATE_PLACES)
@@ -1995,7 +2005,7 @@ class CostIndexObservation(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    source = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="cost_index_observations")
+    source = HistoryForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="cost_index_observations")
     series_id = models.CharField(max_length=100)
     geography = models.CharField(max_length=32)
     category = models.CharField(max_length=200)
@@ -2448,7 +2458,7 @@ class CustomerParameterSet(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_parameter_sets_authored",
+        related_name="+",
     )
     author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
@@ -4061,7 +4071,7 @@ class RemediationOption(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_remediation_options_authored",
+        related_name="+",
     )
     author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
@@ -4347,7 +4357,7 @@ class ExposureRefresh(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_refreshes_authored",
+        related_name="+",
     )
     author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     closed_at = models.DateTimeField(default=timezone.now)
@@ -4456,7 +4466,7 @@ class CorrelationGroup(_AppendOnly):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="economics_correlation_groups_authored",
+        related_name="+",
     )
     author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
