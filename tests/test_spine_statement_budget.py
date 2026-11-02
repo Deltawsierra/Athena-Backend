@@ -270,10 +270,15 @@ _SAVEPOINTS = ("SAVEPOINT", "RELEASE", "ROLLBACK")
 
 
 def _most_repeated(statements, *, top: int = 2) -> str:
-    """The statements a path issued most often, savepoints aside: where an N+1 shows."""
+    """The statements a path issued most often, savepoints aside -- where an N+1 shows --
+    each with its column list cut, so the table and the condition read."""
     reads = Counter(_shape(sql) for sql, _ in statements if not sql.lstrip().upper().startswith(_SAVEPOINTS))
-    repeated = [(n, sql) for sql, n in reads.most_common(top) if n > 1]
-    return "; ".join(f"{n} x {sql[:160]}" for n, sql in repeated) or "none repeated"
+    repeated = [
+        f"{n} x " + re.sub(r"^SELECT .+? FROM ", "SELECT ... FROM ", sql, flags=re.S)[:160]
+        for sql, n in reads.most_common(top)
+        if n > 1
+    ]
+    return "; ".join(repeated) or "none repeated"
 
 
 def statements_per_path(monkeypatch, tmp_path) -> tuple[dict, list[str]]:
@@ -319,7 +324,7 @@ def test_each_spine_path_issues_exactly_its_budgeted_statements(monkeypatch, tmp
         elif count > held:
             off.append(
                 f"{path}.{profile}: {count} statements, budget {held} -- {count - held} MORE. "
-                f"Most repeated: {_most_repeated(statements)}.\n"
+                f"Its most repeated statements: {_most_repeated(statements)}.\n"
                 "    If the rise is meant, raise the line and say on it why the path now issues more:\n"
                 f"    {_line(path, profile, count, '<one line: why>')}\n"
                 "    If not, find the statements the change added."
