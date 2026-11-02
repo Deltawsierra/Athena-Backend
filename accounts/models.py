@@ -4,6 +4,8 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
 
+from assurance.append_only import HistoryQuerySet
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,6 +82,14 @@ def rank(role, is_superuser) -> int:
     return _RANKS.get(role, 0)
 
 
+class RoleGrantQuerySet(HistoryQuerySet):
+    """Refuses an upsert of a recorded grant (:mod:`assurance.append_only`), which its
+    ``save`` never sees."""
+
+    refused = ValueError
+    rewritten = "A role grant is history and is never rewritten; record a new one."
+
+
 class RoleGrant(models.Model):
     """One promotion of one account: who granted it the role, and when (section 28
     hardening, T9b; docs/economics/spec-v1.md, section 35.6). An approval reads the
@@ -90,7 +100,8 @@ class RoleGrant(models.Model):
     request does, stops included -- reads nothing new. Accounts are named by id and
     username, never a foreign key, so removing an operator (a stop) neither cascades
     here nor writes anything. Written only on a promotion, never on a demotion, a
-    deactivation or a removal; append-only. An account given its role before grants
+    deactivation or a removal; append-only (its ``save`` refuses an update, its queryset
+    an upsert). An account given its role before grants
     were recorded has none, and no approval is refused for it by this rule.
 
     A grant that names its granter is also emitted, once it commits, as a signed
@@ -105,6 +116,8 @@ class RoleGrant(models.Model):
     granted_by_pk = models.BigIntegerField(null=True, blank=True)
     granted_by_username = models.CharField(max_length=150, blank=True, default="")
     granted_at = models.DateTimeField(default=timezone.now)
+
+    objects = RoleGrantQuerySet.as_manager()
 
     class Meta:
         ordering = ["account_pk", "granted_at", "id"]

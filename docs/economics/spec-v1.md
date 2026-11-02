@@ -128,7 +128,7 @@ Industry packs beyond banking (E7), on steps 4, 5 and 6:
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
 | Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py`; section 36: the figures a run reads normalized at build in `run_normalization.py` and `engine/figure_normalization.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_financial_source_records.py` (step 11, section 31), `0072_portfolio_results.py` (E5, section 33), `0073_exposure_assurance.py` (E6, section 34), `0074_section_28_hardening.py` (section 35), `0075_section_28_row_macs.py` (section 35.9), `0076_figure_normalizations.py` (section 36), `0077_parameter_set_pack.py` (section 37) |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_financial_source_records.py` (step 11, section 31), `0072_portfolio_results.py` (E5, section 33), `0073_exposure_assurance.py` (E6, section 34), `0074_section_28_hardening.py` (section 35), `0075_section_28_row_macs.py` (section 35.9), `0076_figure_normalizations.py` (section 36), `0077_parameter_set_pack.py` (section 37), `0085_history_keys_have_no_reverse_accessor.py` (state only, no SQL: the reverse accessors of section 10) |
 | Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py`; section 36: `tests/test_economics_run_normalization.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
@@ -767,15 +767,17 @@ the licensing and legal review The Open Group's terms require first.
   called past the model's own `save`, a plain `QuerySet(model)`, raw SQL, and a
   migration. No code may use them to write an economics row: review holds that
   line, and at the database only the constraints of section 6 hold. A related
-  manager's `add()`, `set()`, `remove()` and `clear()` write through the base
-  manager's `update` too, so they could move a recorded row to another parent, even
-  another deployment's. The scenario records' foreign keys therefore have no
-  reverse accessor (`related_name="+"`), so no such manager exists for them; their
-  rows are read by filtering, and the deployment's cascade still reaches them. The
-  E0 and E1 records still have theirs (`superseded_by`, `reviews`,
-  `sensitive_overrides`, `approvals`, `financial_sources`, `financial_scenarios`,
-  `fx_observations`, `cost_index_observations`), and the same write reaches them:
-  a later change removes them. A parameter-set version moved past its seal is
+  manager's `add()` and `set()`, and on a nullable key `remove()` and `clear()`,
+  write through the base manager's `update` too, so they could move a recorded row
+  to another parent, even another deployment's. No economics record's foreign key
+  has a related manager that does (`assurance/append_only.py`): a key whose reverse
+  accessor nothing reads has none (`related_name="+"`), its rows read by filtering
+  and the deployment's cascade still reaching them; the six that are read
+  (`superseded_by`, `reviews`, `approvals`, `revocations`, `fx_observations`,
+  `cost_index_observations`) are a `HistoryForeignKey`, whose accessor reads as
+  before and refuses all four with `EconomicsRewriteRefused`. An upsert
+  (`bulk_create(update_conflicts=True)`) is refused with every other `bulk_create`.
+  A parameter-set version moved past its seal is
   detected: `intact()` re-reads its rows against the count and digest it was
   recorded with (`test_a_row_moved_past_the_append_only_checks_is_detected`).
 - **SPINE references are checked for form only.** A well-formed system
