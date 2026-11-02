@@ -1590,6 +1590,38 @@ rows. `pytest tests/spine_measure.py::test_measure` repeats the measurements; it
 `test_record_golden` rewrites the fixture, so run it only on the code before an
 optimization.
 
+### SPINE's statement budget
+
+`tests/spine_statement_budget.toml` holds one line for each SPINE path (`derive_claims`,
+`assess_ripple`, `recompute_decision`, `refresh_stored_decisions`, the refresh of a
+decision another writer left, `decision_support`) and each finding profile of the
+seeded corpus. Each line is the exact number of SQL statements that path issues there.
+`tests/test_spine_statement_budget.py` builds the corpus with the clock held and the ids
+seeded. It counts each path's statements through `connection.execute_wrapper`
+(savepoints included, on the path's second call) and compares every count with its
+line. There is no margin:
+
+- **More statements** fail, and the failure names the line, both counts and the most
+  repeated statement. If the rise is meant, raise the line and say why on the same line,
+  so the diff shows the two together:
+  `recompute_decision.all-accepted = { statements = 31, approved = "one line: why" }`.
+  `test_a_raised_line_carries_a_reason_of_its_own` refuses a raised line that has no
+  reason, a blank one, or the reason the line already carried. It compares against the
+  budget the change started from: the commit `SPINE_BUDGET_BASE` names, else where HEAD
+  left `origin/master` (and it fails, saying what to set, if neither can be read). CI sets
+  `HEAD^1`, the base side of the pull request's merge commit; under GitHub Actions an
+  unset base fails rather than compare the budget with itself.
+- **Fewer statements** fail too, until the line is lowered to the count the failure
+  reports, so the budget keeps no headroom that a later rise could spend unseen. Keep a
+  line's reason only if the rise it explains still stands.
+
+Run it with `pytest tests/test_spine_statement_budget.py`, or in PowerShell with
+`.\.venv\Scripts\python.exe -m pytest tests\test_spine_statement_budget.py`. CI runs it
+in the backend job's full suite and in the Windows job, and each run prints its own cost
+(`SPINE statement budget: ... counted in N s`). A statement count cannot see a read whose
+scope widens inside the same statement, so the Windows job also runs the
+deployment-scope test, which the Linux job's full suite already does.
+
 ## What a span carries, and the advisories this service tracks
 
 A span (`assurance/observability.py`) carries the deployment's primary key and

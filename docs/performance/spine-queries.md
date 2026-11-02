@@ -232,7 +232,14 @@ export DJANGO_SECRET_KEY=ci-secret-key-not-used-outside-ci DJANGO_DEBUG=1
 SPINE_MEASURE_OUT=spine.json pytest tests/spine_measure.py::test_measure
 # the guards
 pytest tests/test_spine_paths_publish_what_they_published.py tests/test_spine_queries_follow_their_own_deployment.py
+# the statement budget (Phase 5.5)
+pytest tests/test_spine_statement_budget.py
 ```
+
+The statement counts of these paths are held exactly, per finding profile of the
+corpus, by `tests/spine_statement_budget.toml` (Phase 5.5). A rise is raised on its line
+with a one-line reason, and a fall is lowered. The README's "SPINE's statement budget"
+says how.
 
 `tests/spine_measure.py` is collected only when named. Its `test_record_golden`
 rewrites the golden fixture: run it on the code *before* an optimization, never
