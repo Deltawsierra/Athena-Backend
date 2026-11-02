@@ -1,0 +1,58 @@
+# SPINE's statement budget (Phase 5.5): how many SQL statements each SPINE path issues,
+# exactly, over the seeded corpus (tests/spine_corpus.py), per finding profile of it.
+# tests/test_spine_statement_budget.py holds every line, with no margin:
+#
+# - a path that issues MORE fails until its line is raised, and a raised line says why on
+#   the same line, so the diff shows the rise and its reason together:
+#       recompute_decision.all-accepted = { statements = 31, approved = "one line: why" }
+#   A rise with no reason, a blank one, or the reason the line already carried is refused
+#   (against the budget the change started from: SPINE_BUDGET_BASE, else where HEAD left
+#   origin/master);
+# - a path that issues FEWER fails until its line is lowered, so the budget keeps no
+#   headroom a later rise could spend unseen.
+#
+# The test's failure names each line that moved, both counts, and the line to write.
+# One line per path and profile, so pull requests that move different lines merge
+# cleanly. The README's "SPINE's statement budget" has the rest.
+
+derive_claims.critical-open = { statements = 49 }
+derive_claims.high-open = { statements = 43 }
+derive_claims.medium-and-below = { statements = 49 }
+derive_claims.all-closed = { statements = 49 }
+derive_claims.all-accepted = { statements = 49 }
+derive_claims.no-findings = { statements = 48 }
+
+assess_ripple.critical-open = { statements = 7 }
+assess_ripple.high-open = { statements = 7 }
+assess_ripple.medium-and-below = { statements = 7 }
+assess_ripple.all-closed = { statements = 7 }
+assess_ripple.all-accepted = { statements = 7 }
+assess_ripple.no-findings = { statements = 6 }
+
+recompute_decision.critical-open = { statements = 31 }
+recompute_decision.high-open = { statements = 25 }
+recompute_decision.medium-and-below = { statements = 31 }
+recompute_decision.all-closed = { statements = 30 }
+recompute_decision.all-accepted = { statements = 30 }
+recompute_decision.no-findings = { statements = 29 }
+
+refresh_stored_decisions.critical-open = { statements = 59 }
+refresh_stored_decisions.high-open = { statements = 77 }
+refresh_stored_decisions.medium-and-below = { statements = 59 }
+refresh_stored_decisions.all-closed = { statements = 83 }
+refresh_stored_decisions.all-accepted = { statements = 58 }
+refresh_stored_decisions.no-findings = { statements = 82 }
+
+refresh_of_another_writers_decision.critical-open = { statements = 92 }
+refresh_of_another_writers_decision.high-open = { statements = 104 }
+refresh_of_another_writers_decision.medium-and-below = { statements = 92 }
+refresh_of_another_writers_decision.all-closed = { statements = 115 }
+refresh_of_another_writers_decision.all-accepted = { statements = 90 }
+refresh_of_another_writers_decision.no-findings = { statements = 113 }
+
+decision_support.critical-open = { statements = 39 }
+decision_support.high-open = { statements = 21 }
+decision_support.medium-and-below = { statements = 39 }
+decision_support.all-closed = { statements = 38 }
+decision_support.all-accepted = { statements = 38 }
+decision_support.no-findings = { statements = 37 }

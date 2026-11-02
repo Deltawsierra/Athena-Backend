@@ -15,7 +15,13 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
+      # Two commits deep: SPINE's statement budget (tests/test_spine_statement_budget.py)
+      # reads the budget file as the change found it from HEAD^1 -- the base side of a
+      # pull request's merge commit, the master before a push -- to refuse a raised line
+      # that does not say why. One commit deep, there is no HEAD^1 to read it from.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - uses: actions/setup-python@v5
         with:
@@ -133,8 +139,13 @@ jobs:
           DJANGO_SECRET_KEY: a-sufficiently-long-ci-secret-key-for-the-deploy-check-000
           DJANGO_ALLOWED_HOSTS: example.com
 
+      # The whole suite, SPINE's statement budget with it (about 7 s: the seeded corpus
+      # built once, each path counted per finding profile). SPINE_BUDGET_BASE names the
+      # commit a raised budget line is compared against (see the checkout above).
       - name: Test
         run: pytest
+        env:
+          SPINE_BUDGET_BASE: HEAD^1
 
   # The owner runs this service on Windows (PowerShell, Python 3.12). This job installs
   # it there, imports what Windows used to refuse to import (mythos_core.http and
@@ -147,16 +158,22 @@ jobs:
   # oplog.py without select on stderr). It does not run tests/test_economics_run_cap.py
   # as a file: that file asserts the flock slots themselves, which Windows has no fcntl
   # to take; tests/test_economics_run_cap_without_fcntl.py is its Windows form, and the
-  # three tests of that file that read the code, not the lock, are named below. The Linux
-  # job above still runs everything. Bash steps say `shell: bash` (Git Bash is on the
-  # runner); the rest run as PowerShell.
+  # three tests of that file that read the code, not the lock, are named below. It also
+  # holds SPINE's statement budget here, so a count that moves with the platform -- or
+  # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it.
+  # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
+  # on the runner); the rest run as PowerShell.
   backend-windows:
     runs-on: windows-latest
     env:
       DJANGO_SECRET_KEY: ci-secret-key-not-used-outside-ci
       DJANGO_DEBUG: "1"
+      # The commit a raised SPINE budget line is compared against: see the Linux job.
+      SPINE_BUDGET_BASE: HEAD^1
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - uses: actions/setup-python@v5
         with:
@@ -186,11 +203,12 @@ jobs:
           python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.economics.capacity"
           python manage.py makemigrations --check --dry-run
 
-      - name: Test (pin guard, stop paths, Windows-equivalent tests)
+      - name: Test (pin guard, stop paths, Windows-equivalent tests, SPINE's statement budget)
         shell: bash
         run: |
           pytest \
             tests/test_pin_guard.py \
+            tests/test_spine_statement_budget.py \
             tests/test_economics_run_cap_without_fcntl.py \
             tests/test_oplog_without_select.py \
             tests/test_failsafe_control_plane.py \
