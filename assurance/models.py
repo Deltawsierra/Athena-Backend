@@ -3791,6 +3791,27 @@ class ApprovalVersionRewriteRefused(ValueError):
     append-only: an approval that moved is a NEW row, and the one before it stays."""
 
 
+class ApprovalVersionQuerySet(models.QuerySet):
+    """The approval history is never edited and never deleted on its own: a queryset
+    ``update``, ``bulk_update`` or ``delete`` is refused, as a row's ``save`` and
+    ``delete`` are. It goes only with its deployment (the foreign key's cascade), and a
+    removed declarer is nulled out of ``declared_by``; Django runs both through the base
+    manager."""
+
+    def update(self, **kwargs):
+        raise ApprovalVersionRewriteRefused("The approval history is never rewritten; record a new version.")
+
+    # Refused here, not left to reach update(): Django's bulk_update would refuse inside
+    # its own atomic block and leave the caller's transaction unusable.
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ApprovalVersionRewriteRefused("The approval history is never rewritten; record a new version.")
+
+    def delete(self):
+        raise ApprovalVersionRewriteRefused("The approval history is never deleted; it goes with its deployment.")
+
+    delete.queryset_only = True
+
+
 class ApprovalVersion(models.Model):
     """One version of an approved workflow's approval, and from when it was in force.
 
@@ -3810,10 +3831,16 @@ class ApprovalVersion(models.Model):
     ``in_force_from`` until the next version of the same workflow's.
 
     APPEND-ONLY: a version that moved is a new row; the model refuses an update or a
-    delete of a recorded one (:class:`ApprovalVersionRewriteRefused`). An approval that
-    returns to an earlier digest is appended again: the history says it moved and came
-    back. Keyed by the workflow's slug rather than a foreign key, so withdrawing the
-    approval never deletes the record of what it was.
+    delete of a recorded one, and its queryset a bulk one
+    (:class:`ApprovalVersionRewriteRefused`), as the edge history's does. A gate-attested
+    hop names its version by this row's id (the version Achilles' gate read from
+    :mod:`assurance.gate_approval` and signed), so the row must go on saying what was
+    signed. Two writes still reach a recorded row, both through the base manager, which
+    stays Django's plain one: the deployment's cascade removes it, and removing a
+    declarer's account nulls ``declared_by`` (below) -- a stop, never held back by this
+    history. An approval that returns to an earlier digest is appended again: the history
+    says it moved and came back. Keyed by the workflow's slug rather than a foreign key,
+    so withdrawing the approval never deletes the record of what it was.
 
     WHO DECLARED IT (``declared_by``): the signed-in person whose write moved the
     approval to this version, as ``ToolContractBinding.bound_by`` records who bound a
@@ -3848,6 +3875,11 @@ class ApprovalVersion(models.Model):
         blank=True,
         related_name="declared_approval_versions",
     )
+
+    # The default manager: every read (the gate's, the rule's, the history route's) and
+    # every related manager go through it. Meta.base_manager_name is never set: the
+    # cascade and an account's removal write through the base manager.
+    objects = ApprovalVersionQuerySet.as_manager()
 
     class Meta:
         ordering = ["deployment", "workflow", "in_force_from", "id"]

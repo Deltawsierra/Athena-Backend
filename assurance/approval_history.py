@@ -11,8 +11,9 @@ Part 5 of the owner's 7 Oct decision reads those hops AS OF DISPATCH
 (:mod:`assurance.authority_chain`): against the approval, the contracts and the route
 in force at the instant the effect's dispatch left, which Achilles signs into the
 observed effect (``mythos.observed-effect/v2``). This module keeps the approvals'
-half of that history -- :class:`assurance.models.ApprovalVersion`, append-only -- and
-reads it back. The contracts' half already exists (:class:`assurance.models.ToolContract`,
+half of that history -- :class:`assurance.models.ApprovalVersion`, append-only: a
+recorded version is never rewritten or deleted, one row or in bulk -- and reads it
+back. The contracts' half already exists (:class:`assurance.models.ToolContract`,
 append-only, ``recorded_at``); the route's is bound per observed effect when it is
 recorded (``WorkflowChainOutcome.dispatch_route_fingerprint``).
 
@@ -36,7 +37,10 @@ shell, a data fix, the invalidation engine marking a binding). Never inferred fr
 approval's ``approved_by``, which is who last declared the approval as it stands.
 
 Never on a stop path. No stop writes an approval, and the refresh's note never
-raises: a failure is logged and the next note takes it.
+raises: a failure is logged and the next note takes it. The one stop that reaches a
+recorded version is an operator's removal, which nulls the ``declared_by`` of every
+version they declared through the base manager, past the history's refusals, so the
+history never holds it back.
 """
 
 from __future__ import annotations
