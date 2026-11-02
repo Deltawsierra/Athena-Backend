@@ -160,7 +160,10 @@ jobs:
   # to take; tests/test_economics_run_cap_without_fcntl.py is its Windows form, and the
   # three tests of that file that read the code, not the lock, are named below. It also
   # holds SPINE's statement budget here, so a count that moves with the platform -- or
-  # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it.
+  # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it,
+  # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
+  # statement (a subquery over every deployment) costs no statement, so only that test,
+  # reading the plans and the rows each statement visits, sees it.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -203,12 +206,13 @@ jobs:
           python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.economics.capacity"
           python manage.py makemigrations --check --dry-run
 
-      - name: Test (pin guard, stop paths, Windows-equivalent tests, SPINE's statement budget)
+      - name: Test (pin guard, stop paths, Windows-equivalent tests, SPINE's statement budget and scope)
         shell: bash
         run: |
           pytest \
             tests/test_pin_guard.py \
             tests/test_spine_statement_budget.py \
+            tests/test_spine_queries_follow_their_own_deployment.py \
             tests/test_economics_run_cap_without_fcntl.py \
             tests/test_oplog_without_select.py \
             tests/test_failsafe_control_plane.py \

@@ -37,6 +37,7 @@ import os
 import pathlib
 import re
 import subprocess
+import time
 import tomllib
 from collections import Counter
 
@@ -179,8 +180,15 @@ def _git(*args: str) -> str:
 def _base() -> tuple[str, dict]:
     """The budget as the change under test found it, and the commit it was read from:
     the file at ``SPINE_BUDGET_BASE`` if that is set, else where HEAD left origin/master.
-    Empty where that commit has no budget file yet."""
+    Empty where that commit has no budget file yet. Under GitHub Actions the base must be
+    named: there, a push's checkout holds origin/master AT HEAD, and the fallback would
+    compare the budget with itself."""
     named = os.environ.get("SPINE_BUDGET_BASE", "").strip()
+    if not named and os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail(
+            "SPINE_BUDGET_BASE is not set under GitHub Actions: set it to HEAD^1 on the step, with the "
+            "checkout two commits deep, or a raised budget line would be compared with itself and pass unchecked"
+        )
     if named:
         commit = _git("rev-parse", "--verify", f"{named}^{{commit}}").strip()
     else:
@@ -188,6 +196,17 @@ def _base() -> tuple[str, dict]:
     if not _git("ls-tree", "--name-only", commit, "--", BUDGET_IN_GIT).strip():
         return commit, {}
     return commit, _read(_git("show", f"{commit}:{BUDGET_IN_GIT}"), f"{BUDGET_IN_GIT} at {commit}")
+
+
+def test_an_unset_base_under_ci_fails_rather_than_passing_unchecked(monkeypatch):
+    """CI names the base (``HEAD^1``, checked out two commits deep). Left unset there, the
+    fallback would read a push's own checkout -- where origin/master IS HEAD -- and compare
+    the budget with itself, so every rise would pass unchecked. Under GitHub Actions an
+    unset base fails instead; outside it, it falls back to where HEAD left origin/master."""
+    monkeypatch.delenv("SPINE_BUDGET_BASE", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    with pytest.raises(pytest.fail.Exception, match="SPINE_BUDGET_BASE is not set under GitHub Actions"):
+        _base()
 
 
 def test_a_raised_line_carries_a_reason_of_its_own():
@@ -304,9 +323,17 @@ def statements_per_path(monkeypatch, tmp_path) -> tuple[dict, list[str]]:
 
 
 @pytest.mark.django_db
-def test_each_spine_path_issues_exactly_its_budgeted_statements(monkeypatch, tmp_path):
+def test_each_spine_path_issues_exactly_its_budgeted_statements(monkeypatch, tmp_path, capsys):
+    started = time.perf_counter()
     budget = _budget()
     counted, unsteady = statements_per_path(monkeypatch, tmp_path)
+    with capsys.disabled():
+        # Its own cost, in every run's log, pass or fail: Phase 5.5 asks the budget to add
+        # no more than about 30 s to CI.
+        print(
+            f"\nSPINE statement budget: corpus built and {len(counted)} lines counted in "
+            f"{time.perf_counter() - started:.1f} s"
+        )
     assert not unsteady, (
         "a SPINE path's statement count is not deterministic over the seeded corpus, so no budget can hold "
         "it; find what differs between two identical calls:\n" + "\n".join(unsteady)

@@ -1608,14 +1608,19 @@ line. There is no margin:
   `test_a_raised_line_carries_a_reason_of_its_own` refuses a raised line that has no
   reason, a blank one, or the reason the line already carried. It compares against the
   budget the change started from: the commit `SPINE_BUDGET_BASE` names, else where HEAD
-  left `origin/master`. CI sets `HEAD^1`, the base side of the pull request's merge commit.
+  left `origin/master` (and it fails, saying what to set, if neither can be read). CI sets
+  `HEAD^1`, the base side of the pull request's merge commit; under GitHub Actions an
+  unset base fails rather than compare the budget with itself.
 - **Fewer statements** fail too, until the line is lowered to the count the failure
   reports, so the budget keeps no headroom that a later rise could spend unseen. Keep a
   line's reason only if the rise it explains still stands.
 
 Run it with `pytest tests/test_spine_statement_budget.py`, or in PowerShell with
 `.\.venv\Scripts\python.exe -m pytest tests\test_spine_statement_budget.py`. CI runs it
-in the backend job's full suite (about 7 s) and in the Windows job.
+in the backend job's full suite and in the Windows job, and each run prints its own cost
+(`SPINE statement budget: ... counted in N s`). A statement count cannot see a read whose
+scope widens inside the same statement, so the Windows job also runs the
+deployment-scope test, which the Linux job's full suite already does.
 
 ## What a span carries, and the advisories this service tracks
 
