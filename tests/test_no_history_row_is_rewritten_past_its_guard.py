@@ -1,4 +1,5 @@
-"""No recorded history row is rewritten past its guard: not by an upsert, not by a move.
+"""No recorded history row is rewritten past its guard: not in bulk, not by an upsert,
+not by a fresh instance carrying its key, not by a move.
 
 Every append-only record refuses an update or a delete of a recorded row in its
 ``save`` and ``delete``; some refuse one in bulk on the queryset too. Two ORM writes
@@ -26,6 +27,22 @@ went through none of those, on every append-only record (:mod:`assurance.append_
     through it. Removing an operator named on a row of every kind is still 204 through
     the real route, nulls exactly those columns and changes nothing else.
 
+(d) A fresh instance carrying a recorded row's key (``Model(pk=<recorded>,
+    ...).save()``) passed every non-economics record's ``save``, which checked only
+    ``_state.adding``, and Django's save then tried an UPDATE: it overwrote the row.
+    Every ``save`` now writes an INSERT and nothing else, as the economics records'
+    always did, so it fails on the key (``IntegrityError``), and a save asking for an
+    update (``force_update``, ``update_fields``) is refused before any SQL.
+
+(e) A queryset ``update()``, ``bulk_update()`` or ``delete()`` rewrote or removed the
+    rows of the seven records whose ``save`` alone refused (``ToolContract``,
+    ``AuthorityChain``, ``IdentityEvidence``, ``EffectReconciliationReceipt``, the two
+    Achilles records, ``RoleGrant``). Every record's queryset now refuses all three, as
+    the approval and edge histories' did; ``RoleGrant`` refuses a row's ``delete`` too.
+    No writer used any of them but four test fixtures, which now write through the
+    base manager; promoting, demoting and removing an operator (two of them stops)
+    still answer through the real routes.
+
 A gate-attested hop citing a version still resolves to what the gate signed after
 every one of these is attempted on the rows it reads.
 
@@ -44,7 +61,7 @@ import pytest
 from asgiref.sync import async_to_sync
 from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.db import connection, models
+from django.db import IntegrityError, connection, models, transaction
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
@@ -369,7 +386,7 @@ def _save_refuses_a_recorded_row(model):
     if save is models.Model.save:
         return False
     source = inspect.getsource(save)
-    return "not self._state.adding" in source and "raise " in source
+    return "insert_only(" in source or ("not self._state.adding" in source and "raise " in source)
 
 
 def test_every_append_only_record_is_in_the_inventory_and_refuses_an_upsert():
@@ -734,3 +751,115 @@ def test_a_gate_attested_hop_still_resolves_after_every_upsert_and_move_is_attem
     assert chain["verdict"] == "proven", {r: _codes(h) for r, h in _hops(chain).items()}
     status, body = gate_approval.approval_in_force(dep, WF, tools=True)
     assert status == 200 and body["version"] == reading["version"] and body["digest"] == reading["digest"]
+
+
+# ------------------------------------- (d) a fresh instance carrying a recorded key
+
+
+@pytest.mark.parametrize("model", list(RECORDS), ids=_label)
+def test_a_fresh_instance_carrying_a_recorded_key_never_overwrites_it(world, model):
+    build, field, value = RECORDS[model]
+    row = world.rows[model]
+    before, counts = _stored(row), _counts()
+
+    def imposter():
+        made = build(world, 7)
+        made.pk = row.pk
+        setattr(made, field, value)
+        return made
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        imposter().save()
+    assert _stored(row) == before
+    for asked in ({"force_update": True}, {"update_fields": [field]}):
+        with CaptureQueriesContext(connection) as sql, pytest.raises(APPEND_ONLY[model]):
+            imposter().save(**asked)
+        assert sql.captured_queries == [], asked
+    assert _stored(row) == before
+    assert _counts() == counts
+
+
+@pytest.mark.parametrize("model", list(RECORDS), ids=_label)
+def test_a_new_row_is_still_written_by_save_and_create(world, model):
+    build, _field, _value = RECORDS[model]
+    saved = build(world, 8)
+    saved.save()
+    assert saved.pk is not None and model._base_manager.filter(pk=saved.pk).exists()
+    fields = build(world, 9)
+    created = model.objects.create(
+        **{f.attname: getattr(fields, f.attname) for f in model._meta.concrete_fields if not f.primary_key}
+    )
+    assert model._base_manager.filter(pk=created.pk).exists()
+
+
+# -------------------------------------------------------- (e) a rewrite in bulk
+
+
+BULK_WRITES = {
+    "update": lambda model, row, forged, field, value: model.objects.filter(pk=row.pk).update(**{field: value}),
+    "update everything": lambda model, row, forged, field, value: model.objects.update(**{field: value}),
+    "bulk_update": lambda model, row, forged, field, value: model.objects.bulk_update([forged], [field]),
+    "delete": lambda model, row, forged, field, value: model.objects.filter(pk=row.pk).delete(),
+    "delete everything": lambda model, row, forged, field, value: model.objects.all().delete(),
+}
+
+
+@pytest.mark.parametrize("write", list(BULK_WRITES))
+@pytest.mark.parametrize("model", list(RECORDS), ids=_label)
+def test_a_bulk_rewrite_or_delete_is_refused_and_changes_nothing(world, model, write):
+    _build, field, value = RECORDS[model]
+    row = world.rows[model]
+    before, counts = _stored(row), _counts()
+    forged = model._base_manager.get(pk=row.pk)
+    setattr(forged, field, value)
+
+    with CaptureQueriesContext(connection) as sql, pytest.raises(APPEND_ONLY[model]):
+        BULK_WRITES[write](model, row, forged, field, value)
+
+    assert sql.captured_queries == [], "refused before any SQL, so the caller's transaction stays usable"
+    assert _stored(row) == before
+    assert _counts() == counts
+
+
+def test_a_recorded_role_grant_is_never_deleted_one_at_a_time(world):
+    grant = world.rows[RoleGrant]
+    before = _stored(grant)
+    with pytest.raises(ValueError, match="never deleted"):
+        grant.delete()
+    assert _stored(grant) == before
+
+
+def _set_role(by, account, role):
+    client = APIClient()
+    client.force_authenticate(user=by)
+    client.raise_request_exception = False
+    return client.patch(f"/api/accounts/users/{account.pk}/set_role/", {"role": role}, format="json")
+
+
+def test_promoting_demoting_and_removing_an_operator_still_answer_and_never_rewrite_a_grant(world):
+    """A promotion appends a grant through its writer (``RoleGrant.record``, an INSERT);
+    a demotion (a stop) and a removal (a stop) write none and answer through the real
+    routes, and every recorded grant stays as it was."""
+    assert stops.STOP_ROUTES["accounts:user-set-role"]["PATCH"] is not None
+    admin = world.alice
+    grants = list(RoleGrant._base_manager.order_by("id").values())
+
+    promoted = _set_role(admin, world.grantee, "admin")
+    assert promoted.status_code == 200, promoted.content
+    after = list(RoleGrant._base_manager.order_by("id").values())
+    assert after[: len(grants)] == grants and len(after) == len(grants) + 1
+    assert (after[-1]["account_pk"], after[-1]["role"], after[-1]["granted_by_pk"]) == (
+        world.grantee.pk, "admin", admin.pk
+    )
+
+    demoted = _set_role(admin, world.grantee, "viewer")
+    assert demoted.status_code == 200, demoted.content
+    assert list(RoleGrant._base_manager.order_by("id").values()) == after
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    client.raise_request_exception = False
+    removed = client.delete(f"/api/accounts/users/{world.grantee.pk}/")
+    assert removed.status_code == 204, removed.content
+    assert not User.objects.filter(pk=world.grantee.pk).exists()
+    assert list(RoleGrant._base_manager.order_by("id").values()) == after

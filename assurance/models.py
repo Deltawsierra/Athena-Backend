@@ -27,7 +27,7 @@ from django.utils import timezone
 from mythos_core import evidence as core_evidence
 
 from . import composition
-from .append_only import HistoryForeignKey, HistoryQuerySet
+from .append_only import HistoryForeignKey, HistoryQuerySet, insert_only
 from .economics import models as economics_models  # noqa: F401 -- Economic Exposure's models are this app's
 
 # ---------------------------------------------------------------------------
@@ -2645,7 +2645,8 @@ class RepairContract(models.Model):
     must preserve, agreed before any fix is worked on.
 
     Append-only and versioned per finding (1, 2, ...): never edited, never deleted on
-    its own; a change is a new version and the latest is current. ``content_digest``
+    its own, never overwritten by a fresh instance carrying its key; a change is a new
+    version and the latest is current. ``content_digest``
     is ``sha256:`` over the canonical JSON of ``{finding_ref, version,
     prohibited_effect, preserved_behaviours}``, computed on the save that creates the
     row and never taken from a caller."""
@@ -2679,8 +2680,10 @@ class RepairContract(models.Model):
     def save(self, *args, **kwargs):
         from .repair_contract import ContractIsAppendOnly, content_digest, validate
 
-        if not self._state.adding:
-            raise ContractIsAppendOnly("a repair contract is never edited: agree a new version")
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded contract's key fails on the key rather than overwriting that contract.
+        refusal = ContractIsAppendOnly("a repair contract is never edited: agree a new version")
+        kwargs = insert_only(self, kwargs, refusal)
         validate(self.prohibited_effect, self.preserved_behaviours)
         self.content_digest = content_digest(
             str(self.finding.uuid), self.version, self.prohibited_effect, self.preserved_behaviours
@@ -3533,10 +3536,12 @@ class ToolContractRewriteRefused(ValueError):
 
 
 class ToolContractQuerySet(HistoryQuerySet):
-    """Refuses an upsert of a recorded contract (:mod:`assurance.append_only`)."""
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded contract, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
 
     refused = ToolContractRewriteRefused
     rewritten = "A recorded tool contract is history and is never rewritten; record the new contract as a new row."
+    deleted = "A recorded tool contract is history and is never deleted."
 
 
 class ToolContract(models.Model):
@@ -3554,8 +3559,9 @@ class ToolContract(models.Model):
     descriptor (:func:`assurance.tool_contract.contract_descriptor`) and the
     SHA-256 over its canonical JSON. APPEND-ONLY: a contract that moved is a new
     row, the old one stays as the record of what was in force before, and the
-    model refuses an update or a delete of a recorded row, and its queryset an
-    upsert (:class:`ToolContractRewriteRefused`). A contract that moves back to an earlier
+    model refuses an update or a delete of a recorded row, or a fresh instance
+    carrying its key, and its queryset a bulk one or an upsert
+    (:class:`ToolContractRewriteRefused`). A contract that moves back to an earlier
     digest is appended again -- the history says it went away and came back.
     """
 
@@ -3587,11 +3593,12 @@ class ToolContract(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise ToolContractRewriteRefused(
-                "A recorded tool contract is history and is never rewritten; record the new contract as a new row."
-            )
-        super().save(*args, **kwargs)
+        refusal = ToolContractRewriteRefused(
+            "A recorded tool contract is history and is never rewritten; record the new contract as a new row."
+        )
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise ToolContractRewriteRefused("A recorded tool contract is history and is never deleted.")
@@ -3712,10 +3719,12 @@ class AuthorityChainRewriteRefused(ValueError):
 
 
 class AuthorityChainQuerySet(HistoryQuerySet):
-    """Refuses an upsert of a recorded chain (:mod:`assurance.append_only`)."""
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded chain, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
 
     refused = AuthorityChainRewriteRefused
     rewritten = "A recorded authority chain is never rewritten; record the corrected chain as a new row."
+    deleted = "A recorded authority chain is never deleted."
 
 
 class AuthorityChain(models.Model):
@@ -3737,8 +3746,8 @@ class AuthorityChain(models.Model):
     APPEND-ONLY. A newer chain for the same ``(workflow, effect)`` supersedes the
     older one for the decision (:func:`assurance.authority_chain.in_force`), and the
     older one stays, published as superseded. The model refuses an update or a
-    delete of a recorded row, and its queryset an upsert
-    (:class:`AuthorityChainRewriteRefused`).
+    delete of a recorded row, or a fresh instance carrying its key, and its queryset
+    a bulk one or an upsert (:class:`AuthorityChainRewriteRefused`).
 
     ``basis`` is ``demonstrated`` only when an engine signed the chain: a
     :mod:`mythos_core.outcome` envelope whose evidence digest is ``digest``, the
@@ -3802,11 +3811,12 @@ class AuthorityChain(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise AuthorityChainRewriteRefused(
-                "A recorded authority chain is never rewritten; record the corrected chain as a new row."
-            )
-        super().save(*args, **kwargs)
+        refusal = AuthorityChainRewriteRefused(
+            "A recorded authority chain is never rewritten; record the corrected chain as a new row."
+        )
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise AuthorityChainRewriteRefused("A recorded authority chain is never deleted.")
@@ -3863,9 +3873,9 @@ class ApprovalVersion(models.Model):
     ``in_force_from`` until the next version of the same workflow's.
 
     APPEND-ONLY: a version that moved is a new row; the model refuses an update or a
-    delete of a recorded one, its queryset a bulk one or an upsert, and its two reverse
-    accessors a move to another deployment or declarer
-    (:class:`ApprovalVersionRewriteRefused`; :mod:`assurance.append_only`). A
+    delete of a recorded one or a fresh instance carrying its key, its queryset a bulk
+    one or an upsert, and its two reverse accessors a move to another deployment or
+    declarer (:class:`ApprovalVersionRewriteRefused`; :mod:`assurance.append_only`). A
     gate-attested hop names its version by this row's id (the version Achilles' gate
     read from :mod:`assurance.gate_approval` and signed), so the row must go on saying
     what was signed. Two writes still reach a recorded row, both through the base
@@ -3925,11 +3935,12 @@ class ApprovalVersion(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise ApprovalVersionRewriteRefused(
-                "A recorded approval version is history and is never rewritten; record the new version as a new row."
-            )
-        super().save(*args, **kwargs)
+        refusal = ApprovalVersionRewriteRefused(
+            "A recorded approval version is history and is never rewritten; record the new version as a new row."
+        )
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise ApprovalVersionRewriteRefused("A recorded approval version is history and is never deleted.")
@@ -4002,11 +4013,12 @@ class AuthorityEdgeVersion(models.Model):
     every decision refresh as a backstop, so ``noticed_at`` is when the platform
     NOTICED: at or after the change, never when the customer made it.
 
-    APPEND-ONLY: the model refuses an update or a delete of a recorded row, and its
-    queryset a bulk one or an upsert (:class:`AuthorityEdgeVersionRewriteRefused`); its
-    deployment key has no reverse accessor to move one by. Only the deployment's cascade
-    removes rows, through the base manager, which stays Django's plain one. An edge that
-    returns is appended again: the history says it went and came back.
+    APPEND-ONLY: the model refuses an update or a delete of a recorded row or a fresh
+    instance carrying its key, and its queryset a bulk one or an upsert
+    (:class:`AuthorityEdgeVersionRewriteRefused`); its deployment key has no reverse
+    accessor to move one by. Only the deployment's cascade removes rows, through the
+    base manager, which stays Django's plain one. An edge that returns is appended
+    again: the history says it went and came back.
     """
 
     # Spelled as the rule spells them (assurance.authority_chain.EDGE_IDENTITY, ...;
@@ -4039,11 +4051,12 @@ class AuthorityEdgeVersion(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise AuthorityEdgeVersionRewriteRefused(
-                "A recorded edge change is history and is never rewritten; record the new change as a new row."
-            )
-        super().save(*args, **kwargs)
+        refusal = AuthorityEdgeVersionRewriteRefused(
+            "A recorded edge change is history and is never rewritten; record the new change as a new row."
+        )
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise AuthorityEdgeVersionRewriteRefused("A recorded edge change is history and is never deleted.")
@@ -4059,10 +4072,12 @@ class IdentityEvidenceRewriteRefused(ValueError):
 
 
 class IdentityEvidenceQuerySet(HistoryQuerySet):
-    """Refuses an upsert of a recorded record (:mod:`assurance.append_only`)."""
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded record, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
 
     refused = IdentityEvidenceRewriteRefused
     rewritten = "A recorded sign-in or delegation record is never rewritten; a revocation is a new record."
+    deleted = "A recorded sign-in or delegation record is never deleted."
 
 
 class IdentityEvidence(models.Model):
@@ -4078,7 +4093,8 @@ class IdentityEvidence(models.Model):
 
     APPEND-ONLY, as an authority chain is: a grant's revocation is a new record of the
     same grant (the same ``grant_digest``), and the record it revokes stays. The model
-    refuses an update or a delete of a recorded record, and its queryset an upsert.
+    refuses an update or a delete of a recorded record, or a fresh instance carrying
+    its key, and its queryset a bulk one or an upsert.
     """
 
     class Kind(models.TextChoices):
@@ -4122,11 +4138,12 @@ class IdentityEvidence(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise IdentityEvidenceRewriteRefused(
-                "A recorded sign-in or delegation record is never rewritten; a revocation is a new record."
-            )
-        super().save(*args, **kwargs)
+        refusal = IdentityEvidenceRewriteRefused(
+            "A recorded sign-in or delegation record is never rewritten; a revocation is a new record."
+        )
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise IdentityEvidenceRewriteRefused("A recorded sign-in or delegation record is never deleted.")
@@ -4141,10 +4158,12 @@ class EffectReconciliationRewriteRefused(ValueError):
 
 
 class EffectReconciliationQuerySet(HistoryQuerySet):
-    """Refuses an upsert of a recorded receipt (:mod:`assurance.append_only`)."""
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded receipt, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
 
     refused = EffectReconciliationRewriteRefused
     rewritten = "A recorded reconciliation receipt is never rewritten; a later readback is a new receipt."
+    deleted = "A recorded reconciliation receipt is never deleted."
 
 
 class EffectReconciliationReceipt(models.Model):
@@ -4161,7 +4180,8 @@ class EffectReconciliationReceipt(models.Model):
     its gate decision is on record yet: it proves nothing until it binds.
 
     APPEND-ONLY: a later readback of the same dispatch is a new receipt. The model
-    refuses an update or a delete of a recorded receipt, and its queryset an upsert.
+    refuses an update or a delete of a recorded receipt, or a fresh instance carrying
+    its key, and its queryset a bulk one or an upsert.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -4199,11 +4219,12 @@ class EffectReconciliationReceipt(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise EffectReconciliationRewriteRefused(
-                "A recorded reconciliation receipt is never rewritten; a later readback is a new receipt."
-            )
-        super().save(*args, **kwargs)
+        refusal = EffectReconciliationRewriteRefused(
+            "A recorded reconciliation receipt is never rewritten; a later readback is a new receipt."
+        )
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise EffectReconciliationRewriteRefused("A recorded reconciliation receipt is never deleted.")
@@ -4223,17 +4244,21 @@ class AchillesScanRewriteRefused(ValueError):
 
 
 class AchillesScanResultQuerySet(HistoryQuerySet):
-    """Refuses an upsert of a recorded scan result (:mod:`assurance.append_only`)."""
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded scan result, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
 
     refused = AchillesScanRewriteRefused
     rewritten = "A recorded Achilles scan result is never rewritten."
+    deleted = "A recorded Achilles scan result is never deleted."
 
 
 class AchillesScanRefusalQuerySet(HistoryQuerySet):
-    """Refuses an upsert of a recorded refusal (:mod:`assurance.append_only`)."""
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded refusal, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
 
     refused = AchillesScanRewriteRefused
     rewritten = "A recorded refusal is never rewritten."
+    deleted = "A recorded refusal is never deleted."
 
 
 class AchillesScanResult(models.Model):
@@ -4247,8 +4272,9 @@ class AchillesScanResult(models.Model):
     capability Achilles has not been screened for, which grades nothing.
 
     APPEND-ONLY. One record per scan per deployment, and one per signed outcome. The
-    model refuses an update or a delete of a recorded result, its queryset an upsert,
-    and its reverse accessor a move.
+    model refuses an update or a delete of a recorded result, or a fresh instance
+    carrying its key, its queryset a bulk one or an upsert, and its reverse accessor a
+    move.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -4284,9 +4310,10 @@ class AchillesScanResult(models.Model):
         indexes = [models.Index(fields=["deployment", "observed_at"], name="assurance_achilles_observed")]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise AchillesScanRewriteRefused("A recorded Achilles scan result is never rewritten.")
-        super().save(*args, **kwargs)
+        refusal = AchillesScanRewriteRefused("A recorded Achilles scan result is never rewritten.")
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise AchillesScanRewriteRefused("A recorded Achilles scan result is never deleted.")
@@ -4302,8 +4329,9 @@ class AchillesScanRefusal(models.Model):
     refused, so nothing of the result is recorded but the reason. What a refused
     envelope claims is untrusted: its outcome and scan ids are kept only when its
     signature verified, and the envelope itself only by digest. Append-only, as a
-    result is: the model refuses an update or a delete of a recorded refusal, its
-    queryset an upsert, and its reverse accessor a move.
+    result is: the model refuses an update or a delete of a recorded refusal, or a
+    fresh instance carrying its key, its queryset a bulk one or an upsert, and its
+    reverse accessor a move.
     """
 
     class Code(models.TextChoices):
@@ -4337,9 +4365,10 @@ class AchillesScanRefusal(models.Model):
         indexes = [models.Index(fields=["deployment", "received_at"], name="assurance_achilles_refused")]
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise AchillesScanRewriteRefused("A recorded refusal is never rewritten.")
-        super().save(*args, **kwargs)
+        refusal = AchillesScanRewriteRefused("A recorded refusal is never rewritten.")
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded row's key fails on the key rather than overwriting that row.
+        super().save(*args, **insert_only(self, kwargs, refusal))
 
     def delete(self, *args, **kwargs):
         raise AchillesScanRewriteRefused("A recorded refusal is never deleted.")

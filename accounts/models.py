@@ -4,7 +4,7 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
 
-from assurance.append_only import HistoryQuerySet
+from assurance.append_only import HistoryQuerySet, insert_only
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +83,12 @@ def rank(role, is_superuser) -> int:
 
 
 class RoleGrantQuerySet(HistoryQuerySet):
-    """Refuses an upsert of a recorded grant (:mod:`assurance.append_only`), which its
-    ``save`` never sees."""
+    """Refuses a bulk update or delete and an upsert of a recorded grant, as a grant's
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
 
     refused = ValueError
     rewritten = "A role grant is history and is never rewritten; record a new one."
+    deleted = "A role grant is history and is never deleted."
 
 
 class RoleGrant(models.Model):
@@ -100,8 +101,9 @@ class RoleGrant(models.Model):
     request does, stops included -- reads nothing new. Accounts are named by id and
     username, never a foreign key, so removing an operator (a stop) neither cascades
     here nor writes anything. Written only on a promotion, never on a demotion, a
-    deactivation or a removal; append-only (its ``save`` refuses an update, its queryset
-    an upsert). An account given its role before grants were recorded has none, and no
+    deactivation or a removal; append-only: its ``save`` writes a new grant and nothing
+    else, its ``delete`` is refused, and its queryset refuses a bulk update or delete and
+    an upsert. An account given its role before grants were recorded has none, and no
     approval is refused for it by this rule.
 
     A grant that names its granter is also emitted, once it commits, as a signed
@@ -159,9 +161,13 @@ class RoleGrant(models.Model):
         return grants.order_by("-granted_at", "-id").first()
 
     def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise ValueError("A role grant is history and is never rewritten; record a new one.")
-        super().save(*args, **kwargs)
+        refusal = ValueError("A role grant is history and is never rewritten; record a new one.")
+        # An INSERT and nothing else (assurance.append_only): a new instance carrying a
+        # recorded grant's key fails on the key rather than overwriting that grant.
+        super().save(*args, **insert_only(self, kwargs, refusal))
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("A role grant is history and is never deleted.")
 
     def __str__(self):
         return f"{self.account_username} made {self.role} by {self.granted_by_username or 'nobody'}"

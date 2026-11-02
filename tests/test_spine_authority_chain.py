@@ -107,10 +107,10 @@ def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles"
     # every writer the platform has.
     from assurance.models import ApprovalVersion, AuthorityEdgeVersion, ToolContract
 
-    # The approval and edge histories refuse a queryset update to every writer; a
-    # fixture goes through the base manager, as the deployment's cascade does.
+    # The approval, contract and edge histories refuse a queryset update to every
+    # writer; a fixture goes through the base manager, as the deployment's cascade does.
     ApprovalVersion._base_manager.filter(deployment=dep).update(in_force_from=now - timedelta(hours=1))
-    ToolContract.objects.filter(deployment=dep).update(recorded_at=now - timedelta(hours=1))
+    ToolContract._base_manager.filter(deployment=dep).update(recorded_at=now - timedelta(hours=1))
     AuthorityEdgeVersion._base_manager.filter(deployment=dep).update(noticed_at=now - timedelta(hours=1))
     permit = record_signed(dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=2), engine=engine)
     refusal = None

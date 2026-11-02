@@ -392,8 +392,10 @@ those reads (`assurance/history_reads.py`). Each is a GET, newest first, bounded
   `declared_approval_versions` read, and refuse `add`, `remove`, `clear` and `set`),
   because a gate-attested hop cites it by its `version` id. It goes only with its
   deployment, and removing a declarer's account (a stop) only nulls `declared_by`;
-  neither is held back. Every append-only record refuses the upsert and the move the
-  same way (`assurance/append_only.py`).
+  neither is held back. Every append-only record refuses the same writes, each with its
+  own refusal (`assurance/append_only.py`): a queryset `update()`, `bulk_update()` or
+  `delete()`, an upsert, a fresh instance carrying a recorded row's key (its `save`
+  only ever inserts), and a move through a reverse foreign key.
 - `GET .../tool-contracts/` (`?kind=`, `?identifier=`): every recorded tool contract,
   when it was recorded and superseded, the contract in force now (`null` for a tool no
   longer registered) and whether this is it, for every tool, bound or not.
