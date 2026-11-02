@@ -48,7 +48,7 @@ def _runs_at_import(body):
     """Every statement that runs when the module is imported: function bodies do not."""
     for node in body:
         yield node
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for field in ("body", "orelse", "finalbody", "handlers"):
             yield from _runs_at_import(getattr(node, field, ()) or ())
@@ -64,17 +64,29 @@ def _imports(tree):
             yield node.lineno, "." * node.level + (node.module or "")
 
 
+def _is_enforce(node) -> bool:
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "enforce"
+    )
+
+
 def _guard_call_line(tree):
-    lines = [
+    """The line of ``PIN_GUARD = enforce(...)``, a statement of the module itself: not
+    under an ``if``, a ``try`` or a function, where it could be kept from running."""
+    calls = [node.lineno for node in ast.walk(tree) if _is_enforce(node)]
+    top = [
         node.lineno
-        for node in _runs_at_import(tree.body)
-        if isinstance(node, (ast.Assign, ast.Expr))
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "enforce"
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [getattr(target, "id", None) for target in node.targets] == ["PIN_GUARD"]
+        and _is_enforce(node.value)
     ]
-    assert len(lines) == 1, f"expected exactly one call of the pin guard's enforce, found {lines}"
-    return lines[0]
+    assert len(calls) == 1 and top == calls, (
+        f"expected one call of the pin guard's enforce, as the module-level statement "
+        f"`PIN_GUARD = enforce(...)`; enforce is called at {calls}, and assigned to "
+        f"PIN_GUARD at module level at {top}"
+    )
+    return top[0]
 
 
 def _may_precede_the_guard(module: str) -> bool:
@@ -88,8 +100,8 @@ def test_the_guard_runs_above_every_import_a_wrong_core_can_break():
     any import that pulls the app in) never runs when the core is wrong: the import
     fails first, naming a missing symbol in this repository, and the guard that knew
     why says nothing. So the call is above every import that is not the standard
-    library, pytest or the stub, and ``enforce`` is the stub's, never a name a
-    ``mythos_core`` import supplied."""
+    library, pytest or the stub, ``enforce`` is the stub's, never a name a
+    ``mythos_core`` import supplied, and the call ran when the conftest was imported."""
     tree = ast.parse(CONFTEST.read_text(encoding="utf-8"))
     guard = _guard_call_line(tree)
     imports = list(_imports(tree))
@@ -122,6 +134,10 @@ def test_the_guard_runs_above_every_import_a_wrong_core_can_break():
         f"`import django` is not below the pin guard; below it: {sorted(below)}"
     )
 
+    # And it ran, at import: the conftest holds its verdict, a line per roster entry.
+    verdicts = [line for line in conftest.PIN_GUARD.lines if line.startswith("pin guard ")]
+    assert len(verdicts) == len(conftest.PINNED_DEPENDENCIES), conftest.PIN_GUARD.lines
+
 
 _GIT_PIN = re.compile(
     r"\s*(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(?:\[[^\]]*\])?\s*@\s*git\+"
@@ -135,9 +151,9 @@ def _normalise(name: str) -> str:
 def _pin_files():
     """Every file pip could install this repository's Python dependencies from."""
     found = sorted(ROOT.glob("requirements*.txt"))
-    found += [
-        ROOT / name for name in ("pyproject.toml", "setup.cfg", "setup.py") if (ROOT / name).is_file()
-    ]
+    for name in ("pyproject.toml", "setup.cfg", "setup.py"):
+        if (ROOT / name).is_file():
+            found.append(ROOT / name)
     return found
 
 
@@ -198,12 +214,12 @@ def _the_pin() -> str:
 
 
 def _a_checkout_pinned_at(tmp_path: pathlib.Path, pin: str, other: str) -> pathlib.Path:
-    """This repository's pin files, with one change: they pin ``other``."""
+    """This repository's pin files, byte for byte but for one change: they pin ``other``."""
     for _distribution, _module, files in conftest.PINNED_DEPENDENCIES:
         for name in files:
-            text = (ROOT / name).read_text(encoding="utf-8")
-            assert text.count(pin) == 1, name
-            (tmp_path / name).write_text(text.replace(pin, other), encoding="utf-8")
+            data = (ROOT / name).read_bytes()
+            assert data.count(pin.encode()) == 1, name
+            (tmp_path / name).write_bytes(data.replace(pin.encode(), other.encode()))
     return tmp_path
 
 
