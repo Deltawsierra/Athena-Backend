@@ -2323,7 +2323,14 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         to read itself at decide time (:mod:`assurance.gate_approval`): the approval
         version's id -- its history row -- and the digest this backend computes for it.
         ``404`` for no approval in force, ``409`` while its history is not level with
-        it. Reads only: nothing is written, and nothing stops or starts."""
+        it. ``?include=tools`` adds the approval's tools, each with the contract digest
+        it is bound under, sorted -- the set the digest was taken over, from the same
+        read (G6); any other ``include`` is ``400`` (``unknown_include``). Without it the
+        answer is what it always was. Reads only: nothing is written, and nothing stops
+        or starts."""
+        tools = gate_approval.include_tools(request.query_params.getlist("include"))
+        if tools is None:
+            return Response(gate_approval.unknown_include(), status=status.HTTP_400_BAD_REQUEST)
         # Not ``get_object``: the gate's account sees no deployment, and needs none.
         valid = _valid_uuid(uuid)
         deployment = Deployment.objects.filter(uuid=valid).first() if valid else None
@@ -2332,7 +2339,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 {"error": "no such deployment", "code": gate_approval.NO_APPROVAL_IN_FORCE},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        code, body = gate_approval.approval_in_force(deployment, workflow)
+        code, body = gate_approval.approval_in_force(deployment, workflow, tools=tools)
         return Response(body, status=code)
 
     def _identity_evidence(self, request, uuid, kind):

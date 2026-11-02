@@ -291,17 +291,22 @@ def _load_inputs(
 
 
 def dispatch_state(document: dict, row) -> rule.DispatchState | None:
-    """The state an observed effect's dispatch ran under, from its v2 or v3 document
+    """The state an observed effect's dispatch ran under, from its v2, v3 or v4 document
     (read against its signed digest by the caller) and the route this backend bound for
     the dispatch instant when it recorded the row; ``None`` for a v1 document. A v3
     document's ``verified.workflow_approval`` -- the approval the gate read from this
     backend itself -- is :attr:`~assurance.authority_chain.DispatchState.gate_approval`;
-    a v2 document has none, and neither does a v3 one whose reading is null."""
+    a v2 document has none, and neither does a v3 one whose reading is null. A v4
+    document's ``verified`` reads as a v3 one's, and its ``tool_contract`` -- the
+    contract the gate verified itself for the dispatched tool -- is
+    :attr:`~assurance.authority_chain.DispatchState.tool_contract`; v1 to v3 have none,
+    and neither does a v4 one whose ``tool_contract`` is null."""
     block = document.get("dispatch")
     if not isinstance(block, dict):
         return None
     presented = block["presented"]
-    verified = block.get("verified") if document.get("schema") == observed_effects.EVIDENCE_SCHEMA else None
+    schema = document.get("schema")
+    verified = block.get("verified") if schema in observed_effects.VERIFIED_SCHEMAS else None
     reading = verified.get("workflow_approval") if isinstance(verified, dict) else None
     gate = None
     if isinstance(reading, dict):
@@ -312,6 +317,12 @@ def dispatch_state(document: dict, row) -> rule.DispatchState | None:
             digest=reading["digest"],
             read_at=observed_outcomes._instant(reading["read_at"]),
         )
+    contract = (
+        verified.get("tool_contract")
+        if schema == observed_effects.EVIDENCE_SCHEMA_V4 and isinstance(verified, dict)
+        else None
+    )
+    tool_contract = (contract["kind"], contract["identifier"], contract["digest"]) if isinstance(contract, dict) else None
     return rule.DispatchState(
         dispatched_at=observed_outcomes._instant(block["dispatched_at"]),
         epoch=block["epoch"],
@@ -326,6 +337,7 @@ def dispatch_state(document: dict, row) -> rule.DispatchState | None:
         grant_digest=presented["grant_digest"],
         route_at_dispatch=row.dispatch_route_fingerprint or "",
         gate_approval=gate,
+        tool_contract=tool_contract,
     )
 
 

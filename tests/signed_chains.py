@@ -153,6 +153,21 @@ def live_reading(deployment, workflow, read_at=None) -> dict | None:
     }
 
 
+def live_tool_contract(deployment, workflow, tool) -> dict | None:
+    """What Achilles' gate verifies for the dispatched ``tool`` (``(kind, identifier)``)
+    when it re-reads the approval in force at dispatch with its tools
+    (``?include=tools``, :mod:`assurance.gate_approval`), as it signs it into a v4
+    document's ``dispatch.verified.tool_contract``; None when the route would refuse or
+    the approval binds no such tool (the gate would refuse that dispatch)."""
+    from assurance import gate_approval
+
+    status, body = gate_approval.approval_in_force(deployment, workflow, tools=True)
+    if status != 200:
+        return None
+    found = next((t for t in body["tools"] if (t["kind"], t["identifier"]) == tuple(tool)), None)
+    return dict(found) if found is not None else None
+
+
 def observed_effect(
     deployment,
     workflow,
@@ -171,6 +186,8 @@ def observed_effect(
     gate=None,
     reading=LIVE,
     approvals_digest=None,
+    tool_contract=LIVE,
+    approval_recipients=(),
 ) -> tuple[dict, dict]:
     """``(envelope, evidence)``: what Achilles posts when its dispatch saw a permitted
     action's effect -- the ``mythos.observed-effect/v2`` document, and the outcome its
@@ -183,7 +200,10 @@ def observed_effect(
     ``schema="v1"``: the v1 document, which records no dispatch state. ``schema="v3"``:
     the v2 block and ``verified`` -- ``approvals_digest`` and the gate's ``reading`` of
     the approval in force (:func:`live_reading` by default; None for a gate with no
-    link)."""
+    link). ``schema="v4"``: v3's ``verified`` and ``tool_contract`` -- the contract the
+    gate verified for the dispatched tool (:func:`live_tool_contract` by default, None
+    with no reading) -- and ``approval_recipients``, the permit's entries without their
+    nonces (none by default)."""
     instant = observed_at.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     evidence = {
         "schema": f"mythos.observed-effect/{schema}",
@@ -203,7 +223,7 @@ def observed_effect(
         },
         "observed_at": instant,
     }
-    if schema in ("v2", "v3"):
+    if schema in ("v2", "v3", "v4"):
         left = dispatched_at if dispatched_at is not None else observed_at
         evidence["dispatch"] = {
             **GATE_STATE,
@@ -211,13 +231,21 @@ def observed_effect(
             "dispatched_at": _stamp(left),
             "presented": presented if presented is not None else live_presented(deployment, workflow),
         }
-    if schema == "v3":
+    if schema in ("v3", "v4"):
         evidence["dispatch"]["verified"] = {
             "approvals_digest": approvals_digest,
             "workflow_approval": (
                 live_reading(deployment, workflow, left - timedelta(seconds=1)) if reading is LIVE else reading
             ),
         }
+    if schema == "v4":
+        verified = evidence["dispatch"]["verified"]
+        if tool_contract is LIVE:
+            tool_contract = (
+                live_tool_contract(deployment, workflow, tool) if verified["workflow_approval"] is not None else None
+            )
+        verified["tool_contract"] = tool_contract
+        verified["approval_recipients"] = [dict(entry) for entry in approval_recipients]
     outcome = oc.build_outcome(
         deployment=str(deployment.uuid),
         workflow=workflow,

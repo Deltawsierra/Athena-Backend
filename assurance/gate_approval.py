@@ -26,6 +26,22 @@ THE ROUTE. ``GET /api/assurance/deployments/<uuid>/workflows/<slug>/approval-in-
   has not noted it yet (a write no signal saw; the next approval write or decision
   refresh notes it). Nothing is written here: the gate refuses, which fails closed.
 
+WITH ITS TOOLS (G6). ``GET .../approval-in-force/?include=tools`` answers ``200`` with
+exactly ``{"deployment", "workflow", "version", "digest", "in_force_from", "tools"}``,
+so the gate can verify the tool contract it dispatches under and refuse a stale
+generation. ``tools`` is one ``{"kind", "identifier", "digest"}`` per tool binding of
+the approval in force, sorted by ``(kind, identifier)``, ``digest`` the binding's
+``contract_digest``; ``[]`` for an approval that binds no tool. It is exactly the set
+``digest`` was taken over: both come from the one read of the live bindings
+(:func:`assurance.approval_history.approvals_now`), inside one transaction, and the
+history-level check covers both -- the newest history row must record that digest AND
+those tools, or the answer is the ``409`` above. So the version the gate signs is a row
+that binds exactly the tools it was told. Any other ``include`` value -- empty, another
+word, ``tools`` twice, a list -- is ``400`` (``code: unknown_include``), never ignored.
+The ``404`` and ``409`` answers are the same with or without it. Without ``include`` the
+answer is byte for byte what it was before, so a gate that does not ask for the tools
+reads exactly what it always did.
+
 WHO MAY READ. Only the gate: a pre-shared credential, ``ASSURANCE_GATE_APPROVAL_TOKEN``
 (at least :data:`MIN_TOKEN_LENGTH` characters), in the :data:`HEADER` header,
 authenticating as the one account ``ASSURANCE_GATE_APPROVAL_USER`` names -- the
@@ -70,6 +86,9 @@ OTHER_TOKEN_ENVS: tuple[str, ...] = (
 )
 NO_APPROVAL_IN_FORCE = "no_approval_in_force"
 HISTORY_NOT_LEVEL = "approval_history_not_level"
+UNKNOWN_INCLUDE = "unknown_include"
+#: The one thing ``?include=`` may ask for beside the approval: its tools (G6).
+INCLUDE_TOOLS = "tools"
 
 _DIGEST_KEY = secrets.token_bytes(32)
 
@@ -165,53 +184,88 @@ def _stamp(instant) -> str:
     return instant.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def approval_in_force(deployment, workflow: str) -> tuple[int, dict]:
+def include_tools(values) -> bool | None:
+    """What the request's ``include`` values ask for: ``False`` for none, ``True`` for
+    exactly one ``include=tools``, ``None`` for anything else -- which the route refuses
+    (``400``, :data:`UNKNOWN_INCLUDE`) rather than ignore."""
+    values = list(values)
+    if not values:
+        return False
+    return True if values == [INCLUDE_TOOLS] else None
+
+
+def unknown_include() -> dict:
+    """The ``400`` body for an ``include`` the route does not serve."""
+    return {
+        "error": f"include names what the answer carries beside the approval; the only value is {INCLUDE_TOOLS!r}",
+        "code": UNKNOWN_INCLUDE,
+    }
+
+
+def approval_in_force(deployment, workflow: str, *, tools: bool = False) -> tuple[int, dict]:
     """``(status, body)``: the approval of ``workflow`` in force for ``deployment`` --
     its newest history row's id and digest, which must be the digest of the approval
-    as it stands now -- or why there is none (see the module). Reads only."""
+    as it stands now -- or why there is none (see the module). Reads only.
+
+    ``tools``: the answer carries the tools of that approval too (``?include=tools``):
+    the very bindings the digest was taken over, from the same read, in the same
+    transaction, and the newest history row must record them as well as the digest."""
+    from django.db import transaction
+
     from .approval_history import approvals_now
     from .models import ApprovalVersion
 
-    current = approvals_now(deployment).get(workflow)
-    if current is None:
-        return 404, {
-            "error": f"no approval of workflow {workflow!r} is in force for this deployment",
-            "code": NO_APPROVAL_IN_FORCE,
-        }
-    digest, _tools = current
-    latest = (
-        ApprovalVersion.objects.filter(deployment=deployment, workflow=workflow)
-        .order_by("in_force_from", "id")
-        .last()
-    )
-    if latest is None or latest.digest != digest:
-        return 409, {
-            "error": (
-                f"the approval of workflow {workflow!r} is not yet noted in its history as it stands; the next "
-                "approval write or decision refresh notes it"
-            ),
-            "code": HISTORY_NOT_LEVEL,
-        }
-    return 200, {
+    with transaction.atomic():
+        current = approvals_now(deployment).get(workflow)
+        if current is None:
+            return 404, {
+                "error": f"no approval of workflow {workflow!r} is in force for this deployment",
+                "code": NO_APPROVAL_IN_FORCE,
+            }
+        digest, bound = current
+        latest = (
+            ApprovalVersion.objects.filter(deployment=deployment, workflow=workflow)
+            .order_by("in_force_from", "id")
+            .last()
+        )
+        if latest is None or latest.digest != digest or (tools and latest.tools != bound):
+            return 409, {
+                "error": (
+                    f"the approval of workflow {workflow!r} is not yet noted in its history as it stands; the next "
+                    "approval write or decision refresh notes it"
+                ),
+                "code": HISTORY_NOT_LEVEL,
+            }
+    body = {
         "deployment": str(deployment.uuid),
         "workflow": workflow,
         "version": str(latest.id),
         "digest": latest.digest,
         "in_force_from": _stamp(latest.in_force_from),
     }
+    if tools:
+        body["tools"] = [
+            {"kind": kind, "identifier": identifier, "digest": contract}
+            for kind, identifier, contract in sorted(bound, key=lambda t: (t[0], t[1]))
+        ]
+    return 200, body
 
 
 __all__ = [
     "HEADER",
     "HISTORY_NOT_LEVEL",
+    "INCLUDE_TOOLS",
     "MIN_TOKEN_LENGTH",
     "NO_APPROVAL_IN_FORCE",
     "OTHER_TOKEN_ENVS",
     "TOKEN_ENV",
+    "UNKNOWN_INCLUDE",
     "USER_ENV",
     "GateApprovalAuthentication",
     "GateApprovalCredential",
     "IsGateApprovalReader",
     "approval_in_force",
     "configured_token",
+    "include_tools",
+    "unknown_include",
 ]
