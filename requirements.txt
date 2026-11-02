@@ -293,4 +293,26 @@ zopfli==0.2.3.post1
 # suite, and only adds a key. Every other module of the core is byte for byte what
 # it was at 59e168c (the diff touches only action_assurance/, db.py, recovery.py and
 # the new pinguard.py), so every surface this service imports is unchanged.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@6447fd02351eda524cad59c54274e4731dd146da
+#
+# What the pin since 6447fd0 (Mythos-Core#60) adds:
+#
+# Mythos-Core#61 to #64 -- the reason for the c33571b pin, the core Achilles and
+# Athena-Engine pin too: the shared halves of SPINE's recovery record (SP-1,
+# assurance/recovery_record.py). mythos_core.status gains the Recovery set (#61, with
+# #63: recovery_incomplete is open, and only recovery_accepted is terminal): seven
+# states, each a Recovery with the conditions that support it, the steps that may
+# follow each (check_recovery_step) and release_may_pass. mythos_core.coverage is the
+# coverage manifest (MC-2, #62): required sources, observations, the six gap kinds,
+# coverage_ratio, and release_given_coverage, which holds a PASS back to
+# AUDIT_INCOMPLETE on any declared gap. The recovery record reads both; nothing else
+# here does, and it is on no stop path. mythos_core.incident (#61) and
+# mythos_core.evidence_record (MC-3, #64) are new modules this service does not import
+# yet. mythos_core.evidence gains the claim standing (#61) as new code appended to the
+# module; the evidence-class table assurance/claim_confidence.py reads is unchanged.
+# Mythos-Core#65 (mythos_core.bounds) is a new module, not imported here. outcome.py
+# changes in a comment only, and persona/lint.py gains checks this service does not
+# import. pinguard.py and templates/pin_bootstrap.py are byte for byte what they were
+# at 6447fd0, so tests/pin_bootstrap.py is unchanged, and so are currency,
+# exposure_receipt, failsafe, http, authority and tracing. The pin guard stays ON
+# (DEPENDENCY_PIN_GUARD is set nowhere).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@c33571b5ad06afbece7b2a1a964796141c70a350
