@@ -4,6 +4,12 @@
 # on the owner's machine than in CI.
 * text=auto eol=lf
 
+# The pin-guard bootstrap is Mythos-Core's templates/pin_bootstrap.py byte for byte,
+# and the guard refuses every run whose copy's sha256 differs, so a CRLF checkout of it
+# would refuse them all. Said for this one file as well as by the rule above, as
+# Mythos-Core says it for its own copy.
+tests/pin_bootstrap.py text eol=lf
+
 # Never converted, whatever the checkout: images and fonts, and the fixtures the tests
 # pin by their bytes (five feed and catalog CSVs carry CRLF line endings on purpose).
 *.png binary

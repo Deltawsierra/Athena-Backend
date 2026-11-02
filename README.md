@@ -1520,6 +1520,17 @@ pytest
 
 In PowerShell, with the environment from "Running it": `.\.venv\Scripts\python.exe -m pytest`.
 
+Every run starts with Mythos-Core's shared pin guard (`mythos_core.pinguard`), run
+through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
+`templates/pin_bootstrap.py`. Before a test is collected it checks that the mythos-core
+Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
+pin, from the install pip recorded; otherwise it stops the run with one error naming each
+failed check and what to do. Each run ends with its verdict, for example
+`pin guard <sha>: mythos-core pinned 6447fd0, imported 6447fd0 from <path>: OK`. Its one
+switch is described under "The shared pin guard" in Mythos-Core's README.
+`ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
+run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.
+
 The suite uses `tests/settings_test.py`, which reuses the real settings and
 overrides only the database, mail and throttling. The engine contract tests in
 `tests/test_engine_contract.py` skip unless `CYBERENGINE_URL` and

@@ -259,4 +259,38 @@ zopfli==0.2.3.post1
 # authority.context -- continue to satisfy their pins and signature tests against
 # 59e168c; the suite is green on the pin bump alone. The pin guard stays ON
 # (neither DEPENDENCY_PIN_GUARD nor ATHENA_MYTHOS_CORE_PIN_GUARD is set anywhere).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@59e168cac7f8bc145d98bb1776ee60b8a5f2a4b9
+#
+# What the pin since 59e168c (Mythos-Core#55) adds:
+#
+# Mythos-Core#60 -- the reason for the 6447fd0 pin: mythos_core.pinguard, the one
+# dependency pin guard every engine runs before its tests. It replaces this repo's
+# fork of the guard (tests/mythos_core_provenance.py, and tests/test_mythos_core_pin.py
+# for the two files agreeing), at the fork's strictness: the installed commit must
+# equal the pin exactly, the pin must be a full sha, and this file and
+# requirements-dev.txt must pin the same commit. It adds the checks the engines'
+# copies had and the fork did not: each file names mythos-core once, and every git
+# pin in either file is on the guard's roster. tests/conftest.py runs it through
+# tests/pin_bootstrap.py, a byte-for-byte copy of the core's templates/pin_bootstrap.py,
+# above `import django`. The stub reads pinguard.py from pip's hash-checked record of
+# the install (or from the checkout an editable install names) and never imports
+# mythos_core to reach it. ATHENA_MYTHOS_CORE_PIN_GUARD, named in the notes above, is
+# retired: set to anything at all, the guard refuses the run and names
+# DEPENDENCY_PIN_GUARD, the one switch, which only makes a run report-only and is
+# refused under GitHub Actions. Neither is set anywhere in this repository or its
+# workflows. The guard is test-time code and nowhere near a stop path: nothing this
+# service runs imports it.
+#
+# Mythos-Core#56, #57 and #58 ride along: mythos_core.action_assurance (WP1 shared
+# contracts, WP3 approval binding and gate modes, WP4 containment measurement), new
+# modules this service does not import. Mythos-Core#59 keeps a journal of API-key
+# revocations beside the engine's database (<ENGINE_DB_PATH>.revoked-keys, or
+# ENGINE_REVOKED_KEYS_PATH), so a restore from an older backup cannot bring a
+# revoked key back, and mythos_core.recovery refuses to write a backup over it.
+# Carried, not reached: this service keeps no mythos_core.db store and issues no
+# engine API keys. Its one import of mythos_core.db is
+# tests/fixtures/engine_launch/generate.py, which runs inside an Athena-Engine
+# checkout's own environment (it imports that engine's modules), is not part of this
+# suite, and only adds a key. Every other module of the core is byte for byte what
+# it was at 59e168c (the diff touches only action_assurance/, db.py, recovery.py and
+# the new pinguard.py), so every surface this service imports is unchanged.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@6447fd02351eda524cad59c54274e4731dd146da
