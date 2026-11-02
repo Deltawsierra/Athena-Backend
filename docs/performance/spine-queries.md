@@ -224,6 +224,41 @@ history, only the reads that are history by design -- the closed versions the le
 carry and #176's list read, the edge history -- and the current-claims reads no
 longer do.
 
+## Then: a watch's system fingerprint, read once
+
+The statement budget (Phase 5.5, #207) found one more N+1, on the refresh paths of
+the profiles where a watch holds (a fired latent condition, read again: `high-open`,
+`all-closed`, `no-findings`). The retest the watch keeps open is bound to the system
+fingerprint, read through the refresh's own instance, which prefetched nothing:
+`compute_system_fingerprint` read the asset table once for each part of its
+descriptor (the components, their providers, the retired keys, the served route),
+four times, and fetched each component's provider one query at a time, eight provider
+reads for the corpus's three provider-backed components. The carry's put-back of a
+lifted hold (`latent.restore_fired_holds`) reads it the same way.
+
+It now reads the components once (`fingerprint._components`): the caller's prefetch
+if it holds one, as before, else one statement with each provider joined
+(`select_related("provider")`, as `served_route.serving_route_now` reads them).
+Nothing is prefetched onto the caller's instance, so no later reader of it takes this
+moment's graph for its own. Every fingerprint, decision and claim is unchanged on all
+six profiles (the golden test, and the master/head comparison in the pull request).
+
+| line | before | after |
+|---|---|---|
+| `refresh_stored_decisions.high-open` | 77 | 66 |
+| `refresh_stored_decisions.all-closed` | 83 | 72 |
+| `refresh_stored_decisions.no-findings` | 82 | 71 |
+| `refresh_of_another_writers_decision.high-open` | 104 | 93 |
+| `refresh_of_another_writers_decision.all-closed` | 115 | 104 |
+| `refresh_of_another_writers_decision.no-findings` | 113 | 102 |
+
+Guarded by the budget, `test_a_refresh_where_a_watch_holds_reads_each_provider_with_its_component`
+(one read of the asset table, and eight more components behind a provider cost the
+refresh no statement) and `test_a_watch_binds_its_retest_to_the_fingerprint_every_reader_computes`
+(the fingerprint a watch computes is the prefetched readers' one on every profile, and
+nothing is left on the instance). `decision_support`'s graph reads are still the
+follow-up named above.
+
 ## Repeating it
 
 ```bash

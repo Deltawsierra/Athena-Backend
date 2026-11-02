@@ -173,6 +173,25 @@ def _boundary_descriptor(deployment) -> dict | None:
     }
 
 
+def _components(deployment) -> list:
+    """Every component of ``deployment``, retired rows included, read once: the ones
+    the caller prefetched, else in one statement with each provider joined.
+
+    For the descriptor's every part -- the components, the providers behind them,
+    the retired keys and the served route. Each read ``deployment.assets.all()`` for
+    itself, so through an instance that prefetched nothing -- the latent evaluation's
+    and the carry's, on every refresh where a watch holds -- the asset table was read
+    four times and each component's provider fetched one query at a time, eight
+    provider reads for three provider-backed components. Read here, not prefetched
+    onto the instance: it is the caller's, and a reading of this moment left on it
+    would be taken, by a later reader of the same instance, for the graph as it
+    stands then."""
+    prefetched = getattr(deployment, "_prefetched_objects_cache", {}).get("assets")
+    if prefetched is not None:
+        return list(prefetched)
+    return list(deployment.assets.select_related("provider"))
+
+
 def compute_system_fingerprint(deployment) -> str:
     """A deterministic, timestamp-free SHA-256 (hex, 64 chars) over the
     deployment's stable, security-relevant descriptor — its asset graph, the
@@ -182,13 +201,16 @@ def compute_system_fingerprint(deployment) -> str:
     evidence class) changes it, and the mere passage of time never does.
 
     Prefetch ``assets__provider__assertions`` and select_related ``data_boundary``
-    on the caller side to keep it query-light."""
+    on the caller side to keep it query-light. Without the prefetch the components
+    are read once, each with its provider joined (:func:`_components`)."""
+    components = _components(deployment)
+    graph = in_graph(components)
     assets = sorted(
-        (_asset_descriptor(a) for a in in_graph(deployment.assets.all())),
+        (_asset_descriptor(a) for a in graph),
         key=lambda d: (d["kind"], d["identifier"], d["name"]),
-    ) + _retired_keys(deployment)
+    ) + _retired_keys(components)
 
-    providers = _distinct_providers(in_graph(deployment.assets.all()), _provider_descriptor)
+    providers = _distinct_providers(graph, _provider_descriptor)
 
     descriptor = {
         "environment": deployment.environment,
@@ -206,7 +228,7 @@ def compute_system_fingerprint(deployment) -> str:
         # bound to a system whose quantization was unknown was bound to the
         # not-knowing, and learning it is a state change that should re-open the
         # claim.
-        "served_route": served_route_fingerprint(deployment),
+        "served_route": served_route_fingerprint(deployment, components),
     }
     return _digest(descriptor)
 
@@ -365,9 +387,10 @@ def _declared_component_descriptor(component) -> dict:
     }
 
 
-def _retired_keys(deployment) -> list:
-    """The key and kind of every :func:`graph_refs.retired` row, and nothing else of
-    it. A retired row is out of the graph, but its key still decides resolution: a
+def _retired_keys(assets) -> list:
+    """The key and kind of every :func:`graph_refs.retired` row of ``assets`` (a
+    deployment's components, retired rows included), and nothing else of it. A
+    retired row is out of the graph, but its key still decides resolution: a
     reference only it carries names nothing, where without it the reference falls
     through to whatever is CALLED that (``graph_refs.resolve_reference``). Deleting
     one moved an agent's reach -- to another agent's ``admin`` -- and no fingerprint
@@ -376,7 +399,7 @@ def _retired_keys(deployment) -> list:
     return sorted(
         (
             {"retired": True, "kind": a.kind, "identifier": a.identifier}
-            for a in deployment.assets.all()
+            for a in assets
             if retired(a) and a.identifier
         ),
         key=lambda d: (d["kind"], d["identifier"]),
@@ -412,7 +435,7 @@ def _families(deployment) -> dict:
                 "access": _metadata_subset(a.metadata, _ACCESS_METADATA_KEYS),
             }
         )
-        + _retired_keys(deployment),
+        + _retired_keys(deployment.assets.all()),
         "declared_components": sorted(
             (_declared_component_descriptor(c) for c in deployment.declared_components.all()),
             key=lambda d: (d["kind"], d["identifier"], d["name"], d["provider_name"]),

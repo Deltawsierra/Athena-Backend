@@ -209,6 +209,66 @@ def test_a_pause_reads_no_component_of_the_graph(corpus):
     assert _graph_reads(paused) == []
 
 
+def _held(corpus, rank):
+    """A deployment of the corpus whose watch fired and holds its claim (odd ranks)."""
+    from assurance.models import LatentCondition
+
+    dep = sc.build_deployment(corpus, rank, SMALL)
+    assert LatentCondition.objects.filter(deployment=dep, state=LatentCondition.State.FIRED).exists()
+    return dep
+
+
+def test_a_refresh_where_a_watch_holds_reads_each_provider_with_its_component(corpus):
+    """Where a watch holds, the refresh binds the retest it keeps open to the system
+    fingerprint, read through the refresh's own instance, which prefetched nothing.
+    The fingerprint read the asset table four times and each component's provider one
+    query at a time: eight provider reads for the corpus's three provider-backed
+    components, on every such refresh (``tests/spine_statement_budget.toml``). Read
+    once with the providers joined, it reads the table once, and more components behind
+    a provider cost the refresh no statement."""
+    from assurance.decision import refresh_stored_decisions
+    from assurance.fingerprint import compute_system_fingerprint
+    from assurance.models import Asset, Deployment, Provider
+
+    dep = _held(corpus, 3)
+    fingerprint = sc.measure(lambda: compute_system_fingerprint(Deployment.objects.get(pk=dep.pk)))
+    assert _graph_reads(fingerprint) == ["assurance_asset"], _graph_reads(fingerprint)
+
+    refresh_stored_decisions([dep.pk])
+    before = sc.measure(lambda: refresh_stored_decisions([dep.pk]))
+    # Behind a provider the fingerprint already describes, so no assertion is read anew.
+    provider = Provider.objects.get(name="corpus-model-co", kind="model_provider")
+    for n in range(8):
+        Asset.objects.create(deployment=dep, kind=Asset.Kind.MODEL, name=f"extra-model-{n}",
+                             identifier=f"extra-model-{n}", provider=provider)
+    refresh_stored_decisions([dep.pk])
+    after = sc.measure(lambda: refresh_stored_decisions([dep.pk]))
+    assert len(after.statements) == len(before.statements), (len(before.statements), len(after.statements))
+
+
+def test_a_watch_binds_its_retest_to_the_fingerprint_every_reader_computes(corpus):
+    """The fingerprint a watch's retest is bound to (the latent evaluation's, and the
+    carry's when it puts a hold back) is the one the claims, the invalidation check
+    and the receipt compute through their prefetch -- on every finding profile -- and
+    reading it leaves nothing on the caller's instance: a later reader of that
+    instance reads the graph as it stands then, not as the fingerprint read it."""
+    from assurance.fingerprint import compute_system_fingerprint
+    from assurance.latent import _Evaluation
+    from assurance.models import Deployment
+
+    for rank in range(len(sc._PROFILES)):
+        dep = sc.build_deployment(corpus, rank, SMALL)
+        prefetched = (
+            Deployment.objects.prefetch_related("assets__provider__assertions")
+            .select_related("data_boundary")
+            .get(pk=dep.pk)
+        )
+        reading = Deployment.objects.get(pk=dep.pk)
+        watched = _Evaluation(reading, actor=None, now=corpus.clock.now()).system_fp()
+        assert watched == compute_system_fingerprint(prefetched), sc._PROFILES[rank]
+        assert "assets" not in getattr(reading, "_prefetched_objects_cache", {}), sc._PROFILES[rank]
+
+
 def test_the_current_claims_are_found_without_reading_their_history(corpus):
     from django.db import connection
 
