@@ -328,6 +328,21 @@ def _validate_recipients(raw: Any, where: str) -> None:
             _text(entry["tenant"], f"{at}.tenant", allow_empty=True)
         else:
             raise EvidenceRefused(f"{at}.recipient is {RECIPIENT_BOUND!r} or {RECIPIENT_UNBOUND!r}")
+    order = [_recipient_order(entry) for entry in raw]
+    if order != sorted(order):
+        raise EvidenceRefused(f"{where} is sorted by {list(RECIPIENT_ORDER)}")
+
+
+#: The fields v4's ``approval_recipients`` is sorted by, in this order: Achilles'
+#: ``observed_effect.VERIFIED_RECIPIENT_FIELDS``. Never the permit MAC's order, which
+#: is keyed by the nonces the document leaves out.
+RECIPIENT_ORDER: tuple[str, ...] = ("obligation", "approval", "recipient", "destination", "tenant")
+
+
+def _recipient_order(entry: dict) -> tuple[str, ...]:
+    """An entry's sort key, as Achilles' ``observed_effect.recipient_order`` takes it:
+    each field of :data:`RECIPIENT_ORDER` as text, a null as ``""``."""
+    return tuple("" if entry[name] is None else str(entry[name]) for name in RECIPIENT_ORDER)
 
 
 def _validate_verified(raw: Any, schema: str = EVIDENCE_SCHEMA_V3) -> None:

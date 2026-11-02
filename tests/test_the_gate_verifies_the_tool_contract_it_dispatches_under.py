@@ -312,7 +312,7 @@ def test_a_v4_document_with_exactly_its_four_verified_fields_is_recorded(service
     dep, _client, permit, _ = _world()
     (binding,) = _live_bindings(dep)
     envelope, evidence = signed_chains.observed_effect(
-        dep, WF, permit.outcome_id, _now(), schema="v4", reading=_reading(dep), approval_recipients=[BOUND, LEGACY]
+        dep, WF, permit.outcome_id, _now(), schema="v4", reading=_reading(dep), approval_recipients=[LEGACY, BOUND]
     )
     verified = evidence["dispatch"]["verified"]
     assert evidence["schema"] == observed_effects.EVIDENCE_SCHEMA_V4 == "mythos.observed-effect/v4"
@@ -335,7 +335,7 @@ def test_a_v4_document_with_exactly_its_four_verified_fields_is_recorded(service
 
 def _v4(dep, permit, **kw):
     kw.setdefault("reading", _reading(dep))
-    kw.setdefault("approval_recipients", [BOUND, LEGACY])
+    kw.setdefault("approval_recipients", [LEGACY, BOUND])
     return signed_chains.observed_effect(dep, WF, permit.outcome_id, _now(), schema="v4", **kw)[1]
 
 
@@ -394,6 +394,9 @@ def test_a_v4_document_with_an_extra_missing_or_malformed_verified_field_is_refu
         "a bound recipient with a null tenant": put([{**BOUND, "tenant": None}], "approval_recipients"),
         "an approval id that is not a digest": put([{**BOUND, "approval": "approval-1"}], "approval_recipients"),
         "an empty obligation": put([{**BOUND, "obligation": ""}], "approval_recipients"),
+        # Sorted by (obligation, approval, recipient, destination, tenant), as Achilles
+        # sorts them (observed_effect.recipient_order): "manager..." before "two...".
+        "recipients out of their order": put([BOUND, LEGACY], "approval_recipients"),
     }
     for why, change in cases.items():
         with pytest.raises(observed_effects.EvidenceRefused):
@@ -414,6 +417,7 @@ def test_the_valid_v4_shapes_are_read(service):
     for kw in (
         {"approval_recipients": []},
         {"approval_recipients": [LEGACY]},
+        {"approval_recipients": [LEGACY, BOUND]},
         {"approval_recipients": [{**BOUND, "approval": "", "destination": "", "tenant": ""}]},
         {"reading": None},  # no link: no reading, no tool contract
         {"approvals_digest": "sha256:" + "a5" * 32},
@@ -700,14 +704,14 @@ def test_the_new_codes_are_published():
 
 def test_the_effects_read_serves_its_approval_recipients_as_signed(service, engine_keyring):
     dep, client, permit, _ = _world()
-    row4, _ = _record(service, dep, permit, schema="v4", reading=_reading(dep), approval_recipients=[BOUND, LEGACY])
+    row4, _ = _record(service, dep, permit, schema="v4", reading=_reading(dep), approval_recipients=[LEGACY, BOUND])
     none4, _ = _record(service, dep, permit, schema="v4", reading=_reading(dep), approval_recipients=[])
     row3, _ = _record(service, dep, permit, schema="v3", reading=_reading(dep))
 
     outcomes = {o["outcome_id"]: o for o in client.get(_base(dep) + "chain-outcomes/").json()["outcomes"]}
 
-    assert outcomes[row4.outcome_id]["approval_recipients"] == [BOUND, LEGACY]
-    assert [e["recipient"] for e in outcomes[row4.outcome_id]["approval_recipients"]] == ["bound", "unbound"]
+    assert outcomes[row4.outcome_id]["approval_recipients"] == [LEGACY, BOUND]
+    assert [e["recipient"] for e in outcomes[row4.outcome_id]["approval_recipients"]] == ["unbound", "bound"]
     assert outcomes[none4.outcome_id]["approval_recipients"] == []
     assert outcomes[row3.outcome_id]["approval_recipients"] is None  # v3 records none
     assert outcomes[permit.outcome_id]["approval_recipients"] is None  # a permit check is no effect
