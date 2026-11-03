@@ -108,7 +108,8 @@ reconcile; the module that serves a demotion or a removal (:mod:`accounts`) impo
 nothing of this one -- it sends a signal, and what listens here only notes the work.
 A withdrawal's revocation is signed AFTER the stop is answered: inside a request, once
 the response has been sent and closed (Django's ``request_finished``, which a server
-sends after the last byte -- :func:`after_the_answer`); outside one, once the
+sends after the last byte -- :func:`after_the_answer`; under WSGI and under ASGI
+alike, on the request's own worker thread, never on an event loop); outside one, once the
 withdrawal commits. Its key, its signature, its read of the records and the decision
 refresh its record schedules all come after the answer, and a failure of any of them
 is logged and changes nothing the stop did. The token refresh is the route an operator
@@ -141,12 +142,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
 
-from asgiref.local import Local
 from django.db import transaction
 from mythos_core import outcome as oc
 
@@ -743,8 +744,18 @@ def reconcile(now: datetime | None = None) -> Reconciled:
 
 # ------------------------------------------- after the answer: never before a stop's
 
-#: The work noted while a request is served, run once its response is closed.
-_after_answer = Local()
+#: The work noted while a request is served, run once its response is closed: kept per
+#: THREAD, the one Django serves the request's database connection from (its
+#: connections are thread-critical for this reason). Under WSGI that thread serves the
+#: whole request. Under ASGI (``config.asgi``) Django's handler runs every synchronous
+#: part of one request -- the ``request_started`` receivers, the view, and the
+#: response's ``close()`` that sends ``request_finished`` -- on one worker thread of
+#: that request's own, so it is that thread here too. A context-local would not do:
+#: the handler sends ``request_started`` through ``Signal.asend``, which runs the
+#: synchronous receivers inside ``asyncio.gather`` -- in a task of its own -- so a
+#: context variable they set never reaches the view, which then read "no request"
+#: and ran the revocation on its commit, before the answer (AB-ASGI-DEFER).
+_after_answer = threading.local()
 
 
 def after_the_answer(job: Callable[[], object]) -> None:

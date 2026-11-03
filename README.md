@@ -465,7 +465,11 @@ backend.
   of each grant the account no longer holds, `revoked_at` the instant of the
   withdrawal, so a later effect reads `delegation_revoked` (an effect before it stays
   proven). It is signed only after the stop is answered (once the response is sent),
-  never before: the accounts app imports none of the identity code. A held role is
+  never before: the accounts app imports none of the identity code. That holds under
+  the ASGI entry point (`config.asgi`: uvicorn, daphne) as under WSGI: the work is
+  noted on the thread that serves the request and runs there once the response is
+  closed, never on the event loop, so a stop served meanwhile never waits on it
+  (AB-ASGI-DEFER). A held role is
   kept proven by `manage.py reconcile_role_grants`, which re-asserts each grant still
   held (a new record, a new 24 h window) once it has less than 12 h left, and revokes
   any lease of a grant no longer held (a role changed by a path that announced
