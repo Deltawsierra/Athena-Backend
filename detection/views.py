@@ -7,6 +7,7 @@ from rest_framework import status, generics
 from django.http import HttpResponse 
 
 from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
+from safety.degraded import AUDIT_INCOMPLETE
 
 from . import log_upload
 from .models import ThreatDetection, CVEClassifyResult
@@ -19,6 +20,30 @@ from .serializers import (
 )
 
 from .utils import generate_cve_pdf 
+
+
+def _unread_verdict(engine_response):
+    """A 502 when the defender's answer is not its contract (``{"alerts": [...]}``,
+    tests/test_engine_contract.py), else None.
+
+    ``detected`` was ``bool(engine_response.get("alerts"))``, so an answer with no
+    ``alerts`` -- ``{}``, an error object a proxy answered 200 with, ``alerts: null``
+    -- was recorded and served as "nothing detected": an engine answering garbage
+    read as a clean verdict. A verdict nothing established is audit incomplete
+    (G14; the owner's decision 13), and nothing is recorded as clean."""
+    alerts = engine_response.get("alerts") if isinstance(engine_response, dict) else None
+    if isinstance(alerts, list):
+        return None
+    return Response(
+        {
+            "error": (
+                "The engine's answer carried no alerts list, so nothing was established about "
+                "this log: it is not recorded, and it is not clean."
+            ),
+            "status": AUDIT_INCOMPLETE,
+        },
+        status=status.HTTP_502_BAD_GATEWAY,
+    )
 
 
 # =========================================================
@@ -47,6 +72,9 @@ class DefenderTextScanAPIView(APIView):
                 {"error": str(e)},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+        unread = _unread_verdict(engine_response)
+        if unread is not None:
+            return unread
 
         detection = ThreatDetection.objects.create(
             file_name="text_input",
@@ -86,6 +114,9 @@ class DefenderFileScanAPIView(APIView):
                 {"error": str(e)},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+        unread = _unread_verdict(engine_response)
+        if unread is not None:
+            return unread
 
         detection = ThreatDetection.objects.create(
             file_name=uploaded_file.name,

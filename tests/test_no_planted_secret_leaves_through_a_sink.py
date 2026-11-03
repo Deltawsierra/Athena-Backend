@@ -450,11 +450,17 @@ class Engine:
         if path == "/api/classify-cve":
             return 200, {"label": "CWE-79", "confidence": 0.9}
         if path in ("/api/defend-log/text", "/api/defend-log/file"):
-            return 200, {"verdict": "benign", "findings": []}
+            # In the defender's contract, an alerts list (G14: one without is no verdict).
+            return 200, {"verdict": "benign", "findings": [], "alerts": []}
         if path == "/api/failsafe/state":
             return 200, {"engine_id": "athena-engine", "state": "running", "since": None}
         if path == "/api/assurance/check":
             return 200, {"verdict": "unchanged"}
+        # The preflight's other two questions (G14): unanswered, they held every launch.
+        if path == "/api/extensions":
+            return 200, {"review": {"verdict": "ok"}}
+        if path.startswith("/api/authority/unattributed"):
+            return 200, {"effects": []}
         return 404, {"detail": f"no {method} {path}"}
 
 

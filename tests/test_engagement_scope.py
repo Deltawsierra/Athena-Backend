@@ -58,7 +58,10 @@ def launch(factory, user, url=TARGET, engagement=None, **extra):
 
     engine = mock.Mock()
     engine.run_scan.return_value = {"results": [{"type": "info"}]}
+    # The preflight answers clean: these tests are about the engagement's scope, not the gate, and a
+    # bare Mock's answers are no verdict, which holds a launch in every mode (G14).
     with mock.patch("pentest.views.target_is_out_of_bounds", return_value=None), \
+            mock.patch("pentest.views.preflight.check", return_value={"verdict": "ok"}), \
             mock.patch("pentest.views.CyberEngineClient") as client, \
             mock.patch("pentest.views.render_scan_pdf_bytes", return_value=b"%PDF-"), \
             mock.patch("pentest.views.save_pdf_to_scan"):
