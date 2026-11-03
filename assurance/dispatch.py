@@ -62,6 +62,7 @@ from .models import (
     Finding,
 )
 from . import oplog as _oplog
+from . import worker_reports as _worker_reports
 from .oplog import emit_now, log_later
 
 __all__ = ["emit_now", "log_later"]
@@ -1709,7 +1710,13 @@ def ensure_owed_sweeper() -> None:
     by the WSGI and ASGI entry points, so it starts in the process that serves -- a
     pre-forking server's worker, never its master -- on that process's first
     request. One that died, or could not start, is started again (after a backoff,
-    for a start that failed). Costs a comparison and a liveness check after that."""
+    for a start that failed). Costs a comparison and a liveness check after that.
+
+    The same for this worker's report publisher (:mod:`assurance.worker_reports`),
+    which publishes :func:`degraded_counts` where every worker and ``/api/health/``
+    read them: a comparison and a liveness check, and on the first request a thread
+    started -- never a write, never a wait."""
+    _worker_reports.ensure_publisher(degraded_counts)
     if _oplog._BUF:
         # Records a shortage of threads left queued: the log thread is started
         # again (a check, when it is running).
