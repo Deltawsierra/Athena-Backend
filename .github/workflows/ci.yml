@@ -164,6 +164,11 @@ jobs:
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
   # statement (a subquery over every deployment) costs no statement, so only that test,
   # reading the plans and the rows each statement visits, sees it.
+  # It runs the outbound transport's own tests too (safety/outbound.py: every stop's
+  # transport), and the scan target's login test beside them: Windows does not refuse
+  # a closed loopback port at once, it times the connect out, and urllib3's timed-out
+  # connect carries the connection object, whose repr names the host and port. Only
+  # Windows meets that shape for real, so only this job proves no error says it.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -227,6 +232,8 @@ jobs:
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
+            tests/test_the_outbound_transport_shows_no_target_detail.py \
+            tests/test_a_scan_target_s_login_is_said_nowhere.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \

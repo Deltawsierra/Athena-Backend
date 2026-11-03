@@ -29,7 +29,7 @@ call site                                 what it reaches, with which credential
                                           its own proxy setting only
 ========================================  =======================================
 
-Three things hold at every one of them.
+These hold at every one of them.
 
 * **No redirect to another host is followed, and outside the engine's lane none
   at all.** Each of these is a machine API at a base URL an operator configured.
@@ -76,23 +76,39 @@ Three things hold at every one of them.
   roots an operator named in ``REQUESTS_CA_BUNDLE`` or ``CURL_CA_BUNDLE`` are still
   used: they are trust, not a credential, and dropping them would only fail
   verification closed.
-* **No error quotes a credential.** ``requests`` puts the request's path and
-  query in the text of a failed connection ("Max retries exceeded with url:
-  /services/T0/B0/<the webhook's secret>?token=..."), and a malformed URL whole,
-  userinfo and all, in an ``InvalidURL``; the call sites put that text in a
-  record (a dispatch attempt, a closure forward's ``last_error``, a scan's error),
-  an answer and a log line with its traceback. So an exception raised here has
-  its text, and the text of every exception it was caused by, cut to the
-  scheme, host and port of any URL in it, and every header value the request
-  carried, the proxy's userinfo and each value a call site asks to be withheld (a
-  scan target's login) withheld; what it is (its class, and the cause the call
-  sites classify a failure by) is unchanged, and it is the same exception object.
-  An answer is read with every credential the request carried, the proxy's among
-  them, withheld from its body: whoever answered may quote the request back (a
-  debugging proxy's error page does, headers and all), and the engine's refusal
-  becomes ``Engine error <status>: <its body>`` on a scan's record, its answer and
-  its report. Withholding never raises and never waits: if it fails, the
-  exception says only its class.
+* **No error quotes a credential.** Nor does it say anything of its target.
+  ``requests`` puts the request's path and query in the text of a failed connection ("Max retries exceeded with url:
+  /services/T0/B0/<the webhook's secret>?token=..."), a malformed URL whole,
+  userinfo and all, in an ``InvalidURL``, and urllib3 the connection itself in a
+  connect that timed out, whose ``repr`` names the host and port
+  (``ConnectTimeoutError(<HTTPConnection(host=..., port=...)>, ...)``: what
+  Windows raises for a closed port, which it does not refuse at once). The call
+  sites put that text in a record (a dispatch attempt, a closure forward's
+  ``last_error``, a scan's error), an answer and a log line with its traceback.
+  So every exception raised here, and every exception it was raised from, during
+  or with, says one fixed message, its own class and an opaque reference the
+  whole chain shares (:func:`said_of_a_failed_send`), and nothing else: never the
+  target's host, port, path, query, login or fragment, nor a credential. Its
+  exception arguments are kept, so what it is -- its class, and the cause the call
+  sites classify a failure by (requests' ``MaxRetryError`` and its ``reason``) --
+  is unchanged, and it is the same exception object. An answer is read with every
+  credential the request carried, the proxy's among them, withheld from its body:
+  whoever answered may quote the request back (a debugging proxy's error page
+  does, headers and all), and the engine's refusal becomes ``Engine error
+  <status>: <its body>`` on a scan's record, its answer and its report.
+  Withholding never raises and never waits: if it fails, the exception says only
+  its class.
+
+* **A call may ask for a total deadline, and only a call that asks gets one.**
+  ``total=`` (seconds) bounds the whole call -- connecting, every redirect hop,
+  the status line, the headers and, unless ``stream`` is set, the body -- however
+  slowly the far end drips it: a timer shuts the call's sockets down when it
+  passes, and the call raises :class:`TotalDeadlineExceeded` (a ``ReadTimeout``:
+  the request may have been sent), quieted as above. The timer is cancelled and
+  joined before the call returns, and the call's own sockets are closed, so no
+  thread or socket outlives it. A call that does not pass ``total=`` -- every
+  stop's among them -- is sent exactly as before: no timer, no thread, no lock
+  and no wait is added to it.
 
 * **No log record of the HTTP client quotes a request's query or a credential.**
   urllib3 records every request line at DEBUG, query and all (``"GET
@@ -102,9 +118,11 @@ Three things hold at every one of them.
   rewrites every such record before any handler sees it: each query string is
   withheld, and so is every value the call in flight withholds from an error (its
   credential headers, the proxy's userinfo, ``also_withhold``), which a contextvar
-  carries from :func:`_send` to the record. The record is kept -- the method, host
-  and path still say what was sent -- and the filter never drops one and never
-  raises: a record it cannot rewrite says only that it was withheld.
+  carries from :func:`_send` to the record; an exception the record carries, as
+  its ``exc_info`` or as an argument, is quieted as an error raised here is. The
+  record is kept -- the method, host and path of a request line still say what
+  was sent -- and the filter never drops one and never raises: a record it cannot
+  rewrite says only that it was withheld.
 
 Nothing here decides whether a request may be sent: a scan's Stop goes through
 :func:`post` like every other call, on the engine's lane, and what changes for it
@@ -117,14 +135,19 @@ from __future__ import annotations
 import base64
 import contextlib
 import contextvars
+import itertools
 import logging
+import math
 import os
 import re
+import socket
+import threading
 import time
 import urllib.request
 from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
+import requests.adapters
 
 #: The headers whose values are not secrets and are left in an error's text.
 _PLAIN_HEADERS = frozenset({"accept", "content-type", "content-length", "user-agent", "idempotency-key"})
@@ -182,7 +205,8 @@ def _replaced(text: str, secrets=()) -> str:
 
 def withhold(text: str, secrets=()) -> str:
     """``text`` with every URL cut to its scheme, host and port, every quoted request
-    path withheld, and each of ``secrets`` withheld."""
+    path withheld, and each of ``secrets`` withheld. (An error raised here says
+    none of that text any more: :func:`quiet`.)"""
     text = _replaced(text, secrets)
     text = _INVALID.sub(lambda m: f"{m.group('lead')}{WITHHELD}{m.group('end')}", text)
     text = _URL.sub(_origin, text)
@@ -208,21 +232,82 @@ def _chain(exc: BaseException):
         )
 
 
+#: What every error raised here says, with its class and its reference
+#: (:func:`said_of_a_failed_send`).
+FAILED_SEND = "the outbound request failed"
+
+#: An opaque reference for each failed send: a prefix drawn once, when this module
+#: is imported, and a count. It names one failure -- each exception of its chain
+#: carries the same one, so a record and a log line of it can be matched -- and
+#: says nothing of what was asked. Taken with no lock (``next`` on a count is one
+#: step under the interpreter lock) and nothing read from the system.
+_REFERENCE_PREFIX = os.urandom(3).hex()
+_REFERENCE_COUNT = itertools.count(1)
+
+def _reference() -> str:
+    return f"ob-{_REFERENCE_PREFIX}-{next(_REFERENCE_COUNT):x}"
+
+
+def said_of_a_failed_send(exc: BaseException, reference: str) -> str:
+    """What an exception of a failed send says: :data:`FAILED_SEND`, its class and
+    ``reference`` -- the same three words whatever was asked and wherever."""
+    return f"{FAILED_SEND} ({type(exc).__name__}; ref {reference})"
+
+
+def _say_only(current: BaseException, said: str) -> None:
+    """``current`` says ``said`` and nothing else. Its exception arguments are kept
+    (a call site classifies a failure by them); every other argument -- text, and an
+    object whose ``repr`` names the host and port (urllib3's connection) -- is not.
+    An ``OSError`` (an ``SSLError`` among them) is said from its ``strerror`` and
+    ``filename``, not its arguments, and a ``UnicodeError`` from the text it could
+    not encode: those are emptied too."""
+    current.args = tuple(arg for arg in current.args if isinstance(arg, BaseException)) or (said,)
+    # Text kept beside the arguments, which ``str`` does not read but a reader of the
+    # object (or of its pickle: urllib3's ``__reduce__``) does.
+    if isinstance(getattr(current, "url", None), str):
+        current.url = WITHHELD
+    if isinstance(getattr(current, "_message", None), str):
+        current._message = WITHHELD
+    if isinstance(getattr(current, "_host", None), str):
+        current._host = WITHHELD
+    if isinstance(current, OSError):
+        # Only what is set: an attribute set to None is said as "None" (requests'
+        # own exceptions are OSErrors with none of these).
+        if current.strerror is not None:
+            current.strerror = said
+        if current.filename is not None:
+            current.filename = WITHHELD
+        if current.filename2 is not None:
+            current.filename2 = WITHHELD
+    if isinstance(current, UnicodeError) and isinstance(getattr(current, "object", None), (str, bytes)):
+        current.object = current.object[:0]
+        current.reason = said
+
+
 def quiet(exc: BaseException, secrets=(), *, urls: bool = True) -> BaseException:
-    """``exc``, its text and its causes' withheld in place (:func:`withhold`; with
-    ``urls=False``, ``secrets`` alone, every URL left as it is -- a message this
-    service wrote). The same object, so its class and its causes still say what
-    failed. Never raises: an exception that cannot be withheld says only its class."""
+    """``exc`` and every exception it was raised from, during or with, quieted in
+    place: the same objects, so their classes and causes still say what failed.
+
+    By default (a failed send: every error raised here, and every exception an HTTP
+    client record carries) each says :data:`FAILED_SEND`, its class and one opaque
+    reference the chain shares, and nothing else (:func:`_say_only`). With
+    ``urls=False`` (a message this service wrote, which says what the call site
+    chose) only ``secrets`` are withheld from its text and every URL is left as it
+    is. Never raises: an exception that cannot be quieted says only its class."""
     try:
+        if urls:
+            reference = _reference()
+            for current in _chain(exc):
+                _say_only(current, said_of_a_failed_send(current, reference))
+            return exc
         values = _longest_first(value for value in secrets if isinstance(value, str) and value)
-        rewrite = withhold if urls else _replaced
         for current in _chain(exc):
             current.args = tuple(
-                rewrite(arg, values) if isinstance(arg, str) else arg for arg in current.args
+                _replaced(arg, values) if isinstance(arg, str) else arg for arg in current.args
             )
             url = getattr(current, "url", None)
             if isinstance(url, str):
-                current.url = rewrite(url, values)
+                current.url = _replaced(url, values)
     except Exception:  # noqa: BLE001 - withholding fails towards saying less
         try:
             linked = list(_chain(exc))
@@ -235,6 +320,14 @@ def quiet(exc: BaseException, secrets=(), *, urls: bool = True) -> BaseException
             with contextlib.suppress(Exception):
                 if isinstance(getattr(current, "url", None), str):
                     current.url = WITHHELD
+            with contextlib.suppress(Exception):
+                if isinstance(current, OSError):
+                    if current.strerror is not None:
+                        current.strerror = type(current).__name__
+                    if current.filename is not None:
+                        current.filename = WITHHELD
+                    if current.filename2 is not None:
+                        current.filename2 = WITHHELD
     return exc
 
 
@@ -359,8 +452,9 @@ def withheld_record_text(text: str, secrets=()) -> str:
 class _ClientRecordFilter(logging.Filter):
     """Rewrites an HTTP client record before any handler sees it: every query string
     and every value the call in flight withholds, in its message and in each of its
-    arguments (an argument that is not text is written out first, an exception's
-    text included). Keeps every record; never raises."""
+    arguments (an argument that is not text is written out first; an exception, its
+    own or its ``exc_info``, is quieted as an error raised here is, :func:`quiet`).
+    Keeps every record; never raises."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -385,6 +479,10 @@ class _ClientRecordFilter(logging.Filter):
     def _argument(value, secrets):
         if isinstance(value, (int, float)) or value is None:
             return value
+        if isinstance(value, BaseException):
+            # urllib3 names a connection's failure by the exception ("after connection
+            # broken by '%r'"), whose repr names the host and port: quieted first.
+            value = quiet(value, secrets)
         return withheld_record_text(value if isinstance(value, str) else str(value), secrets)
 
 
@@ -547,7 +645,174 @@ def _chain_deadline(timeout):
         return None, None, None
 
 
-def _send(method: str, url: str, *, engine: bool = False, also_withhold=(), **kwargs) -> requests.Response:
+# ---------------------------------------------------------------------------
+# A total deadline, for a call that asks for one (``total=``)
+# ---------------------------------------------------------------------------
+
+#: The name of the thread a ``total=`` deadline runs on: one per call that asks,
+#: cancelled and joined before that call returns.
+TOTAL_TIMER_NAME = "outbound-total-deadline"
+
+
+class TotalDeadlineExceeded(requests.exceptions.ReadTimeout):
+    """A call given ``total=`` did not finish within it, and its sockets were shut
+    down at the deadline. A ``ReadTimeout``: the request may have been sent, so a
+    caller reads it as an answer not known, never as a request that never left."""
+
+
+def _shut(sock) -> None:
+    """``sock`` shut down both ways, which wakes a read blocked on it in another
+    thread. The plain socket's own call, so a TLS socket is shut at the transport
+    and its TLS state is left to the thread reading it. Never raises."""
+    with contextlib.suppress(Exception):
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+
+class _Deadline:
+    """One call's ``total=``: when it ends, every connection the call opened, a
+    duplicate of each one's socket (a TLS handshake holds the socket where the
+    connection does not yet show it), and :meth:`expire`, which the timer runs."""
+
+    def __init__(self, total: float):
+        self.ends = time.monotonic() + total
+        self.passed = threading.Event()
+        self.connections: list = []
+        self.sockets: list = []
+        self._classes: dict = {}
+
+    def over(self) -> bool:
+        return self.passed.is_set() or time.monotonic() >= self.ends
+
+    def expire(self) -> None:
+        """The deadline passed: every socket the call opened is shut down."""
+        self.passed.set()
+        for connection in list(self.connections):
+            sock = getattr(connection, "sock", None)
+            if sock is not None:
+                _shut(sock)
+        for sock in list(self.sockets):
+            _shut(sock)
+
+    def release(self) -> None:
+        """Close the duplicates this deadline keeps (the connections' own sockets are
+        closed by urllib3 and the session, as on any call)."""
+        for sock in self.sockets:
+            with contextlib.suppress(Exception):
+                sock.close()
+
+    def watch(self, sending: requests.Session) -> None:
+        """Every connection ``sending`` opens is one this deadline shuts down."""
+        adapter = _HeldAdapter(self)
+        sending.mount("https://", adapter)
+        sending.mount("http://", adapter)
+
+    def hold(self, pool) -> None:
+        """``pool``'s new connections are opened as this deadline's (:meth:`_held`)."""
+        base = pool.ConnectionCls
+        if getattr(base, "_outbound_deadline", None) is self:
+            return
+        if base not in self._classes:
+            self._classes[base] = self._held(base)
+        pool.ConnectionCls = self._classes[base]
+
+    def _held(self, base):
+        deadline = self
+
+        class Held(base):
+            _outbound_deadline = deadline
+
+            def _new_conn(self):
+                deadline.connections.append(self)
+                left = deadline.ends - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("total deadline")
+                # A connect never runs past the deadline: the timer has no socket to
+                # shut down until there is one.
+                if self.timeout is None or (isinstance(self.timeout, (int, float)) and self.timeout > left):
+                    self.timeout = left
+                sock = super()._new_conn()
+                with contextlib.suppress(Exception):
+                    deadline.sockets.append(sock.dup())
+                if deadline.passed.is_set():
+                    _shut(sock)
+                return sock
+
+        Held.__name__ = Held.__qualname__ = f"Held{base.__name__}"
+        return Held
+
+
+class _HeldAdapter(requests.adapters.HTTPAdapter):
+    """requests' adapter, whose connection pools open their connections as one
+    ``total=`` deadline's (:meth:`_Deadline.hold`)."""
+
+    def __init__(self, deadline: _Deadline):
+        self._deadline = deadline
+        super().__init__()
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        pool = super().get_connection_with_tls_context(request, verify, proxies=proxies, cert=cert)
+        self._deadline.hold(pool)
+        return pool
+
+
+def _seconds(total) -> float:
+    """``total`` as a number of seconds, or ValueError (a caller's mistake, raised
+    before anything is sent)."""
+    if isinstance(total, bool) or not isinstance(total, (int, float)) or not math.isfinite(total) or total <= 0:
+        raise ValueError("total= is a positive, finite number of seconds")
+    return float(total)
+
+
+def _arm(deadline: _Deadline, total: float) -> threading.Timer:
+    """The timer that runs ``deadline.expire`` when ``total`` seconds have passed."""
+    timer = threading.Timer(total, deadline.expire)
+    timer.name = TOTAL_TIMER_NAME
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _past_deadline(said, cause: BaseException | None) -> TotalDeadlineExceeded:
+    exc = TotalDeadlineExceeded()
+    exc.__cause__ = cause
+    quiet(exc, said)
+    return exc
+
+
+def _send_within(total: float, method, url, engine, kwargs, carried, said, proxies) -> requests.Response:
+    """:func:`_send_withheld` within ``total`` seconds in all (``total=``)."""
+    deadline = _Deadline(total)
+    try:
+        timer = _arm(deadline, total)
+    except Exception as exc:  # noqa: BLE001 - no thread to bound it: nothing is sent, and the call fails as a send that could not be made
+        quiet(exc, said)
+        failed = requests.exceptions.RequestException()
+        failed.__cause__ = exc
+        quiet(failed, said)
+        raise failed from exc
+    try:
+        try:
+            response = _send_withheld(method, url, engine, kwargs, carried, said, proxies, deadline)
+        except Exception as exc:
+            if deadline.over():
+                raise _past_deadline(said, exc) from exc
+            raise
+        if deadline.passed.is_set():
+            # Shut down while the answer was read: a body read to a close may be cut
+            # short, so it is not handed on as whole.
+            with contextlib.suppress(Exception):
+                response.close()
+            raise _past_deadline(said, None)
+        return response
+    finally:
+        timer.cancel()
+        timer.join()
+        deadline.release()
+
+
+def _send(method: str, url: str, *, engine: bool = False, also_withhold=(), total=None, **kwargs) -> requests.Response:
+    if total is not None:
+        total = _seconds(total)
     kwargs["allow_redirects"] = False
     kwargs.setdefault("verify", _configured_ca_bundle())
     carried = _secrets(kwargs)
@@ -567,15 +832,21 @@ def _send(method: str, url: str, *, engine: bool = False, also_withhold=(), **kw
     # What the HTTP client's own log records of this call withhold (_ClientRecordFilter).
     in_flight = _IN_FLIGHT.set(tuple(said))
     try:
-        return _send_withheld(method, url, engine, kwargs, carried, said, proxies)
+        if total is None:
+            # Every call that did not ask for a total deadline -- every stop's among
+            # them -- is sent as it always was: no timer, no thread, no lock, no wait.
+            return _send_withheld(method, url, engine, kwargs, carried, said, proxies)
+        return _send_within(total, method, url, engine, kwargs, carried, said, proxies)
     finally:
         _IN_FLIGHT.reset(in_flight)
 
 
-def _send_withheld(method, url, engine, kwargs, carried, said, proxies) -> requests.Response:
+def _send_withheld(method, url, engine, kwargs, carried, said, proxies, deadline=None) -> requests.Response:
     # As requests.get and requests.post do: one Session for the call, closed after
     # it (a streamed answer is still read to its end).
     with session() as sending:
+        if deadline is not None:
+            deadline.watch(sending)
         # One deadline for the whole redirect chain on the engine's lane (connect and
         # read reduced to the time left on each hop), so a Stop through several hops
         # finishes, or fails and is owed, within one call's budget -- not once per hop.
@@ -603,10 +874,10 @@ def _send_withheld(method, url, engine, kwargs, carried, said, proxies) -> reque
                 quiet(exc, said)
                 raise
             except Exception as exc:  # noqa: BLE001 - a failure to prepare or send a request (a proxy built from a password that will not encode) is a failed send, quieted and owed, never a 500 out of the stop route
-                quiet(exc, said)
-                raise requests.exceptions.RequestException(
-                    f"the request could not be prepared or sent ({type(exc).__name__})"
-                ) from exc
+                failed = requests.exceptions.RequestException()
+                failed.__cause__ = exc
+                quiet(failed, said)
+                raise failed from exc
             following = _same_host_hop(method, url, response) if engine and hops < ENGINE_REDIRECT_HOPS else None
             if following is None:
                 break
@@ -618,14 +889,16 @@ def _send_withheld(method, url, engine, kwargs, carried, said, proxies) -> reque
     return response
 
 
-def get(url: str, *, engine: bool = False, also_withhold=(), **kwargs) -> requests.Response:
+def get(url: str, *, engine: bool = False, also_withhold=(), total=None, **kwargs) -> requests.Response:
     """``requests.get``, following no redirect and reading nothing from the environment;
     on the engine's lane (``engine=True``) following a redirect that stays on the
     engine's host and taking the environment's proxy. ``also_withhold``: further
-    values no error may quote (a scan target's login)."""
-    return _send("GET", url, engine=engine, also_withhold=also_withhold, **kwargs)
+    values no error may quote (a scan target's login). ``total``: seconds the whole
+    call may take, its sockets shut down when they pass (:class:`TotalDeadlineExceeded`);
+    opt-in, and a call without it is sent exactly as before."""
+    return _send("GET", url, engine=engine, also_withhold=also_withhold, total=total, **kwargs)
 
 
-def post(url: str, *, engine: bool = False, also_withhold=(), **kwargs) -> requests.Response:
+def post(url: str, *, engine: bool = False, also_withhold=(), total=None, **kwargs) -> requests.Response:
     """``requests.post``, as :func:`get` sends a GET."""
-    return _send("POST", url, engine=engine, also_withhold=also_withhold, **kwargs)
+    return _send("POST", url, engine=engine, also_withhold=also_withhold, total=total, **kwargs)

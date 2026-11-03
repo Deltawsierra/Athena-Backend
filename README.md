@@ -1739,9 +1739,17 @@ sends is the record itself in most of those places; where it is found is printed
 Every request this service sends with `requests` itself -- to the engine, from the
 defender gateway, to a customer's connector or posture source, and the closure
 forward to Minotaur -- goes through `safety/outbound.py`: no `.netrc` login is
-read, an error is cut to the scheme, host and port of any URL in it with every
-header value withheld, and an answer is read with every credential the request
-carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
+read, an error it raises (and every exception that error carries) says one fixed
+message, its class and an opaque reference (`the outbound request failed
+(ConnectTimeoutError; ref ob-1a2b3c-7)`) and never the target's host, port, path,
+query, login or fragment, and an answer is read with every credential the request
+carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`,
+`tests/test_the_outbound_transport_shows_no_target_detail.py`). A call may ask for
+a total deadline (`total=`, seconds): a timer shuts its sockets down when it passes,
+however slowly the far end drips its status line, headers or body, and the call
+raises `TotalDeadlineExceeded`, leaving no thread or socket behind. It is opt-in: a
+call that does not pass it, every stop's included, is sent exactly as before, with
+no timer, thread, lock or wait added.
 
 - **The engine** (the engine client: a scan's launch, its status, its Stop, file
   uploads and every other engine call; and the defender gateway's `/defend`, which
