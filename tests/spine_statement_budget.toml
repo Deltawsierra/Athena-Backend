@@ -37,18 +37,18 @@ recompute_decision.all-accepted = { statements = 30 }
 recompute_decision.no-findings = { statements = 29 }
 
 refresh_stored_decisions.critical-open = { statements = 59 }
-refresh_stored_decisions.high-open = { statements = 77 }
+refresh_stored_decisions.high-open = { statements = 66 }
 refresh_stored_decisions.medium-and-below = { statements = 59 }
-refresh_stored_decisions.all-closed = { statements = 83 }
+refresh_stored_decisions.all-closed = { statements = 72 }
 refresh_stored_decisions.all-accepted = { statements = 58 }
-refresh_stored_decisions.no-findings = { statements = 82 }
+refresh_stored_decisions.no-findings = { statements = 71 }
 
 refresh_of_another_writers_decision.critical-open = { statements = 92 }
-refresh_of_another_writers_decision.high-open = { statements = 104 }
+refresh_of_another_writers_decision.high-open = { statements = 93 }
 refresh_of_another_writers_decision.medium-and-below = { statements = 92 }
-refresh_of_another_writers_decision.all-closed = { statements = 115 }
+refresh_of_another_writers_decision.all-closed = { statements = 104 }
 refresh_of_another_writers_decision.all-accepted = { statements = 90 }
-refresh_of_another_writers_decision.no-findings = { statements = 113 }
+refresh_of_another_writers_decision.no-findings = { statements = 102 }
 
 decision_support.critical-open = { statements = 39 }
 decision_support.high-open = { statements = 21 }
