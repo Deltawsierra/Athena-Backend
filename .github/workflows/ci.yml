@@ -164,6 +164,9 @@ jobs:
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
   # statement (a subquery over every deployment) costs no statement, so only that test,
   # reading the plans and the rows each statement visits, sees it.
+  # It also runs the launch-path tripwire (no place in this backend's code, routed or not,
+  # starts a scan without the preflight first) and readiness's hung-engine and cache
+  # tests, whose sockets and timeouts are the platform's own.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -227,6 +230,8 @@ jobs:
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
+            tests/test_no_launch_path_skips_the_preflight.py \
+            tests/test_readiness_never_waits_on_a_slow_engine.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \

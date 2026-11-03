@@ -148,12 +148,6 @@ MATRIX = {
         "with the key: one row, one engine run; without: unchanged",
         ("test_an_llm_scan_launch_replayed_with_its_key_starts_one_engine_run",),
     ),
-    "llm-scan-view-unrouted": Boundary(
-        "pentest.views_llm.PentestLLMScanView: an engine LLM run and a row, in a view no URL names",
-        "none", "none (unreachable)",
-        "cannot be fired: no route reaches it",
-        ("test_the_unrouted_llm_scan_view_is_reachable_by_no_url",),
-    ),
     "report-email": Boundary(
         "The scan report e-mailed (pentest.utils.send_pentest_scan_email, through pentest.views._mail_report): "
         "once by a scan launch; once by the collect of a run that outlasted its launch (POST "
@@ -393,8 +387,6 @@ SITES = {
     "pentest/views.py::run_pentest_scan::PentestScan.objects.create": "engine-scan-start",
     "pentest/views.py::_send_launch::run_scan": "engine-scan-start",
     "pentest/views.py::_send_stop::abort_scan": "engine-scan-stop",
-    "pentest/views_llm.py::PentestLLMScanView.post::PentestScan.objects.create": "llm-scan-view-unrouted",
-    "pentest/views_llm.py::PentestLLMScanView.post::run_llm_scan": "llm-scan-view-unrouted",
     "assurance/economics/feeds.py::OutboundTransport.send::outbound.post": "economics-feed-fetch",
 }
 
@@ -1139,7 +1131,7 @@ def test_a_key_that_is_not_one_is_refused_and_starts_nothing(engine, scan_path, 
 
 
 # ===========================================================================
-# engine-llm-scan-start, llm-scan-view-unrouted
+# engine-llm-scan-start
 # ===========================================================================
 
 
@@ -1161,20 +1153,6 @@ def test_an_llm_scan_launch_replayed_with_its_key_starts_one_engine_run(engine, 
     assert PentestScan.objects.count() == 1
     assert len(mail.outbox) == 1
     assert replay.json() == first.json()
-
-
-def test_the_unrouted_llm_scan_view_is_reachable_by_no_url():
-    from pentest.views_llm import PentestLLMScanView
-
-    def callbacks(resolver):
-        for pattern in resolver.url_patterns:
-            if hasattr(pattern, "url_patterns"):
-                yield from callbacks(pattern)
-            else:
-                yield pattern.callback
-
-    reached = [cb for cb in callbacks(get_resolver()) if getattr(cb, "view_class", None) is PentestLLMScanView]
-    assert reached == []
 
 
 # ===========================================================================

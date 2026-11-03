@@ -167,9 +167,9 @@ LAUNCH_SITES = {
     # The standard scan's launch, sent by the two routes below, each after the preflight.
     "pentest/views.py::_send_launch": ("run_pentest_scan", "reconcile_pentest_scan"),
     "pentest/views.py::run_llm_pentest_scan": ("run_llm_pentest_scan",),
-    # A view no URL names (tests/test_firing_twice_makes_one_effect.py names it too):
-    # nothing can reach it, which test_the_unrouted_llm_view_is_still_unrouted holds.
-    "pentest/views_llm.py::PentestLLMScanView.post": (),
+    # The unrouted PentestLLMScanView (pentest/views_llm.py) launched with no preflight
+    # and is deleted; tests/test_no_launch_path_skips_the_preflight.py refuses any
+    # launch path, routed or not, that does not pass through the preflight.
 }
 
 #: The route of each view that launches, by URL name.
@@ -275,22 +275,6 @@ def test_every_launching_view_is_the_route_it_is_named_for():
         assert route in served, route
         assert degraded.class_of(route, "POST") == degraded.EFFECT
         assert EFFECTS[(route, "POST")] == LAUNCH
-
-
-def test_the_unrouted_llm_view_is_still_unrouted():
-    from django.urls import get_resolver
-
-    from pentest.views_llm import PentestLLMScanView
-
-    def callbacks(resolver):
-        for pattern in resolver.url_patterns:
-            if hasattr(pattern, "url_patterns"):
-                yield from callbacks(pattern)
-            else:
-                yield pattern.callback
-
-    for callback in callbacks(get_resolver()):
-        assert getattr(callback, "view_class", None) is not PentestLLMScanView
 
 
 # --- The LLM scan, driven through its route -----------------------------------------------
