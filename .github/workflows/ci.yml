@@ -215,6 +215,7 @@ jobs:
             tests/test_spine_queries_follow_their_own_deployment.py \
             tests/test_economics_run_cap_without_fcntl.py \
             tests/test_oplog_without_select.py \
+            tests/test_an_unrecorded_dispatch_is_always_named.py \
             tests/test_failsafe_control_plane.py \
             tests/test_no_control_holds_back_a_stop.py \
             tests/test_no_dispatch_holds_back_a_stop.py \
