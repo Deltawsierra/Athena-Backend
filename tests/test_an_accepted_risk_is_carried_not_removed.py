@@ -494,6 +494,11 @@ _GOVERNING = [
         "STATUSES", "UNPROVEN_STATUSES",
     )],
     *[("assurance.consequential", "_CLASS_RANK", key) for key in ("read_only", "unknown", "consequential")],
+    # AB-GRANT-LEASE: how long a grant of this backend's roles proves a delegates_to
+    # hop, and how such a role is named. Shorter or renamed, the same stored role-grant
+    # record stops proving the same effect.
+    ("assurance.role_grant_lease", "ROLE_GRANT_LEASE_SECONDS", None),
+    ("assurance.role_grant_lease", "ROLE_SCOPE_PREFIX", None),
 ]
 
 #: The constants of the modules the decision is computed in that are NOT rules, and
@@ -596,7 +601,7 @@ def test_every_constant_the_decision_reads_is_in_the_pin(monkeypatch):
     for module_name in (
         "assurance.decision", "assurance.composition", "assurance.workflow_chains", "assurance.coverage",
         "assurance.served_route", "assurance.authority_chain", "assurance.authority_chain_records",
-        "assurance.consequential",
+        "assurance.consequential", "assurance.role_grant_lease",
     ):
         module = import_module(module_name)
         for name, value in list(vars(module).items()):

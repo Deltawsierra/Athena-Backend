@@ -51,6 +51,7 @@ from . import coverage as _coverage
 from . import decision as _decision
 from . import graph_refs as _graph_refs
 from . import models as _models
+from . import role_grant_lease as _role_grant_lease
 from . import served_route as _served_route
 from . import workflow_chains as _workflow_chains
 from .receipt import HASHED_CONTENT_VERSION, _digest
@@ -246,6 +247,11 @@ def _policy_document() -> dict:
             "no_record_relations": sorted(_authority_chain.NO_RECORD_RELATIONS),
             # The chain's window a sign-in must fall in to prove authenticated_as.
             "authentication_window_seconds": _authority_chain.AUTHENTICATION_WINDOW_SECONDS,
+            # How long a grant of this backend's roles proves, and how such a role is
+            # named (assurance.role_grant_lease): shorter or renamed, the same stored
+            # role-grant record stops proving the same effect.
+            "role_grant_lease_seconds": _role_grant_lease.ROLE_GRANT_LEASE_SECONDS,
+            "role_scope_prefix": _role_grant_lease.ROLE_SCOPE_PREFIX,
             # Part 5: read as of dispatch -- how long after its dispatch an effect may
             # be observed, and the gate epoch state (and its spelling) a dispatch is
             # authority under.

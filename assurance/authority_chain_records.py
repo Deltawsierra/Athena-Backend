@@ -40,6 +40,7 @@ from . import authority_chain as rule
 from . import composition as _composition
 from . import consequential
 from . import identity_evidence, observed_effects, observed_outcomes
+from . import role_grant_lease
 from .models import AuthorityChain, ToolContractBinding, WorkflowChainOutcome
 from .receipt import _digest
 
@@ -226,8 +227,9 @@ def _load_inputs(
     ``principals``: the principals the chains' sign-in and delegation hops name; the
     signed records that name one are read, in force under the same keyring
     (:func:`assurance.identity_evidence.records_for`) -- one query, none when no chain
-    names a principal. ``workflows``: the chains' workflows, whose approval history and
-    the contract history of the tools it bound are read
+    names a principal -- each grant of this backend's roles read to its lease
+    (:func:`assurance.role_grant_lease.leased`). ``workflows``: the chains' workflows,
+    whose approval history and the contract history of the tools it bound are read
     (:func:`histories`) -- two queries, none for no workflow. And the graph's edge
     history (:func:`assurance.edge_history.history`), one query: what
     ``through_identity``, ``performs`` and reach are read against, as of dispatch.
@@ -272,6 +274,9 @@ def _load_inputs(
             ):
                 outcomes[row.outcome_id] = _cited_outcome(row, keyring, deployment_uuid)
     authentications, delegations = identity_evidence.records_for(deployment, principals, keyring)
+    # A role grant of this backend's proves for one lease from when it opened, whatever
+    # its record says: an open-ended one signed before leases were is no exception.
+    delegations = role_grant_lease.leased(delegations)
     approval_history, contract_history = histories(deployment, workflows)
     edges_noted_from, edges = edge_history.history(deployment)
     inputs = rule.Inputs(

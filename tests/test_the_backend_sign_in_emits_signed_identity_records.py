@@ -234,7 +234,9 @@ def test_a_promotion_naming_its_granter_emits_a_signed_grant_record(emitter, dja
             "agent": "athena-backend:support-agent",
             "scope": {"actions": ["athena-backend:role:analyst"]},
             "not_before": _stamp(grant.granted_at),
-            "not_after": "9999-12-31T23:59:59.999999Z",
+            # One lease, never open-ended (AB-GRANT-LEASE): a role grant's record
+            # proves for 24 h from when it was granted unless it is re-asserted.
+            "not_after": _stamp(grant.granted_at + timedelta(hours=24)),
         }
         assert document["grant"] == body
         assert document["grant_digest"] == identity_evidence.grant_digest(str(dep.uuid), body)

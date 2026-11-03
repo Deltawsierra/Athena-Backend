@@ -453,13 +453,35 @@ backend.
 - Each role promotion that names who granted it (`RoleGrant.record`) emits a
   `delegation` record of the grant on every deployment: the granter delegated the
   account (both named `athena-backend:<username>`) the scope
-  `athena-backend:role:<role>`, from the instant it was granted, with no end. A role
-  of this backend's, so named, is not an action a customer's tool performs: a
-  `delegates_to` hop over an effect's action is not proven by it
-  (`delegation_out_of_scope`). A promotion that names nobody emits none; a
-  demotion, a deactivation and a removal emit nothing (they are revokes), and the
-  token refresh emits nothing (it is how an operator keeps the session they press
-  stop from).
+  `athena-backend:role:<role>`, from the instant it was granted, for ONE LEASE of 24 h
+  (`assurance/role_grant_lease.py`, in the policy pin). A role of this backend's, so
+  named, is not an action a customer's tool performs: a `delegates_to` hop over an
+  effect's action is not proven by it (`delegation_out_of_scope`). A promotion that
+  names nobody emits none, and the token refresh emits nothing (it is how an
+  operator keeps the session they press stop from).
+- A role grant's record proves only within its lease and before its revocation
+  (AB-GRANT-LEASE). A withdrawal -- a demotion, the superuser flag taken away, a
+  deactivation, a removal -- emits a `revoked` record of every lease still running
+  of each grant the account no longer holds, `revoked_at` the instant of the
+  withdrawal, so a later effect reads `delegation_revoked` (an effect before it stays
+  proven). It is signed only after the stop is answered (once the response is sent),
+  never before: the accounts app imports none of the identity code. A held role is
+  kept proven by `manage.py reconcile_role_grants`, which re-asserts each grant still
+  held (a new record, a new 24 h window) once it has less than 12 h left, and revokes
+  any lease of a grant no longer held (a role changed by a path that announced
+  nothing). If it does not run -- no key, no keyring, the database down, never
+  scheduled -- nothing is extended: each lease ends and the hop reads
+  `delegation_expired`. The open-ended records signed before leases are read to one
+  lease from when they opened; the first reconcile re-asserts the roles still held.
+  Schedule it hourly, from the backend's folder, in PowerShell:
+
+  ```powershell
+  schtasks /Create /SC HOURLY /TN "Athena role-grant reconcile" /TR "C:\path\to\venv\Scripts\python.exe C:\path\to\Athena-Backend\manage.py reconcile_role_grants"
+  ```
+
+  It prints what it re-asserted and revoked, exits 0 when the grant key is not set
+  (the emitter is off), and exits non-zero when it could not run, so the scheduler
+  reports it.
 - Each record is signed with a key of this backend's, a PEM (PKCS#8) Ed25519 private
   key named by `ATHENA_SIGNIN_RECORD_KEY_FILE` (signed as `mythos-signin-collector`)
   or `ATHENA_GRANT_RECORD_KEY_FILE` (as `mythos-grant-collector`), and is taken in

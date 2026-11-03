@@ -163,7 +163,9 @@ jobs:
   # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it,
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
   # statement (a subquery over every deployment) costs no statement, so only that test,
-  # reading the plans and the rows each statement visits, sees it.
+  # reading the plans and the rows each statement visits, sees it. And the identity
+  # emitter's own tests: a demoted operator's role grant stops proving, its revocation is
+  # signed only once the stop is answered, and the reconcile never extends a lease.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -227,6 +229,8 @@ jobs:
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
+            tests/test_a_demoted_operators_grant_stops_proving.py \
+            tests/test_the_backend_sign_in_emits_signed_identity_records.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \
