@@ -172,10 +172,17 @@ class _FullPipe:
         return _named(self.read)
 
     def close(self):
-        os.close(self.read_fd)
+        if self._reader is None:
+            os.close(self.read_fd)
+            os.close(self.write_fd)
+            return
+        # The write end first: the reader then reads to the end and returns. On
+        # Windows, closing a pipe's read end while another thread is blocked reading
+        # it waits for that read -- which, with the write end still open, never ends.
         os.close(self.write_fd)
-        if self._reader is not None:
-            self._reader.join(5)
+        self._reader.join(5)
+        if not self._reader.is_alive():
+            os.close(self.read_fd)
 
 
 def _logged(caplog, text, timeout=5.0):
