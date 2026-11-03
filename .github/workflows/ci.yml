@@ -211,6 +211,7 @@ jobs:
         run: |
           pytest \
             tests/test_pin_guard.py \
+            tests/test_an_idp_collectors_records_prove_only_their_own_issuer.py \
             tests/test_spine_statement_budget.py \
             tests/test_spine_queries_follow_their_own_deployment.py \
             tests/test_economics_run_cap_without_fcntl.py \

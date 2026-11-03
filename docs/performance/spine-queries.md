@@ -184,7 +184,10 @@ six-deployment corpus, runs derivation, the ripple traversal and the decision
 recompute over every deployment (the writer, the backstop's refresh and the refresh
 of another writer's decision), and compares, byte for byte with
 `tests/fixtures/spine_golden.json` recorded from master `a32f63a` (recorded again
-from `cf14de0`, it is byte-identical: #176 changes no output here): every claim
+from `cf14de0`, it is byte-identical: #176 changes no output here; recorded again at
+identity slice 1, which moves the policy pin and nothing else -- master `ff1e8e6`, its
+policy document given exactly that slice's entries, publishes the new file byte for
+byte): every claim
 version, claim event, stored weighing, retest, latent condition, decision
 transition and deployment decision column; the ripple assessment, the
 decision-support payload and the assurance receipt; and every set of decision
