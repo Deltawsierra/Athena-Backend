@@ -66,7 +66,19 @@ def _make(actions, at, engine_id="athena-1", reason="", expires=FAR):
     for n, command in enumerate(made):
         command.created_at = at + timedelta(milliseconds=n)
     FailsafeCommand.objects.bulk_update(made, ["created_at"], batch_size=500)
+    from failsafe.views import _mark_stop_made_ready
+
+    for command in made:
+        if command.action in STOPS:
+            _mark_stop_made_ready(command)  # as signing it into force does
     return made
+
+
+def _state(engine_id="athena-1"):
+    """One state read by an operator: where held starts are marked superseded."""
+    answer = _client_for(_admin()).get(f"/api/failsafe/state/?engine_id={engine_id}")
+    assert answer.status_code == 200, answer.content[:300]
+    return answer
 
 
 def _starts(n):
@@ -137,10 +149,13 @@ def test_a_flood_of_ready_starts_leaves_the_poll_bounded_and_the_stop_first(path
     1.7 MB), and loaded every row. Now the stand-down is first in every answer,
     the starts after it are capped, and the poll loads, runs and answers the
     same with 1,000 starts as with 10,000."""
+    from failsafe.models import FailsafeCommand
     from failsafe.views import POLL_START_LIMIT
 
     at = timezone.now() - timedelta(hours=1)
     stop = _make(["stand_down"], at)[0]
+    _make(["pause"], at, engine_id="athena-2")  # an engine with no stop ever has every start held
+    FailsafeCommand.objects.filter(engine_id="athena-2", action="pause").update(status="expired")
     seen = {}
     for total, added in ((0, 0), (1000, 1000), (10000, 9000)):
         _make(_starts(added), at + timedelta(minutes=1 + total // 1000))
@@ -253,12 +268,14 @@ def test_a_start_older_than_a_ready_stop_is_held_back_and_a_newer_one_is_answere
     """A release signed, then a stand-down, both first heard in one poll: the
     engine applies the answer in order, so a release answered after the
     stand-down left the engine running (master answered both). The older
-    release is never delivered and is marked superseded, naming the stop; one
-    drafted after the stop is answered, after it; another engine's release is
-    not held by it."""
+    release is never delivered, and the state read marks it superseded, naming
+    the stop; one drafted after the stop is answered, after it; another
+    engine's release, newer than that engine's own stop, is not held by it."""
     from failsafe.models import FailsafeAuditEvent, FailsafeCommand
 
     at = timezone.now() - timedelta(hours=1)
+    _make(["pause"], at - timedelta(minutes=1), engine_id="athena-2")
+    FailsafeCommand.objects.filter(engine_id="athena-2", action="pause").update(status="expired")
     old_release = _make(["release"], at)[0]
     other = _make(["release"], at, engine_id="athena-2")[0]
     stand_down = _make(["stand_down"], at + timedelta(minutes=1))[0]
@@ -266,6 +283,8 @@ def test_a_start_older_than_a_ready_stop_is_held_back_and_a_newer_one_is_answere
     everyone = [c["nonce"] for c in _poll("/api/failsafe/pending/").json()]
     assert everyone == [stand_down.nonce, other.nonce], everyone
     assert old_release.nonce not in everyone
+    assert FailsafeCommand.objects.get(pk=old_release.pk).status == "ready"  # the poll writes nothing
+    _state()
     assert FailsafeCommand.objects.get(pk=old_release.pk).status == "superseded"
     event = FailsafeAuditEvent.objects.get(command_id=old_release.pk, event="superseded")
     assert event.detail["superseded_by"] == str(stand_down.uuid) and str(stand_down.uuid) in event.detail["reason"]
@@ -280,9 +299,9 @@ def test_a_start_drafted_before_a_stop_is_not_delivered_once_the_engine_took_the
     """A release drafted, then a stand-down. The engine polls and gets the
     stand-down; the stand-down is consumed (no longer ready). Held back only
     while a stop was READY, the release was delivered by the next poll and
-    resumed the engine, undoing the stop one poll later. Now it is superseded
-    by the first poll, and no poll after carries it. A release drafted after
-    the stop is still delivered."""
+    resumed the engine, undoing the stop one poll later. Now the engine's
+    stop mark holds it back whatever became of the stop, and the state read
+    marks it superseded. A release drafted after the stop is delivered."""
     from failsafe.models import FailsafeCommand
 
     at = timezone.now() - timedelta(hours=1)
@@ -294,6 +313,9 @@ def test_a_start_drafted_before_a_stop_is_not_delivered_once_the_engine_took_the
     FailsafeCommand.objects.filter(pk=stand_down.pk).update(status="consumed")
     for _ in range(2):
         assert [c["nonce"] for c in _poll().json()] == [], "a release drafted before the stop was delivered after it"
+    FailsafeCommand.objects.filter(pk=stand_down.pk).update(status="expired")  # and past its window
+    assert [c["nonce"] for c in _poll().json()] == [], "a release drafted before the stop was delivered after it"
+    _state()
     assert FailsafeCommand.objects.get(pk=release.pk).status == "superseded"
     later = _make(["release"], at + timedelta(minutes=2))[0]
     assert [c["nonce"] for c in _poll().json()] == [later.nonce]
@@ -301,63 +323,142 @@ def test_a_start_drafted_before_a_stop_is_not_delivered_once_the_engine_took_the
 
 @pytest.mark.django_db
 @pytest.mark.usefixtures("rates")
-def test_a_start_older_than_a_consumed_stop_is_held_even_when_it_cannot_be_marked(monkeypatch):
-    """The stand-down is consumed before any poll sees the older release, and
-    the write that would mark the release superseded fails: every poll still
-    holds it back, by the consumed stop alone. A stop canceled by an operator
-    holds nothing back."""
-    from django.db import OperationalError
-    from django.db.models import QuerySet
+def test_a_stop_signed_into_force_moves_its_engines_mark_and_holds_older_starts_for_good(settings):
+    """An old pause (the engine's mark), then a release, then a stand-down
+    drafted and signed through the API. Signing it into force moves the mark
+    to it, in the same transaction; once the engine took it (consumed) the
+    release drafted before it is still never delivered, by the mark alone.
+    Without the mark moved the release would be newer than the mark: the
+    poll would deliver it after the stand-down."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    from failsafe.models import FailsafeCommand
+    from failsafe.models import FailsafeCommand, FailsafeStopMark
 
+    keys = {f"op{n}": Ed25519PrivateKey.generate() for n in range(2)}
+    settings.FAILSAFE_OPERATOR_KEYS = {name: key.public_key().public_bytes_raw().hex() for name, key in keys.items()}
     at = timezone.now() - timedelta(hours=1)
-    resume = _make(["resume"], at)[0]
-    pause = _make(["pause"], at + timedelta(minutes=1))[0]
-    FailsafeCommand.objects.filter(pk=pause.pk).update(status="consumed")
-    not_held = _make(["resume"], at, engine_id="athena-2")[0]
-    withdrawn = _make(["stand_down"], at + timedelta(minutes=1), engine_id="athena-2")[0]
-    FailsafeCommand.objects.filter(pk=withdrawn.pk).update(status="canceled")
-
-    def locked(*args, **kwargs):
-        raise OperationalError("database is locked")
-
-    monkeypatch.setattr(QuerySet, "update", locked)
-    for _ in range(2):
-        assert [c["nonce"] for c in _poll().json()] == [], "a resume drafted before a consumed pause was delivered"
-    assert FailsafeCommand.objects.get(pk=resume.pk).status == "ready"  # not marked: the write failed
-    assert [c["nonce"] for c in _poll("/api/failsafe/pending/?engine_id=athena-2").json()] == [not_held.nonce]
+    old = _make(["pause"], at)[0]
+    FailsafeCommand.objects.filter(pk=old.pk).update(status="expired")
+    release = _make(["release"], at + timedelta(minutes=1))[0]
+    assert FailsafeStopMark.objects.get(engine_id="athena-1").stop_uuid == old.uuid
+    assert [c["nonce"] for c in _poll().json()] == [release.nonce]
+    operator = _client_for(_admin())
+    drafted = operator.post("/api/failsafe/commands/", {"action": "stand_down", "engine_id": "athena-1"},
+                            format="json").data
+    for name, key in keys.items():
+        signature = {"key_id": name, "sig": key.sign(bytes.fromhex(drafted["signing_bytes"])).hex()}
+        signed = operator.post(f"/api/failsafe/commands/{drafted['uuid']}/signatures/", signature, format="json")
+        assert signed.status_code == 200, signed.content
+    assert signed.data["status"] == "ready"
+    assert str(FailsafeStopMark.objects.get(engine_id="athena-1").stop_uuid) == drafted["uuid"]
+    assert [c["nonce"] for c in _poll().json()] == [drafted["nonce"]]
+    FailsafeCommand.objects.filter(uuid=drafted["uuid"]).update(status="consumed")
+    assert [c["nonce"] for c in _poll().json()] == [], "a release drafted before the stand-down was delivered"
 
 
 @pytest.mark.django_db
 @pytest.mark.usefixtures("rates")
-def test_a_flood_of_held_starts_leaves_the_poll_bounded(monkeypatch):
-    """1,000, then 10,000 ready starts drafted before a ready pause: every
-    poll answers the pause alone, runs the same statements and about the same
-    VM work with ten times the flood, marks what it held in ONE write, and
-    finds the newest stop in force by seeks of fsc_eng_st_act_ct with engine,
-    status and action all equal -- never a range read of the starts (round
-    2's lookup cost one poll 0.8 s on Windows under this flood)."""
-    from failsafe.models import FailsafeAuditEvent, FailsafeCommand
+def test_an_engine_with_no_mark_or_an_unreadable_one_has_every_start_held_and_every_stop_answered(monkeypatch):
+    """Fail closed, for starts only: an engine whose mark is missing, or
+    whose mark cannot be read, gets no resume or release from the poll; its
+    stops are answered as ever. The state read never marks a start
+    superseded without a mark to name."""
+    from django.db import OperationalError
+
+    from failsafe.models import FailsafeCommand, FailsafeStopMark
+
+    at = timezone.now() - timedelta(hours=1)
+    lone = _make(["resume"], at, engine_id="athena-9")[0]
+    assert _poll("/api/failsafe/pending/?engine_id=athena-9").json() == []
+    _state("athena-9")
+    assert FailsafeCommand.objects.get(pk=lone.pk).status == "ready"
+    _make(["pause"], at - timedelta(minutes=1))
+    resume = _make(["resume"], at)[0]
+    assert [c["action"] for c in _poll().json()] == ["pause", "resume"]
+
+    real = FailsafeStopMark.objects.filter
+
+    def unreadable(*args, **kwargs):
+        raise OperationalError("disk I/O error")
+
+    monkeypatch.setattr(FailsafeStopMark.objects, "filter", unreadable)
+    assert [c["action"] for c in _poll().json()] == ["pause"], "a start answered past an unreadable mark"
+    monkeypatch.setattr(FailsafeStopMark.objects, "filter", real)
+    assert [c["nonce"] for c in _poll().json()][1:] == [resume.nonce]
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+def test_a_ready_stop_newer_than_a_stale_mark_still_holds_older_starts():
+    """The mark could not be moved when a stand-down was signed (its write
+    failed, logged), so it still names an older pause. While the stand-down
+    is ready the poll holds back a release drafted before it, by the
+    stand-down on its own page."""
+    from failsafe.models import FailsafeStopMark
+
+    at = timezone.now() - timedelta(hours=1)
+    pause = _make(["pause"], at)[0]
+    release = _make(["release"], at + timedelta(minutes=1))[0]
+    stand_down = _make(["stand_down"], at + timedelta(minutes=2))[0]
+    FailsafeStopMark.objects.filter(engine_id="athena-1").update(created_at=pause.created_at, stop_uuid=pause.uuid,
+                                                                  action="pause")
+    nonces = [c["nonce"] for c in _poll().json()]
+    assert release.nonce not in nonces and stand_down.nonce in nonces, nonces
+
+
+@pytest.mark.django_db
+def test_the_migration_backfills_each_engines_newest_stop_ever_made_ready():
+    """0005's backfill: per engine, its newest stop that is ready or consumed,
+    or whose audit trail says it became ready; never one that never did."""
+    import importlib
+
+    from django.apps import apps
+
+    from failsafe.models import FailsafeAuditEvent, FailsafeCommand, FailsafeStopMark
+
+    backfill = importlib.import_module("failsafe.migrations.0005_stop_marks").backfill
+    at = timezone.now() - timedelta(hours=1)
+    consumed = _make(["pause"], at, engine_id="e-consumed")[0]
+    expired_ready = _make(["stand_down"], at, engine_id="e-expired")[0]
+    newer_unsigned = _make(["terminate"], at + timedelta(minutes=1), engine_id="e-expired")[0]
+    never = _make(["pause"], at, engine_id="e-never")[0]
+    FailsafeCommand.objects.filter(pk=consumed.pk).update(status="consumed")
+    FailsafeCommand.objects.filter(pk__in=[expired_ready.pk, newer_unsigned.pk, never.pk]).update(status="expired")
+    FailsafeAuditEvent.objects.create(command=expired_ready, event="ready")
+    FailsafeStopMark.objects.all().delete()
+    backfill(apps, None)
+    marks = {m.engine_id: m.stop_uuid for m in FailsafeStopMark.objects.all()}
+    assert marks == {"e-consumed": consumed.uuid, "e-expired": expired_ready.uuid}
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+def test_a_flood_of_held_starts_or_of_stop_history_leaves_the_poll_bounded(monkeypatch):
+    """A ready pause, newer than 0, 1,000 and 10,000 ready starts, and then
+    10,000 consumed stops of the engine besides: every poll answers the pause
+    alone, writes nothing, loads at most its limits, and runs the same
+    statements and about the same VM work at every size. The newest stop is
+    the engine's one mark row, read by the primary key -- never a read of the
+    starts or of the stops' history (rounds 2-4: Windows polls of 0.44-0.80 s
+    under this flood)."""
+    from failsafe.models import FailsafeCommand
     from failsafe.views import POLL_START_LIMIT
 
     at = timezone.now() - timedelta(hours=1)
-    _make(_starts(1000), at)
     pause = _make(["pause"], at + timedelta(minutes=30))[0]
     seen = {}
-    for total in (1000, 10000):
-        if total == 10000:
-            _make(_starts(9000), at - timedelta(minutes=10))
-        before = FailsafeCommand.objects.filter(status="superseded").count()
+    for label, starts, history in (("0", 0, 0), ("1k", 1000, 0), ("10k", 9000, 0), ("10k+history", 0, 10000)):
+        _make(_starts(starts), at)
+        if history:
+            made = _make(["stand_down"] * history, at - timedelta(minutes=20))
+            FailsafeCommand.objects.filter(pk__in=[c.pk for c in made]).update(status="consumed")
         with CaptureQueriesContext(connection) as queries:
             answer, loaded, statements, steps = _measured("/api/failsafe/pending/?engine_id=athena-1", monkeypatch)
-        assert [c["nonce"] for c in answer.json()] == [pause.nonce], total
-        updates = [q["sql"] for q in queries.captured_queries if q["sql"].startswith("UPDATE")]
-        assert len(updates) == 1, (total, len(updates))
-        marked = FailsafeCommand.objects.filter(status="superseded").count() - before
-        assert marked == POLL_START_LIMIT, (total, marked)
-        assert loaded <= POLL_START_LIMIT + 1, (total, loaded)
-        seen[total] = (statements, steps)
+        assert [c["nonce"] for c in answer.json()] == [pause.nonce], label
+        writes = [q["sql"] for q in queries.captured_queries if q["sql"].startswith(("UPDATE", "INSERT", "DELETE"))]
+        assert writes == [], (label, writes[:1])
+        assert loaded <= POLL_START_LIMIT + 1, (label, loaded)
+        seen[label] = (statements, steps)
         for query in queries.captured_queries:
             if not query["sql"].startswith("SELECT"):
                 continue
@@ -365,13 +466,10 @@ def test_a_flood_of_held_starts_leaves_the_poll_bounded(monkeypatch):
                 cursor.execute("EXPLAIN QUERY PLAN " + query["sql"])
                 plan = [row[-1] for row in cursor.fetchall()]
             assert not any(step.startswith("SCAN ") or "TEMP B-TREE" in step for step in plan), plan
-            for step in plan:
-                if step.startswith("SEARCH U0"):
-                    assert step.endswith("INDEX fsc_eng_st_act_ct (engine_id=? AND status=? AND action=?)"), plan
-    assert seen[10000][0] == seen[1000][0], seen
-    assert seen[10000][1] <= seen[1000][1] * 1.5 + 50, seen
-    assert FailsafeAuditEvent.objects.filter(event="superseded", detail__superseded_by=str(pause.uuid)).count() == (
-        2 * POLL_START_LIMIT)
+            if "failsafe_failsafestopmark" in query["sql"]:
+                assert len(plan) == 1 and "failsafe_failsafestopmark" in plan[0] and "(engine_id=?)" in plan[0], plan
+    assert seen["1k"][0] == seen["10k"][0] == seen["10k+history"][0], seen
+    assert max(seen["10k"][1], seen["10k+history"][1]) <= seen["1k"][1] * 1.5 + 50, seen
 
 
 # --- 3. The reads are index ranges -----------------------------------------------------------
@@ -407,14 +505,7 @@ def test_each_ready_by_action_read_is_a_search_of_its_own_index(path):
         # No sort either: a temp B-tree reads every row it sorts, the
         # expiry's candidates included (each command past its window).
         assert not any("TEMP B-TREE" in step for step in plan), (sql[:300], plan)
-        if " U0" in sql:
-            # The newest stop in force of each engine: seeks with engine,
-            # status and action all equal, never a range read of the starts.
-            searches = [step for step in plan if step.startswith("SEARCH U0")]
-            assert searches and all(
-                step.endswith("INDEX fsc_eng_st_act_ct (engine_id=? AND status=? AND action=?)") for step in searches
-            ), plan
-        elif '"action" = ' in sql and "ORDER BY" in sql:
+        if '"action" = ' in sql and "ORDER BY" in sql:
             by_action += 1
             assert any(f"USING INDEX {index}" in step or f"USING COVERING INDEX {index}" in step for step in plan), (
                 sql[:300], plan)
@@ -492,11 +583,11 @@ def test_a_poll_cursor_is_for_its_own_engine_and_a_bad_one_is_400():
 def test_the_poll_never_waits_for_the_write_lock():
     """Another connection holds the database's write lock -- a stop being
     drafted or signed at that moment -- while the engine polls with starts to
-    mark superseded and commands to mark expired. The poll answers within
+    hold back and commands to mark expired. The poll answers within
     STOP_LATENCY_BOUND, the stop first and the held starts left out, without
-    waiting for the lock (round 3 waited: one poll 0.44 s on Windows); its
-    writes are refused and logged, and the next poll after the lock is let
-    go makes them. What the poll delivers is the same either way."""
+    waiting for the lock (round 3 waited 5 s behind it); its expiry write is
+    refused and logged, and the next poll after the lock is let go makes it.
+    What the poll delivers is the same either way."""
     from failsafe.models import FailsafeCommand
 
     at = timezone.now() - timedelta(hours=1)
@@ -528,7 +619,7 @@ def test_the_poll_never_waits_for_the_write_lock():
             body = _poll().json()
             took.append(time.perf_counter() - began)
             assert [c["nonce"] for c in body] == [pause.nonce]
-        marked_while_held = FailsafeCommand.objects.filter(status="superseded").count()
+        marked_while_held = FailsafeCommand.objects.filter(status="expired").count()
     finally:
         release.set()
         holder.join(30)
@@ -537,8 +628,8 @@ def test_the_poll_never_waits_for_the_write_lock():
     assert slow == [], f"a poll waited for the write lock: {slow}"
     assert marked_while_held == 0  # refused, not waited for
     assert [c["nonce"] for c in _poll().json()] == [pause.nonce]
-    assert FailsafeCommand.objects.filter(status="superseded").count() > 0
     assert FailsafeCommand.objects.filter(status="expired").count() == 10
+    assert FailsafeCommand.objects.filter(status="superseded").count() == 0  # the poll never marks a held start
 
 
 # --- 6. A stop signed during the flood reaches the poll within its bound ---------------------

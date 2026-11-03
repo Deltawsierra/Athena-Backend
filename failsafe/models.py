@@ -157,6 +157,28 @@ class FailsafeCommand(models.Model):
         }
 
 
+class FailsafeStopMark(models.Model):
+    """The newest stop ever made ready for one engine: when it was drafted,
+    and which it is.
+
+    Written in the transaction that signs a stop into force (failsafe.views,
+    submit_signature) and moved only forward; never deleted, so it outlives
+    the stop's window. The engine's poll reads one row of it per engine on
+    its page, and never delivers a resume or release drafted at or before it:
+    delivered after that stop, the start would undo it. One row per engine,
+    whatever the number of stops, starts or consumed history."""
+
+    engine_id = models.CharField(max_length=200, primary_key=True)
+    #: The stop's own creation time (FailsafeCommand.created_at).
+    created_at = models.DateTimeField()
+    stop_uuid = models.UUIDField()
+    action = models.CharField(max_length=32)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.engine_id}: {self.action} {self.stop_uuid} @ {self.created_at:%Y-%m-%d %H:%M:%S}"
+
+
 class FailsafeAuditEvent(models.Model):
     """A first-class audit trail for the failsafe. The repo's audit.AuditLog is
     email-alert shaped and never written by code, so the failsafe keeps its own

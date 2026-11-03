@@ -278,14 +278,20 @@ pause), at most 500; then at most 50 ready resumes and releases, newest first;
 in at most 4,000,000 bytes, under the 5 MiB an engine reads of an answer (an
 answer past that is cut, and the engine decodes none of it, its stops included).
 No start is on a page that left a stop for the next page. A resume or release
-drafted at or before a stop of its engine that is `ready` or `consumed` is never
-delivered: the engine applies an answer in its order, so it would undo the newer
-stop. The poll marks it `superseded`, with an audit event naming the stop; draft
-a new one after the stop. `X-Failsafe-More` says whether anything was left out and
+drafted at or before the newest stop ever signed into force for its engine is
+never delivered: the engine applies an answer in its order, so it would undo the
+newer stop. That stop is the engine's stop mark (one row per engine, moved
+forward in the transaction that signs a stop into force, kept after the stop's
+window, and backfilled by migration 0005), so the poll reads one row per engine
+whatever the history. An engine with no mark, or whose mark cannot be read, gets
+no start from the poll (stops always go). The poll writes nothing for it; the
+state view marks such a start `superseded`, with an audit event naming the stop.
+Draft a new one after the stop. `X-Failsafe-More` says whether anything was left out and
 `X-Failsafe-Next` carries the cursor for the rest (`?cursor=`, same
 `engine_id`); the engine's client reads only the first page, which always starts
 with the stops. Commands past their window are passed over and marked expired,
-at most 200 per poll in one write, and a write that fails never fails the poll.
+at most 200 per poll in one write that never waits for the database's write
+lock, and a write that fails never fails the poll.
 
 Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
 engagements they created are kept, with the creator unlinked; such an engagement
