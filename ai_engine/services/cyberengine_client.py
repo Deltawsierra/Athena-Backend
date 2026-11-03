@@ -682,6 +682,12 @@ class CyberEngineClient:
             raise self._refused(resp)
         return self._read_json(resp, path)
 
+    def health(self) -> dict:
+        """The engine's own liveness answer, ``{"status": "ok"}`` by its contract
+        (tests/test_engine_contract.py). Read by this backend's readiness route
+        (config.readiness) alone: a read that starts, stops and changes nothing."""
+        return self._get("/health")
+
     def assurance_keyring(self) -> dict:
         """The engine's published public keyring, for an auditor verifying offline.
 
