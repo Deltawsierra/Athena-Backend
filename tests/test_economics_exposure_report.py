@@ -29,12 +29,20 @@ from mythos_core import exposure_receipt as core
 from mythos_core.persona import lint
 from rest_framework.test import APIClient
 
-from assurance.economics import exposure_report, receipt_service, report, report_api, simulation_service
+from assurance.economics import (
+    charts_service,
+    exposure_report,
+    receipt_service,
+    report,
+    report_api,
+    simulation_service,
+    validity_service,
+)
 from assurance.economics.models import FinancialScenario, SimulationResult
 from assurance.models import Deployment
 from safety import stops
 from tests.economics_review import approve_for_receipt
-from tests.test_economics_read_routes import _receipted
+from tests.test_economics_read_routes import _signing
 from tests.test_economics_report import stored
 
 pytestmark = pytest.mark.django_db
@@ -77,6 +85,19 @@ def _version(deployment, author, *, approve, seed=7, set_key="exposure_a"):
     if approve:
         approve_for_receipt(scenario)
     return scenario, result
+
+
+def _receipted(deployment, author, monkeypatch):
+    """An approved version run, carded, charted and receipted through the services (a
+    test keyring and signer). Not through the simulate route: that route takes a run
+    slot, which a server without fcntl (Windows) cannot read, and answers 503."""
+    _, signed = _signing(monkeypatch)
+    scenario, result = _version(deployment, author, approve=True)
+    assert validity_service.issue_card(result).card is not None
+    assert charts_service.issue_charts(result).charts is not None
+    issued = receipt_service.issue_receipt(result, keyring=receipt_service.engine_keyring())
+    assert issued.receipt is not None, (issued.code, issued.detail)
+    return scenario, issued.receipt, None, signed[-1]
 
 
 def _eal(result) -> str:
