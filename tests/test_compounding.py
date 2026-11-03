@@ -55,7 +55,11 @@ def launch(factory, user, body, engine=None):
     force_authenticate(request, user=user)
 
     engine = engine or mock.Mock(**{"run_scan.return_value": {"results": [{"type": "info"}]}})
+    # The preflight answers clean: these tests are about what a launch's own faults
+    # leave behind, not the gate, and a bare Mock's answers are no verdict, which
+    # holds a launch in every mode (G14).
     with mock.patch("pentest.views.target_is_out_of_bounds", return_value=None), \
+            mock.patch("pentest.views.preflight.check", return_value={"verdict": "ok"}), \
             mock.patch("pentest.views.CyberEngineClient") as client, \
             mock.patch("pentest.views.render_scan_pdf_bytes", return_value=b"%PDF-"), \
             mock.patch("pentest.views.save_pdf_to_scan"), \
@@ -229,7 +233,11 @@ def test_a_mixed_burst_answers_each_arm_the_way_it_would_alone(factory, analyst,
         except Exception as exc:  # noqa: BLE001 - the point is that none escape
             errors.append((label, repr(exc)))
 
+    # The preflight answers clean: these tests are about what a launch's own faults
+    # leave behind, not the gate, and a bare Mock's answers are no verdict, which
+    # holds a launch in every mode (G14).
     with mock.patch("pentest.views.target_is_out_of_bounds", return_value=None), \
+            mock.patch("pentest.views.preflight.check", return_value={"verdict": "ok"}), \
             mock.patch("pentest.views.CyberEngineClient") as client, \
             mock.patch("pentest.views.render_scan_pdf_bytes", return_value=b"%PDF-"), \
             mock.patch("pentest.views.save_pdf_to_scan"), \
@@ -299,7 +307,8 @@ def test_twenty_concurrent_scans_under_one_engagement_do_not_interfere(
         save_pdf_to_scan=mock.DEFAULT,
         send_pentest_scan_email=mock.DEFAULT,
     )
-    with patches as mocks:
+    # The preflight answers clean (G14): see `launch`.
+    with patches as mocks, mock.patch("pentest.views.preflight.check", return_value={"verdict": "ok"}):
         mocks["target_is_out_of_bounds"].return_value = None
         mocks["render_scan_pdf_bytes"].return_value = b"%PDF-"
         mocks["CyberEngineClient"].from_settings.return_value = engine

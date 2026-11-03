@@ -47,6 +47,16 @@ from pentest.models import PentestScan
 pytestmark = pytest.mark.django_db
 
 FAULT = os.environ["ECONOMICS_FAULT"]
+
+
+def _a_reason_and_no_figures(served):
+    """A read that raised answers 500 with only its reason (G14: an evidence read is
+    an honest unknown, never a bare 5xx): no figures, nothing but the degraded answer.
+    Stricter than the "not JSON" this replaced, which any error page passed."""
+    assert served.status_code == 500, served.status_code
+    body = served.json()
+    assert set(body) == {"detail", "status", "operation_class", "dependency"}, body
+    assert body["status"] == "unknown" and body["operation_class"] == "evidence_read", body
 #: A well-formed normalization query (spec, section 12.9): what a fault leaves unanswered.
 NORMALIZATION = (
     "amount=400000&currency=EUR&event_date=2026-09-30&valuation_date=2026-09-30&base_currency=USD"
@@ -165,7 +175,7 @@ def test_only_economics_is_refused():
         client = APIClient(raise_request_exception=False)
         client.force_authenticate(user=admin)
         served = client.get(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{made.uuid}/events/")
-        assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
+        _a_reason_and_no_figures(served)
         assert "assurance.economics.report" not in sys.modules
         return
     if FAULT == "portfolio":
@@ -208,9 +218,9 @@ def test_only_economics_is_refused():
         client = APIClient(raise_request_exception=False)
         client.force_authenticate(user=admin)
         served = client.get(health)
-        assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
+        _a_reason_and_no_figures(served)
         served = client.get(normalization)
-        assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
+        _a_reason_and_no_figures(served)
         assert "assurance.economics.feeds" not in sys.modules
         assert "assurance.economics.normalization_service" not in sys.modules
         return
