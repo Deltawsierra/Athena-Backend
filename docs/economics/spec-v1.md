@@ -9095,8 +9095,18 @@ which names the receipt route a reader verifies it from.
 **Unmeasured is never green.** Every gap is named under "What is not measured": a
 newer version passed over and why, the banner and its reason, each unknown, each line
 or figure not reported, a residual, a receipt or an as-of date not recorded, a figure
-withheld. A report with any gap reads `AUDIT_INCOMPLETE` (`mythos_core.status`); the
-report's own words meet the persona lexicon lint (`mythos_core.persona.lint`).
+withheld. A report with any gap reads `AUDIT_INCOMPLETE` (`mythos_core.status`).
+
+**Every case meets the persona lexicon lint** (`mythos_core.persona.lint`), not only a
+clean report: a figure shown or none, a gap, a refusal, a total withheld. A reason the
+report quotes from another part of economics (a run report's banner, an unknown, a
+review's standing, a portfolio's exclusion or re-check) is reworded where it uses a
+word the lint forbids -- the portfolio's and the run report's "fail" is said "do not
+verify under", its meaning kept -- and one the report cannot reword is not quoted (it
+says the economics routes serve it). A portfolio's exclusion is said in the report's
+own words for its code (`exposure_report.NOT_TOTALLED`), the scenario named. The
+customer's own text (a scenario's title, the deployment's name, an evidence
+reference) is printed as written, escaped.
 
 **Read-only, off the stop path.** It records, recomputes, signs and verifies nothing
 and asks no engine: no `get_or_create`, no receipt service. Every text is escaped, in

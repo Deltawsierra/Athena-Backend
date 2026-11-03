@@ -117,9 +117,15 @@ def _eal(result) -> str:
 
 
 def _page(client, deployment, query=""):
+    """The HTML report, every word of it held to the persona lint in EVERY case the
+    tests make (a figure shown, none, a gap, a refusal, a total withheld): the report
+    never prints a word the lint forbids, whatever it quotes."""
     response = client.get(_url(deployment, query))
     assert response.status_code == 200, response.content
-    return response.content.decode("utf-8")
+    page = response.content.decode("utf-8")
+    linted = lint.lint(_text(page))
+    assert linted.ok, linted.violations
+    return page
 
 
 def _text(page: str) -> str:
@@ -173,8 +179,8 @@ def test_an_integrity_failure_shows_no_figure_and_names_the_check(deployment, pe
     assert figure not in page
     text = _text(page)
     assert exposure_report.NONE_SELECTED in text
-    assert f"({scenario.uuid}) is approved, but the stored rows of its latest completed run fail integrity checks: " \
-           "result_digest" in text
+    assert f"({scenario.uuid}) is approved, but the stored rows of its latest completed run do not verify: " \
+           "integrity checks failed: result_digest" in text
     assert "integrity checks verified" not in text
 
 
@@ -406,7 +412,12 @@ def test_a_scenario_that_may_not_be_totalled_is_named_and_never_summed(deploymen
     text = _text(_page(client, deployment))
     gaps = text.partition("What is not measured")[2]
     assert f"Deployment total: not totalled: “Unknown agent” ({unknown.uuid}): unknown" in gaps
-    assert f"Deployment total: not totalled: “Tampered agent” ({tampered.uuid}): unverified" in gaps
+    assert f"Deployment total: not totalled: “Tampered agent” ({tampered.uuid}): unverified: " \
+           f"{exposure_report.NOT_TOTALLED['unverified']} (stored_row_unverified: the stored rows do not verify " \
+           "under card_grade" in gaps
+    # The portfolio's own words say "fail"; the report never prints them raw.
+    assert any(" fail " in e["reason"] for e in served["scenarios"]["excluded"])
+    assert " fail " not in f" {text} " and lint.lint(text).ok
 
 
 def test_one_unverified_run_makes_the_total_audit_incomplete_and_shows_no_figure(deployment, people):
@@ -427,8 +438,8 @@ def test_one_unverified_run_makes_the_total_audit_incomplete_and_shows_no_figure
     assert _row(rows, "Status of the total").startswith("AUDIT_INCOMPLETE: ")
     integrity = _row(rows, "Integrity")
     assert integrity.startswith("integrity checks failed: member_rows; runs verified: “Refund agent”")
-    assert f"runs not verified: “Payment agent” ({a.uuid}; run {run_a.uuid}): its stored rows fail card_grade" \
-        in integrity
+    assert f"runs not verified: “Payment agent” ({a.uuid}; run {run_a.uuid}): its stored rows do not verify under " \
+        "card_grade" in integrity
     text = _text(_page(client, deployment))
     assert not any(f"{label} {value}" in text for label, value in before.items())
     assert f"Deployment total: {report.UNKNOWN_BANNER}: {report.STORED_ROW_UNVERIFIED}" in text
@@ -516,6 +527,23 @@ def test_the_total_is_escaped_read_only_and_signs_nothing(deployment, people, mo
     assert "<script" not in page and html.escape(HOSTILE, quote=True) in page
     assert "Gross exposure (cash, before insurance), total: P90" in _text(page)
     assert pdf.status_code == 200 and b"(<) Tj (script) Tj (>) Tj" in pdf.content
+
+
+def test_every_reason_a_portfolio_gives_is_said_in_words_the_lint_allows():
+    """Every exclusion code has the report's own wording, which keeps its meaning and
+    meets the lint; the portfolio's texts that say "fail" are reworded, never printed
+    raw; a text the report cannot reword is not quoted at all."""
+    assert set(exposure_report.NOT_TOTALLED) == set(portfolio.EXCLUSIONS)
+    for code, words in exposure_report.NOT_TOTALLED.items():
+        assert lint.lint(words).ok, (code, words)
+    raw = [portfolio.EXCLUSIONS["unverified"], portfolio._unverified(["result_digest", "member_rows"]),
+           "its stored rows fail card_grade"]
+    assert all(not lint.lint(text).ok for text in raw)
+    for text in raw:
+        said = exposure_report._quoted(text)
+        assert lint.lint(said).ok and "do not verify under" in said, said
+    assert exposure_report._quoted("a safe figure") == exposure_report.UNSAYABLE
+    assert lint.lint(exposure_report.UNSAYABLE).ok
 
 
 # ======================================================================

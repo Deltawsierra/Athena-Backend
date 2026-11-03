@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import html
 import io
+import re
 
 from mythos_core import status as core_status
+from mythos_core.persona import lint as persona_lint
 
 from . import report
 from .models import (
@@ -84,6 +86,43 @@ NO_PORTFOLIO = (
 )
 #: What the total reads where nothing about it is a gap.
 TOTAL_COMPLETE = "the loss of every current scenario version of this deployment, each approved, each run vouched for"
+#: The report's words for why a portfolio leaves a version out, by the portfolio's
+#: code (``portfolio.EXCLUSIONS``): each meaning kept, in words the persona lint
+#: (``mythos_core.persona.lint``) allows. The portfolio's own texts say "fail", which
+#: the lint forbids; the report never prints them raw.
+NOT_TOTALLED = {
+    "superseded": "a later version of the same scenario supersedes it: the later version is the one totalled",
+    "no_result": "no simulation result is recorded for it",
+    "unverified": "the stored rows of its latest result do not verify under a check: none of its figures is evidence",
+    "refused": "its latest run was refused: it has no figures",
+    "no_card": "its latest result has no Validity Card: it is not graded",
+    "unknown": "its latest result is graded Unknown: not for capital decisions",
+    "stale": ("its latest result is stale: something it rests on changed since it ran; it is not totalled until a "
+              "refresh of it stands"),
+    "not_totalled": "the rule every total applies (report.may_be_totalled) refuses its latest result's report",
+    "no_annual_loss": ("its run states no frequency: a draw is one occurrence, not a simulated year, so it has no "
+                       "annual loss to sum"),
+    "inputs_changed": "its stored rows no longer give the inputs its latest result was run on",
+    "currency_unnormalisable": "its amounts cannot be normalised into the reporting currency at the valuation date",
+}
+#: How a reason another part of economics wrote is reworded before the report prints
+#: it: the one forbidden verb those reasons use, said in the report's own words.
+_REWORDS = (
+    (re.compile(r"\bfailing\b", re.IGNORECASE), "not verifying under"),
+    (re.compile(r"\bfail\b", re.IGNORECASE), "do not verify under"),
+)
+#: What the report prints in place of a quoted reason it cannot say in allowed words.
+UNSAYABLE = "its wording is outside this report's lexicon and is not quoted here; the economics routes serve it"
+
+
+def _quoted(text) -> str:
+    """A reason another part of economics wrote (a portfolio's, a run report's, a
+    review's), in words the persona lint allows: reworded where :data:`_REWORDS`
+    says how, its meaning kept; never printed raw with a word the lint forbids."""
+    said = str(text)
+    for pattern, words in _REWORDS:
+        said = pattern.sub(words, said)
+    return said if persona_lint.lint(said).ok else UNSAYABLE
 
 
 def _approval(version: FinancialScenario) -> str | None:
@@ -104,7 +143,7 @@ def select(deployment) -> tuple[tuple[FinancialScenario, dict] | None, list[str]
     for version in FinancialScenario.objects.filter(deployment=deployment).order_by("-id"):
         why = _approval(version)
         if why is not None:
-            passed_over.append(f"{_named(version)} is not approved: {why}")
+            passed_over.append(f"{_named(version)} is not approved: {_quoted(why)}")
             continue
         run = (SimulationResult.objects.exposure_runs()
                .filter(scenario=version, deployment=deployment, status=SIMULATION_COMPLETED).order_by("-id").first())
@@ -115,8 +154,9 @@ def select(deployment) -> tuple[tuple[FinancialScenario, dict] | None, list[str]
         integrity = built["integrity"]
         if not (report.verifies(built) and integrity["verified"] is True and built["residual_of"] is None
                 and built["status"] == SIMULATION_COMPLETED):
+            failed = ", ".join(integrity["failed"]) or "its digest"
             passed_over.append(f"{_named(version)} is approved, but the stored rows of its latest completed run "
-                               f"fail integrity checks: {', '.join(integrity['failed']) or 'its digest'}")
+                               f"do not verify: integrity checks failed: {failed}")
             continue
         return (version, built), passed_over
     return None, passed_over
@@ -129,14 +169,14 @@ def _lines(summary: dict, label: str, gaps: list[str]) -> list[tuple[str, str]]:
     for line, name in LINE_LABELS.items():
         block = (summary.get("lines") or {}).get(line) or {"not_reported": "not reported"}
         if "p50" not in block:
-            gaps.append(f"{label}{name}: not measured: {block.get('not_reported')}")
+            gaps.append(f"{label}{name}: not measured: {_quoted(block.get('not_reported'))}")
             continue
         for key, figure in FIGURE_LABELS:
             figure = f"{figure} (P{severe})" if key == "severe_plausible" and severe else figure
             value = block.get(key)
             if value is None:
                 gaps.append(f"{label}{name}, {figure}: not measured: "
-                            f"{(block.get('not_reported') or {}).get(key, 'not reported')}")
+                            f"{_quoted((block.get('not_reported') or {}).get(key, 'not reported'))}")
             rows.append((f"{name}: {figure}", "not measured" if value is None else f"{code} {value}"))
     return rows
 
@@ -152,15 +192,16 @@ def _residual(version: FinancialScenario, gaps: list[str]) -> list[tuple[str, st
     built = report.build_report(run)
     if not (report.verifies(built) and built["integrity"]["verified"] is True
             and built["status"] == SIMULATION_COMPLETED):
-        gaps.append("Residual exposure after a remediation option: not measured: its residual run was refused or "
-                    f"its stored rows fail integrity checks ({', '.join(built['integrity']['failed']) or 'refused'})")
+        gaps.append("Residual exposure after a remediation option: not measured: its residual run was refused, or "
+                    "its stored rows do not verify (integrity checks failed: "
+                    f"{', '.join(built['integrity']['failed']) or 'none; the run was refused'})")
         return []
     rows = [("Remediation option", option.title),
             ("What this is", "modelled: the scenario as the option would leave it, not a measurement of a control "
                              "in place, and never added to a total"),
             ("Residual run", f"{run.uuid}, recorded {built['simulation']['recorded_at']}")]
     if built["banner"]:
-        gaps.append(f"Residual exposure: {built['banner']}: {built['banner_reason']}")
+        gaps.append(f"Residual exposure: {built['banner']}: {_quoted(built['banner_reason'])}")
     summary = {**built["summary"], "currency": built["currency"]["code"]}
     return rows + _lines(summary, "Residual: ", gaps)
 
@@ -194,8 +235,9 @@ def _total_integrity(served: dict, members: list[dict], excluded: list[dict], un
         return f"{head}; no run is vouched for: the portfolio's stored inputs no longer give their digest"
     failing = {entry.get("scenario"): entry.get("reason") for entry in integrity.get("scenarios_failed") or []}
     verified = [_run(m) for m in members if m.get("scenario") not in failing]
-    unverified = [f"{_run(m)}: {failing[m.get('scenario')]}" for m in members if m.get("scenario") in failing]
-    unverified += [f"{_run(e)}: {e.get('reason')}" for e in excluded if e.get("code") == "unverified"]
+    unverified = [f"{_run(m)}: {_quoted(failing[m.get('scenario')])}" for m in members
+                  if m.get("scenario") in failing]
+    unverified += [f"{_run(e)}: {NOT_TOTALLED['unverified']}" for e in excluded if e.get("code") == "unverified"]
     return (f"{head}; runs verified: {'; '.join(verified) or 'none'}; runs not verified: "
             f"{'; '.join(unverified) or 'none'}")
 
@@ -225,9 +267,9 @@ def _total(deployment, gaps: list[str]) -> list[tuple[str, str]]:
             ("Grade", ((served["grade"] or {}).get("grade") or "not graded")),
         ]
         if served["banner"]:
-            own.append(f"{served['banner']}: {served['banner_reason']}")
+            own.append(f"{served['banner']}: {_quoted(served['banner_reason'])}")
         if untrusted:
-            own.append(f"the portfolio's scenarios: {scenarios['not_reported']}")
+            own.append(f"the portfolio's scenarios: {_quoted(scenarios['not_reported'])}")
         # What the portfolio totals must be this deployment's approved scenario versions:
         # read, never re-selected. One that is not withholds the figures.
         versions = {str(v.uuid): v for v in FinancialScenario.objects.filter(deployment=deployment).order_by("id")}
@@ -240,11 +282,15 @@ def _total(deployment, gaps: list[str]) -> list[tuple[str, str]]:
                 continue
             refused = _approval(version)
             if refused is not None:
-                blockers.append(f"{_named(version)} is totalled, but it is not approved: {refused}")
+                blockers.append(f"{_named(version)} is totalled, but it is not approved: {_quoted(refused)}")
         own.extend(blockers)
         rows.extend(("Totalled", f"{_run(m)}; graded {m.get('graded')}") for m in members)
         for entry in excluded:
-            named = f"“{entry.get('title')}” ({entry.get('scenario')}): {entry.get('code')}: {entry.get('reason')}"
+            code, reason = entry.get("code"), entry.get("reason")
+            named = (f"“{entry.get('title')}” ({entry.get('scenario')}): {code}: "
+                     f"{NOT_TOTALLED.get(code) or _quoted(entry.get('meaning'))}")
+            if reason and reason != entry.get("meaning"):
+                named += f" ({_quoted(reason)})"
             rows.append(("Not totalled", named))
             own.append(f"not totalled: {named}")
         if not untrusted:
@@ -264,13 +310,13 @@ def _total(deployment, gaps: list[str]) -> list[tuple[str, str]]:
                     value = block.get(key)
                     if value is None:
                         own.append(f"{name}, {figure}: not measured: "
-                                   f"{(block.get('not_reported') or {}).get(key, 'not reported')}")
+                                   f"{_quoted((block.get('not_reported') or {}).get(key, 'not reported'))}")
                     rows.append((f"{name}: {figure}", "not measured" if value is None else f"{code} {value}"))
                 rows.append((f"{name}: integrity", integrity))
             rows.append((LINE_LABELS["market_value"], "not totalled"))
         else:
             rows += [("Totals", "not shown: named under “What is not measured”"), ("Integrity", integrity)]
-        rows.extend(("Limitation of the total", text) for text in served["limitations"])
+        rows.extend(("Limitation of the total", _quoted(text)) for text in served["limitations"])
     status = core_status.AUDIT_INCOMPLETE if own else TOTAL_COMPLETE
     rows.insert(1, ("Status of the total", f"{status}: {len(own)} gaps named under “What is not measured”"
                     if own else status))
@@ -304,10 +350,10 @@ def document(deployment) -> dict:
             ("Validity grade", built["grade"] or "not graded"),
         ]
         if not bridge.get("valuation_date"):
-            gaps.append(f"As-of date: not measured: {bridge.get('not_reported')}")
+            gaps.append(f"As-of date: not measured: {_quoted(bridge.get('not_reported'))}")
         if built["banner"]:
-            gaps.append(f"{built['banner']}: {built['banner_reason']}")
-        gaps.extend(f"{entry['kind']} {entry['id']}: {entry['reason']}" for entry in built["unknowns"])
+            gaps.append(f"{built['banner']}: {_quoted(built['banner_reason'])}")
+        gaps.extend(f"{entry['kind']} {entry['id']}: {_quoted(entry['reason'])}" for entry in built["unknowns"])
         summary = {**built["summary"], "currency": built["currency"]["code"]}
         exposure = [("Basis", summary["basis"]), ("Currency", f"{built['currency']['code']} ({built['currency']['rounding']})")]
         sections.append(("Exposure", exposure + _lines(summary, "", gaps)))
@@ -327,18 +373,18 @@ def document(deployment) -> dict:
                           "re-verified by this report: verify it against the engine's published economics-receipt "
                           "keys"))
         else:
-            gaps.append(f"Receipt: not measured: {receipt.get('not_reported')}")
+            gaps.append(f"Receipt: not measured: {_quoted(receipt.get('not_reported'))}")
         sections.append(("Receipt and integrity", proof))
         assumptions = []
         for name, entry in sorted(built["parameters"].items()):
             if entry.get("withheld"):
-                gaps.append(f"Assumption {name}: figures withheld: {entry['withheld']}")
+                gaps.append(f"Assumption {name}: figures withheld: {_quoted(entry['withheld'])}")
             assumptions.append((name, f"low {entry.get('low')}, base {entry.get('base')}, high {entry.get('high')} "
                                 f"{entry.get('currency') or entry.get('unit')}; source {entry.get('source_type')}; "
                                 f"evidence {entry.get('evidence_ref') or 'none named'}; effective "
                                 f"{entry.get('effective_date')}"))
         sections.append(("Assumptions and their sources", assumptions))
-        sections.append(("Limitations", [("", text) for text in built["limitations"]]))
+        sections.append(("Limitations", [("", _quoted(text)) for text in built["limitations"]]))
     sections.append((TOTAL_HEADING, _total(deployment, gaps)))
     sections.insert(0,("Scenarios of this deployment", versions or [("", "no scenario version is recorded")]))
     status = core_status.AUDIT_INCOMPLETE if gaps else COMPLETE
