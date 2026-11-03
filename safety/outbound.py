@@ -76,8 +76,8 @@ These hold at every one of them.
   roots an operator named in ``REQUESTS_CA_BUNDLE`` or ``CURL_CA_BUNDLE`` are still
   used: they are trust, not a credential, and dropping them would only fail
   verification closed.
-* **No error says anything of its target.** ``requests`` puts the request's path
-  and query in the text of a failed connection ("Max retries exceeded with url:
+* **No error quotes a credential.** Nor does it say anything of its target.
+  ``requests`` puts the request's path and query in the text of a failed connection ("Max retries exceeded with url:
   /services/T0/B0/<the webhook's secret>?token=..."), a malformed URL whole,
   userinfo and all, in an ``InvalidURL``, and urllib3 the connection itself in a
   connect that timed out, whose ``repr`` names the host and port
