@@ -163,7 +163,9 @@ jobs:
   # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it,
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
   # statement (a subquery over every deployment) costs no statement, so only that test,
-  # reading the plans and the rows each statement visits, sees it.
+  # reading the plans and the rows each statement visits, sees it. And it walks a scan's
+  # target through every place it is shown (no key in its login, query, ;params or
+  # fragment is shown anywhere; the engine is still sent the URL whole).
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -225,6 +227,8 @@ jobs:
             tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py \
             tests/test_a_proxy_password_that_cannot_be_encoded_owes_the_stop.py \
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
+            tests/test_no_target_credential_is_ever_shown.py \
+            tests/test_a_scan_target_s_login_is_said_nowhere.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \

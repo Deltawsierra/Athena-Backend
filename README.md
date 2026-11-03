@@ -881,8 +881,9 @@ first, paginated, scoped as the finding is; finding detail carries its latest te
 and the scan run it was listed under, the verdict as the engine sent it and whether it
 is one this backend knows, the engine's detail, the run's end (`completed`, or `aborted`
 after its check was filed), when the engine checked, and who collected it and when.
-The engine's detail and result are kept and served with the target's login withheld, as
-every scan answer is.
+The engine's detail and result are kept and served with every credential the target
+carries withheld (its login, its query, `;param` and fragment values), as every scan
+answer is.
 
 **Tenant precondition (decision 7).** The backend reads the run with its own operator
 key. A key bound to a tenant reads only that tenant's runs: a retest started under
@@ -2099,7 +2100,7 @@ one line per scan, and exits non-zero while any scan stays pending for longer th
 a launch and never a Stop; a scan that names no run is listed and sent nothing.
 
 **Reads.** `GET /api/pentest/scans/<uuid>/` and the rows of `GET /api/pentest/scans/`
-serve the record: `uuid`, `target_url` (login withheld), `consent`, `status` (`pending`,
+serve the record: `uuid`, `target_url` (as shown: see below), `consent`, `status` (`pending`,
 `completed`, `failed`, `stopped`, `unknown`), `verdict`, `verdict_label`, `created_at`,
 `collected_at`, `engine_run_id`, `pdf_url`, `email_sent`, `error_message`, `stop` (the
 Stop's reading, as before) and `engagement` (`{id, name, client_name, status}`); the
@@ -2110,6 +2111,21 @@ raw route measurements of the deployment's serving assets. A finding
 (`GET /api/assurance/findings/`) serves `scan_uuid` and `engine_run_id`, the scan it
 was last observed in; a deployment serves `engagement_id`, the authorisation it is
 assessed under.
+
+**A scan's target, as shown.** A scan keeps the URL it was launched with: the engine is
+sent it whole, and a reconcile sends it again unchanged. Every place that shows it -- these
+reads, the launch's, LLM launch's and reconcile's answers, both report renderers, the
+e-mail, the admin, the log -- shows it with no credential it carries
+(`pentest.models.target_shown`): the userinfo as `[withheld]`, every query value and
+every `;param` value as `•••` with its name kept (every value, not those whose names look
+like keys), and the fragment as `#•••`; a target that cannot be read is shown as `•••`.
+What a scan says -- its errors, and the engine's answer kept for a reader -- says the
+target that way, each `name=value` as `name=•••`, and withholds its login and each value
+said on its own (`pentest.models.target_said`; a value said alone is withheld when it is
+at least 8 characters and not a plain word, so a tenant's `?level=critical` cannot
+rewrite the severity a verdict is read from).
+`tests/test_no_target_credential_is_ever_shown.py` plants a key in each of those four
+places of a standard scan and of an LLM scan and walks every shown site.
 
 **The hybrid (the athena-dashboard).** This backend is the record and the governance
 gate: the target's bounds, consent, the engagement's authority and window, the preflight
