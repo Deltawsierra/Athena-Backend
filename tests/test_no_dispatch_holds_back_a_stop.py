@@ -3752,6 +3752,12 @@ def test_unrecorded_dispatches_have_a_hard_bound_and_past_it_each_is_named_at_on
             with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
                 monkeypatch.setattr(sys, "__stderr__", err)
                 assert dispatch.start_blocking_decision_dispatch(6006, unrecorded=True) == dispatch.FULL
+                if sys.platform == "win32":
+                    # select cannot be asked there: the call hands the line to the stderr
+                    # writer before it returns, and that thread writes it. Wait for it.
+                    from assurance import oplog
+
+                    oplog.wait_for_stderr(5.0)
                 # On stderr before the call returned.
                 assert "retry_blocking_dispatches --deployment 6006" in err.text()
                 monkeypatch.setattr(sys, "__stderr__", sys.stderr)

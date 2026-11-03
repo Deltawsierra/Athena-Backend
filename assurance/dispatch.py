@@ -1596,6 +1596,9 @@ def _sweeper(interval: float, stop) -> None:
             # Records queued while no thread could start (a stop's ERROR among
             # them): the log thread is started again to write them.
             _oplog.start_pump()
+        # Lines for stderr that waited while no thread could start -- a dispatch past
+        # its bound named among them -- and any count of lost ones: written now.
+        _oplog.start_stderr_writer()
         try:
             sweep_owed_blocking_dispatches()
         except Exception:  # noqa: BLE001 - it never raises; if it did, sweep again next time

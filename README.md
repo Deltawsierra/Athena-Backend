@@ -1880,9 +1880,14 @@ Logging. A stop's thread never writes to a log handler. A dispatch that is neith
 recorded nor started is named at ERROR, with the `retry_blocking_dispatches
 --deployment N` command to run: at once, in the stop's own thread, as one line to
 stderr -- only if stderr can take it without waiting -- and, for the log handlers,
-through the background log thread. When no thread can start, the record waits in
-that queue (bounded, counted) until the next request, sweep or exit starts or runs
-the writer. Everything else on a stop's path goes the same way, through a queue of
+through the background log thread. A line stderr cannot take at once (a full pipe;
+on Windows, where a thread writes each line, the line before it still being written)
+is never dropped silently: it waits, queued, for the one stderr writer thread, which
+writes it as soon as stderr takes it, and the stop never waits for it. Past 100
+waiting lines, or when stderr fails to take one, the line is counted and the count
+is logged; each line is in the log as well. When no thread can start, the record and
+the line wait in their queues (bounded, counted) until the next request, sweep or
+exit starts or runs the writers. Everything else on a stop's path goes the same way, through a queue of
 at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
 
