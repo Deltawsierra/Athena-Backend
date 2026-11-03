@@ -6,7 +6,7 @@ Linux and on windows-latest:
 - this host has its platform's own lock, never none;
 - the cap holds across processes: slots held by another process (another worker)
   refuse a run at once, by host and by tenant, and the per-tenant cap of one tenant
-  never refuses another;
+  never refuses another (across processes, and through the route);
 - a holder that dies gives its slots back: killed by ``Popen.kill``, which is SIGKILL on
   POSIX and ``TerminateProcess`` on Windows, so no ``finally`` of its own runs;
 - with every slot held by another process, a simulate is the 503 at once, and every
@@ -45,8 +45,13 @@ from tests.test_economics_report import QUICK, stored
 
 User = get_user_model()
 
-# The fixtures of the run-cap tests, used here as they are there.
+# The fixtures of the run-cap tests, used here as they are there. ``stop_lane`` also
+# makes the Defender gateway's engine answer at once: a request every route takes asks
+# that engine first, for up to DEFENDER_TIMEOUT_SECONDS (0.5 s). With no engine there, a
+# refused connection to a closed local port is immediate on Linux, but not on Windows,
+# where it waits out that whole deadline: the gateway's latency, not the cap's.
 caps = run_cap.caps
+held_open = run_cap.held_open
 operator_key = run_cap.operator_key
 stop_lane = run_cap.stop_lane
 
@@ -264,6 +269,32 @@ def test_a_simulate_runs_through_the_route_under_the_cap_and_gives_its_slot_back
     assert run_cap._probe(str(deployment.uuid)) == "free"
 
 
+@pytest.mark.django_db(transaction=True)
+def test_a_second_run_of_one_tenant_is_refused_at_once_while_another_tenants_run_proceeds(caps, held_open, stop_lane):
+    """Per tenant, through the route (``test_economics_run_cap``'s test of the same
+    name, with the gateway's engine answering at once, see ``stop_lane`` above): one
+    deployment's run is held open; its second run is 503 at once, while another
+    deployment's run is made (201)."""
+    caps(host=2, tenant=1)
+    analyst = User.objects.create_user(username="ann-tenant-every", password="x", role="analyst")
+    busy, other = Deployment.objects.create(name="busy-every"), Deployment.objects.create(name="other-every")
+    busy_scenario, other_scenario = stored(busy, analyst), stored(other, analyst)
+    held_open.start("busy", analyst, run_cap._simulate_url(busy, busy_scenario), {"seed": 91, "policy": QUICK})
+    held_open.wait_entered(1)
+    refused, took = run_cap._post_within(analyst, run_cap._simulate_url(busy, busy_scenario),
+                                         {"seed": 92, "policy": QUICK})
+    body = run_cap._refused_at_capacity(refused)
+    assert "this deployment" in body["detail"] and took < run_cap.REFUSED_WITHIN, (body, took)
+    proceeds, _ = run_cap._post_within(analyst, run_cap._simulate_url(other, other_scenario),
+                                       {"seed": 93, "policy": QUICK}, 120)
+    assert proceeds.status_code == 201, proceeds.data
+    held_open.let_go()
+    assert held_open.answers == {"busy": 201}
+    again, _ = run_cap._post_within(analyst, run_cap._simulate_url(busy, busy_scenario),
+                                    {"seed": 92, "policy": QUICK}, 120)
+    assert again.status_code == 201, again.data
+
+
 @pytest.mark.django_db
 def test_a_receipt_is_made_through_the_simulate_route(caps, monkeypatch):
     """``test_economics_read_routes._receipted``: a receipt asked for through the
@@ -405,7 +436,7 @@ def test_a_windows_lock_failing_on_the_hosts_slot_gives_the_tenants_back(windows
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_simulate_with_the_windows_lock_runs_and_at_capacity_is_the_503(windows_lock, caps):
+def test_a_simulate_with_the_windows_lock_runs_and_at_capacity_is_the_503(windows_lock, caps, stop_lane):
     caps(host=1, tenant=1)
     analyst = User.objects.create_user(username="ann-winlock", password="x", role="analyst")
     deployment = Deployment.objects.create(name="win-lock")

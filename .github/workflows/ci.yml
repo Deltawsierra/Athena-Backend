@@ -160,8 +160,12 @@ jobs:
   # cap across processes, a holder killed with TerminateProcess, every stop answered with
   # every slot held, a simulate and a receipt through the route), the no-lock refusal
   # (tests/test_economics_run_cap_without_fcntl.py), and every test of
-  # tests/test_economics_run_cap.py, named below, but the one that sends SIGKILL, which
-  # Windows does not have (its TerminateProcess form is in the every-platform file). It also
+  # tests/test_economics_run_cap.py, named below, but two: the one that sends SIGKILL, which
+  # Windows does not have, and the per-tenant route test, whose refused request first asks
+  # the Defender gateway's engine (absent in CI) for up to its 0.5 s deadline -- a refused
+  # local connection is immediate on Linux and is not on Windows, so it measures the
+  # gateway there, not the cap. The every-platform file holds the form of each that runs
+  # on Windows (TerminateProcess; the engine answering at once). It also
   # holds SPINE's statement budget here, so a count that moves with the platform -- or
   # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it,
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
@@ -237,7 +241,6 @@ jobs:
             tests/test_economics_run_cap.py::test_one_tenant_never_takes_every_slot \
             tests/test_economics_run_cap.py::test_slot_files_that_cannot_be_opened_refuse_the_run_never_run_it_uncapped \
             tests/test_economics_run_cap.py::test_with_every_slot_held_a_run_is_refused_at_once_and_every_stop_is_answered_in_its_bound \
-            tests/test_economics_run_cap.py::test_a_second_run_of_one_tenant_is_refused_while_another_tenants_run_proceeds \
             tests/test_economics_run_cap.py::test_no_slot_is_disclosed_to_one_who_cannot_see_the_deployment_or_may_not_run \
             tests/test_economics_run_cap.py::test_a_slot_is_given_back_when_the_run_raises \
             tests/test_economics_run_cap.py::test_a_slot_file_carries_nothing \
