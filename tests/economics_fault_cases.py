@@ -127,6 +127,7 @@ def test_only_economics_is_refused():
         economics = f"/api/assurance/deployments/{deployment.uuid}/economics/"
         assert resolve(economics + "scenarios/").view_name == "deployment-economics-scenarios"
         assert resolve(economics + f"receipts/{scenario}/").view_name == "deployment-economics-receipt"
+        assert resolve(economics + "exposure-report/").view_name == "deployment-economics-exposure-report"
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
         assert built.view_name == "deployment-economics-scenario-build"
@@ -146,8 +147,8 @@ def test_only_economics_is_refused():
             with pytest.raises(Resolver404):
                 resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/portfolio/{tail}")
         # Nor are the read routes the dashboard needs (spec, section 30): the list and
-        # a receipt's signed bytes.
-        for path in ("scenarios/", f"receipts/{scenario}/"):
+        # a receipt's signed bytes; nor the exposure report (section 38).
+        for path in ("scenarios/", f"receipts/{scenario}/", "exposure-report/"):
             with pytest.raises(Resolver404):
                 resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/{path}")
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
@@ -204,6 +205,7 @@ def test_only_economics_is_refused():
         economics = f"/api/assurance/deployments/{deployment.uuid}/economics/"
         assert resolve(economics + "scenarios/").view_name == "deployment-economics-scenarios"
         assert resolve(economics + f"receipts/{scenario}/").view_name == "deployment-economics-receipt"
+        assert resolve(economics + "exposure-report/").view_name == "deployment-economics-exposure-report"
         admin = get_user_model().objects.create_user(username="admin", password="x", role="admin")
         client = APIClient(raise_request_exception=False)
         client.force_authenticate(user=admin)

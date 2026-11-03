@@ -1916,6 +1916,9 @@ ROUTES.update(
         # scenario versions, and a Financial Exposure Receipt's signed bytes.
         "deployment-economics-scenarios": _READ,
         "deployment-economics-receipt": "api.receipts",
+        # The deployment's economic-exposure report (spec, section 38): read by
+        # read_everything as HTML, searched like every other answer.
+        "deployment-economics-exposure-report": _READ,
         # Step 11's context routes: a prefill suggestion (it takes its query, and a
         # read with none is refused 400 with its code) and a scenario's precedents.
         "deployment-economics-suggestions": _READ,
