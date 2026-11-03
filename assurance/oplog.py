@@ -51,6 +51,9 @@ PUMP_THREAD = "assurance-log"
 _BUF: collections.deque = collections.deque()
 _COND = threading.Condition(threading.Lock())
 _DROPPED = [0]
+#: Every record dropped since this process started (``_DROPPED`` is reset once
+#: the drop is logged): read by ``/api/health/`` and the sweep's warning.
+LOG_DROPPED = [0]
 #: This process's pump, as ``[(pid, thread)]``.
 _PUMP: list = []
 _PUMP_LOCK = threading.Lock()
@@ -150,6 +153,7 @@ def log_later(level, msg, *args, exc=False, logger_name=None) -> bool:
             if len(_BUF) >= MAX_QUEUED:
                 _BUF.popleft()
                 _DROPPED[0] += 1
+                LOG_DROPPED[0] += 1
             _BUF.append(record)
             _COND.notify()
     except Exception:  # noqa: BLE001, S110 - never raised into a stop
@@ -419,6 +423,7 @@ def _after_fork_in_child() -> None:
     _BUF = collections.deque()
     _COND = threading.Condition(threading.Lock())
     _DROPPED[0] = 0
+    LOG_DROPPED[0] = 0
     _BUSY[0] = False
     _PUMP.clear()
     _PUMP_LOCK = threading.Lock()

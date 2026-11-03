@@ -335,3 +335,115 @@ def test_every_dispatch_past_its_bound_is_named_once_a_full_stderr_pipe_drains(m
         err.close()
         _settle()
     oplog.drain()
+
+
+# ------------------------------------------------- every count where it is seen
+
+#: Each count, and the counter that holds it.
+COUNTERS = {
+    "stderr_lines_lost": (oplog, "STDERR_LOST"),
+    "log_records_dropped": (oplog, "LOG_DROPPED"),
+    "unrecorded_dispatches_refused": (dispatch, "_UNRECORDED_REFUSED"),
+}
+
+
+@pytest.fixture
+def counts_at_zero(monkeypatch):
+    for module, name in COUNTERS.values():
+        monkeypatch.setattr(module, name, [0], raising=False)
+    monkeypatch.setattr(dispatch, "_DEGRADED_REPORTED", [{}], raising=False)
+
+
+def _health():
+    from rest_framework.test import APIClient
+
+    answer = APIClient().get("/api/health/")
+    assert answer.status_code == 200, answer.content
+    return answer.json()
+
+
+@pytest.mark.django_db
+def test_health_is_ok_only_while_every_count_is_zero(counts_at_zero):
+    assert _health() == {"status": "ok", "message": "Django backend is alive."}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("count", sorted(COUNTERS))
+def test_each_non_zero_count_reads_degraded_in_health_never_ok(count, counts_at_zero, monkeypatch):
+    module, name = COUNTERS[count]
+    monkeypatch.setattr(module, name, [3])
+    body = _health()
+    assert body["status"] == "degraded", body
+    assert body["degraded"] == {count: 3}, body
+    assert f"{count}=3" in body["message"], body
+
+
+@pytest.mark.django_db
+def test_health_reads_unknown_never_ok_when_the_counts_cannot_be_read(counts_at_zero, monkeypatch):
+    def unreadable():
+        raise RuntimeError("no counts")
+
+    monkeypatch.setattr(dispatch, "degraded_counts", unreadable)
+    assert _health()["status"] == "unknown"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("count", sorted(COUNTERS))
+def test_each_non_zero_count_is_in_the_sweeps_warning(count, counts_at_zero, monkeypatch, caplog):
+    module, name = COUNTERS[count]
+    monkeypatch.setattr(module, name, [3])
+    with caplog.at_level(logging.WARNING, logger="assurance.dispatch"):
+        caplog.clear()
+        dispatch.sweep_owed_blocking_dispatches()
+        assert f"this process is degraded since it started: {count}=3" in caplog.text, caplog.text
+        # Once per change, not on every sweep; again when the count moves.
+        caplog.clear()
+        dispatch.sweep_owed_blocking_dispatches()
+        assert "degraded" not in caplog.text, caplog.text
+        getattr(module, name)[0] += 1
+        dispatch.sweep_owed_blocking_dispatches()
+        assert f"{count}=4" in caplog.text, caplog.text
+
+
+@pytest.mark.django_db
+def test_the_sweep_says_nothing_while_every_count_is_zero(counts_at_zero, caplog):
+    with caplog.at_level(logging.WARNING, logger="assurance.dispatch"):
+        dispatch.sweep_owed_blocking_dispatches()
+    assert "degraded" not in caplog.text, caplog.text
+
+
+def test_a_record_dropped_from_the_full_log_queue_is_counted_for_good(monkeypatch):
+    """The log queue's own drop count is reset once the drop is logged; the count
+    health and the sweep read is not."""
+    oplog.drain()
+    monkeypatch.setattr(oplog, "start_pump", lambda: False)
+    monkeypatch.setattr(oplog, "_BUF", type(oplog._BUF)())
+    monkeypatch.setattr(oplog, "_COND", threading.Condition(threading.Lock()))
+    monkeypatch.setattr(oplog, "_DROPPED", [0])
+    monkeypatch.setattr(oplog, "LOG_DROPPED", [0], raising=False)
+    monkeypatch.setattr(oplog, "MAX_QUEUED", 2)
+    for n in range(5):
+        oplog.log_later(logging.WARNING, "record %d", n)
+    assert oplog.queued() == 2
+    assert oplog.LOG_DROPPED[0] == 3
+    assert dispatch.degraded_counts()["log_records_dropped"] == 3
+
+
+def test_reading_the_counts_takes_no_lock_a_stop_takes(counts_at_zero):
+    """Health and the sweep read the counts while a stop may hold the dispatch and
+    log locks: the read must not wait for any of them."""
+    held = [dispatch._JOBS_LOCK, oplog._STDERR_LOCK, oplog._PUMP_LOCK]
+    for lock in held:
+        assert lock.acquire(timeout=5)
+    cond = oplog._COND
+    assert cond.acquire(timeout=5)
+    try:
+        answer = []
+        reader = threading.Thread(target=lambda: answer.append(dispatch.degraded_counts()), daemon=True)
+        reader.start()
+        reader.join(2)
+        assert answer, "reading the counts waited on a lock a stop takes"
+    finally:
+        cond.release()
+        for lock in held:
+            lock.release()

@@ -15,8 +15,33 @@ def health(request):
 
     Returns:
     {
-        "status": "ok" | "error",
-        "message": "<short text>"
+        "status": "ok" | "degraded" | "unknown" | "error",
+        "message": "<short text>",
+        "degraded": {"<count>": <n>, ...}   (only when "degraded")
     }
+
+    "degraded": this process lost or refused something an operator must act on
+    (:func:`assurance.dispatch.degraded_counts`: a line meant for stderr, a log
+    record, a dispatch its stop could not record refused past the hard bound),
+    with each non-zero count. "unknown": the counts could not be read. Never "ok"
+    unless every count was read and is zero. Always 200: it is the liveness
+    probe, and the process is alive. The counts are plain reads; no lock a stop
+    takes is taken here.
     """
+    try:
+        from assurance.dispatch import degraded_counts
+
+        counts = degraded_counts()
+    except Exception as exc:  # noqa: BLE001 - an honest unknown, never ok
+        return Response({"status": "unknown", "message": f"the degraded counts could not be read: {type(exc).__name__}"})
+    degraded = {name: count for name, count in counts.items() if count}
+    if degraded:
+        return Response(
+            {
+                "status": "degraded",
+                "message": "Django backend is alive, and lost or refused what an operator must act on: "
+                + ", ".join(f"{name}={count}" for name, count in degraded.items()),
+                "degraded": degraded,
+            }
+        )
     return Response({"status": "ok", "message": "Django backend is alive."})

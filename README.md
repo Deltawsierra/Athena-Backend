@@ -1887,7 +1887,11 @@ writes it as soon as stderr takes it, and the stop never waits for it. Past 100
 waiting lines, or when stderr fails to take one, the line is counted and the count
 is logged; each line is in the log as well. When no thread can start, the record and
 the line wait in their queues (bounded, counted) until the next request, sweep or
-exit starts or runs the writers. Everything else on a stop's path goes the same way, through a queue of
+exit starts or runs the writers. What a process lost or refused since it started --
+lines meant for stderr, log records dropped, unrecorded dispatches refused past the
+hard bound -- is counted, and any non-zero count makes `GET /api/health/` answer
+`"status": "degraded"` (still 200: the process is alive) with each count, and the
+sweep log it at WARNING whenever a count moves. The counts are per process. Everything else on a stop's path goes the same way, through a queue of
 at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
 

@@ -902,6 +902,37 @@ _ERROR_LIMIT = 2000
 UNRECORDED_BOUND_FACTOR = 2
 _UNRECORDED_REFUSED = [0]
 
+#: What :func:`degraded_counts` read at the last sweep that reported it.
+_DEGRADED_REPORTED: list = [{}]
+
+
+def degraded_counts() -> dict:
+    """What this process lost or refused since it started, by name: lines meant for
+    stderr that never reached it, log records dropped from the full log queue, and
+    dispatches its stops could not record that were refused past the hard bound.
+    Any non-zero count is a degraded process. Plain reads of counters -- no lock,
+    no query -- so a view may call it, and no stop's path does."""
+    return {
+        "stderr_lines_lost": _oplog.STDERR_LOST[0],
+        "log_records_dropped": _oplog.LOG_DROPPED[0],
+        "unrecorded_dispatches_refused": _UNRECORDED_REFUSED[0],
+    }
+
+
+def _report_degraded() -> None:
+    """The sweep's warning for :func:`degraded_counts`: once whenever a count has
+    changed since the last sweep, with every non-zero total."""
+    counts = degraded_counts()
+    if counts == _DEGRADED_REPORTED[0] or not any(counts.values()):
+        _DEGRADED_REPORTED[0] = counts
+        return
+    _DEGRADED_REPORTED[0] = counts
+    logger.warning(
+        "this process is degraded since it started: %s",
+        ", ".join(f"{name}={count}" for name, count in counts.items() if count),
+    )
+
+
 #: The sweeper's start, retried after a failure: ``{"pid", "failures", "next"}``.
 _SWEEPER_RETRY: dict = {}
 SWEEPER_RETRY_MAX_SECONDS = 300.0
@@ -924,6 +955,7 @@ def _after_fork_in_child() -> None:
     _SWEEPER_STARTING = threading.Lock()
     _NOT_STARTED[0] = 0
     _UNRECORDED_REFUSED[0] = 0
+    _DEGRADED_REPORTED[0] = {}
 
 
 if hasattr(os, "register_at_fork"):
@@ -1582,6 +1614,7 @@ def sweep_owed_blocking_dispatches() -> list:
             _max_concurrent_runs() + _max_waiting_runs(),
             not_started,
         )
+    _report_degraded()
     return started
 
 
