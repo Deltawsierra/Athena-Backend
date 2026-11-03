@@ -1354,57 +1354,85 @@ class _PollRead(_Read):
         #: The starts this read held back: {pk: (stop uuid, stop action)}.
         self.held = {}
 
-    def _stopped_after(self, pks):
-        """Of the starts ``pks``, those a stop in force of their engine was
-        drafted at or after: {pk: (the stop's uuid, its action)}. One read:
-        each start's question is an EXISTS-style search of the index on
-        (engine, status, action, creation time) that stops at the first stop
-        found, so it does not grow with the stops (or the consumed history)
-        of the engine."""
-        stops = FailsafeCommand.objects.filter(
-            engine_id=OuterRef("engine_id"),
-            status__in=STOP_IN_FORCE,
-            action__in=STOP_ACTIONS,
-            created_at__gte=OuterRef("created_at"),
-        ).order_by()
+    def _newest_in_force(self, starts):
+        """The newest stop in force (STOP_IN_FORCE) of each engine of
+        ``starts``: {engine_id: (created_at, uuid, action)}. One read of one
+        row per engine, each carrying, for every (status, action) of a stop
+        in force, a scalar subquery with all three of (engine, status, action)
+        equal, newest first, LIMIT 1: one seek to the end of its range of the
+        index on (engine, status, action, creation time) (fsc_eng_st_act_ct),
+        whatever the number of ready starts or consumed stops.
+
+        Round 2 asked instead whether any stop in force was drafted at or
+        after each start, with the statuses and actions as IN lists: a query
+        planner free to read that by (engine, status, creation time) stepped
+        through every ready start newer than the one asked about, once per
+        start -- on Windows' SQLite, 0.8 s of one poll under 10,000 ready
+        starts."""
+        first = {}
+        for command in starts:
+            first.setdefault(command.engine_id, command.pk)
+        combos = [(state_, action) for state_ in STOP_IN_FORCE for action in STOP_ACTIONS]
+        columns = {}
+        for n, (state_, action) in enumerate(combos):
+            newest = FailsafeCommand.objects.filter(
+                engine_id=OuterRef("engine_id"), status=state_, action=action
+            ).order_by("-created_at", "-pk")
+            columns[f"c{n}"] = Subquery(newest.values("created_at")[:1])
+            columns[f"u{n}"] = Subquery(newest.values("uuid")[:1])
         rows = (
-            FailsafeCommand.objects.filter(pk__in=pks)
+            FailsafeCommand.objects.filter(pk__in=list(first.values()))
             .order_by()
-            .annotate(stop_uuid=Subquery(stops.values("uuid")[:1]), stop_action=Subquery(stops.values("action")[:1]))
-            .filter(stop_uuid__isnull=False)
-            .values_list("pk", "stop_uuid", "stop_action")
+            .annotate(**columns)
+            .values("engine_id", *columns)
         )
-        return {pk: (str(stop_uuid), stop_action) for pk, stop_uuid, stop_action in rows}
+        found = {}
+        for row in rows:
+            seen = [(row[f"c{n}"], str(row[f"u{n}"]), action)
+                    for n, (_state, action) in enumerate(combos) if row[f"c{n}"] is not None]
+            if seen:
+                found[row["engine_id"]] = max(seen, key=lambda stop: stop[0])
+        return found
 
     def supersede_held(self):
         """Mark the starts this read held back superseded, each with an audit
-        event naming the stop it was drafted before. Each is one conditional
-        write (still ready), so two polls at once never mark one twice. A
-        write that fails is logged and the poll is answered: the start stays
-        held back on every poll while the stop is in force."""
+        event naming the stop it was drafted before: one UPDATE of at most
+        POLL_START_LIMIT rows (those held on this page; at most EXPIRE_PER_READ
+        in any case), one read of the rows that write changed, and one insert,
+        in one short transaction -- never a write per row. Only the rows this
+        write changed (its own ``updated_at``) get an event, so two polls at
+        once never record one twice. A write that fails is logged and the poll
+        is answered: the start stays held back on every poll while the stop
+        is in force."""
         if not self.held:
             return
+        held = dict(list(self.held.items())[:EXPIRE_PER_READ])
         try:
             now = timezone.now()
             with transaction.atomic():
-                events = []
-                for pk, (stop_uuid, stop_action) in self.held.items():
-                    if FailsafeCommand.objects.filter(pk=pk, status=_READY).update(
-                        status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
-                    ):
-                        events.append(FailsafeAuditEvent(
-                            command_id=pk,
-                            event=FailsafeAuditEvent.EVENT_SUPERSEDED,
-                            detail={
-                                "by": "engine poll",
-                                "superseded_by": stop_uuid,
-                                "reason": f"drafted at or before the {stop_action} {stop_uuid} of its engine, "
-                                          "which is ready or consumed: delivered after it, it would undo that stop",
-                            },
-                        ))
-                FailsafeAuditEvent.objects.bulk_create(events)
+                changed = FailsafeCommand.objects.filter(pk__in=list(held), status=_READY).update(
+                    status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
+                )
+                if not changed:
+                    return
+                mine = FailsafeCommand.objects.filter(
+                    pk__in=list(held), status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
+                ).order_by().values_list("pk", flat=True)
+                FailsafeAuditEvent.objects.bulk_create([
+                    FailsafeAuditEvent(
+                        command_id=pk,
+                        event=FailsafeAuditEvent.EVENT_SUPERSEDED,
+                        detail={
+                            "by": "engine poll",
+                            "superseded_by": held[pk][0],
+                            "reason": f"drafted at or before the {held[pk][1]} {held[pk][0]} of its engine, "
+                                      "which is ready or consumed: delivered after it, it would undo that stop",
+                        },
+                    )
+                    for pk in mine
+                ])
         except Exception:  # noqa: BLE001 - a failed write must not fail the engine's poll
-            logger.exception("could not mark %d held-back failsafe starts superseded", len(self.held))
+            logger.exception("could not mark %d held-back failsafe starts superseded", len(held))
 
     def page(self, expiry, page):
         """This page's rows by lane, and the next page's cursor or None. No
@@ -1420,8 +1448,13 @@ class _PollRead(_Read):
                 continue
             entries, more = _lane(self.qs, tiers, limit, after, expiry)
             if name == "q":
-                pks = [command.pk for _key, command in entries if command is not None]
-                self.held = self._stopped_after(pks) if pks else {}
+                starts = [command for _key, command in entries if command is not None]
+                stops = self._newest_in_force(starts) if starts else {}
+                self.held = {
+                    command.pk: stops[command.engine_id][1:]
+                    for command in starts
+                    if command.engine_id in stops and command.created_at <= stops[command.engine_id][0]
+                }
                 entries = [(key, None if command is not None and command.pk in self.held else command)
                            for key, command in entries]
             rows[name], last, passed = page.take_lane(entries)

@@ -329,6 +329,51 @@ def test_a_start_older_than_a_consumed_stop_is_held_even_when_it_cannot_be_marke
     assert [c["nonce"] for c in _poll("/api/failsafe/pending/?engine_id=athena-2").json()] == [not_held.nonce]
 
 
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+def test_a_flood_of_held_starts_leaves_the_poll_bounded(monkeypatch):
+    """1,000, then 10,000 ready starts drafted before a ready pause: every
+    poll answers the pause alone, runs the same statements and about the same
+    VM work with ten times the flood, marks what it held in ONE write, and
+    finds the newest stop in force by seeks of fsc_eng_st_act_ct with engine,
+    status and action all equal -- never a range read of the starts (round
+    2's lookup cost one poll 0.8 s on Windows under this flood)."""
+    from failsafe.models import FailsafeAuditEvent, FailsafeCommand
+    from failsafe.views import POLL_START_LIMIT
+
+    at = timezone.now() - timedelta(hours=1)
+    _make(_starts(1000), at)
+    pause = _make(["pause"], at + timedelta(minutes=30))[0]
+    seen = {}
+    for total in (1000, 10000):
+        if total == 10000:
+            _make(_starts(9000), at - timedelta(minutes=10))
+        before = FailsafeCommand.objects.filter(status="superseded").count()
+        with CaptureQueriesContext(connection) as queries:
+            answer, loaded, statements, steps = _measured("/api/failsafe/pending/?engine_id=athena-1", monkeypatch)
+        assert [c["nonce"] for c in answer.json()] == [pause.nonce], total
+        updates = [q["sql"] for q in queries.captured_queries if q["sql"].startswith("UPDATE")]
+        assert len(updates) == 1, (total, len(updates))
+        marked = FailsafeCommand.objects.filter(status="superseded").count() - before
+        assert marked == POLL_START_LIMIT, (total, marked)
+        assert loaded <= POLL_START_LIMIT + 1, (total, loaded)
+        seen[total] = (statements, steps)
+        for query in queries.captured_queries:
+            if not query["sql"].startswith("SELECT"):
+                continue
+            with connection.cursor() as cursor:
+                cursor.execute("EXPLAIN QUERY PLAN " + query["sql"])
+                plan = [row[-1] for row in cursor.fetchall()]
+            assert not any(step.startswith("SCAN ") or "TEMP B-TREE" in step for step in plan), plan
+            for step in plan:
+                if step.startswith("SEARCH U0"):
+                    assert step.endswith("INDEX fsc_eng_st_act_ct (engine_id=? AND status=? AND action=?)"), plan
+    assert seen[10000][0] == seen[1000][0], seen
+    assert seen[10000][1] <= seen[1000][1] * 1.5 + 50, seen
+    assert FailsafeAuditEvent.objects.filter(event="superseded", detail__superseded_by=str(pause.uuid)).count() == (
+        2 * POLL_START_LIMIT)
+
+
 # --- 3. The reads are index ranges -----------------------------------------------------------
 
 
@@ -362,7 +407,14 @@ def test_each_ready_by_action_read_is_a_search_of_its_own_index(path):
         # No sort either: a temp B-tree reads every row it sorts, the
         # expiry's candidates included (each command past its window).
         assert not any("TEMP B-TREE" in step for step in plan), (sql[:300], plan)
-        if '"action" = ' in sql and "ORDER BY" in sql:
+        if " U0" in sql:
+            # The newest stop in force of each engine: seeks with engine,
+            # status and action all equal, never a range read of the starts.
+            searches = [step for step in plan if step.startswith("SEARCH U0")]
+            assert searches and all(
+                step.endswith("INDEX fsc_eng_st_act_ct (engine_id=? AND status=? AND action=?)") for step in searches
+            ), plan
+        elif '"action" = ' in sql and "ORDER BY" in sql:
             by_action += 1
             assert any(f"USING INDEX {index}" in step or f"USING COVERING INDEX {index}" in step for step in plan), (
                 sql[:300], plan)
