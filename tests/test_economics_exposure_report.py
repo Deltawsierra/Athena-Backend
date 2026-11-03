@@ -8,7 +8,13 @@ be handed (owner decision 12; ``docs/economics/spec-v1.md``, section 38).
 - every gap is named, and a report with one reads ``AUDIT_INCOMPLETE``;
 - every text is escaped, in the HTML and in the PDF;
 - the route is deployment-scoped (another tenant's is 404), no stop, answered
-  ``no-store``, and writes, signs and verifies nothing.
+  ``no-store``, and writes, signs and verifies nothing;
+- the deployment total is the latest portfolio's own figures, equal to what
+  ``GET .../economics/portfolio/`` serves for the same deployment and never
+  recomputed; a version the portfolio does not total is named with its reason and is
+  not in the figures; one run the portfolio cannot vouch for, or a totalled version
+  that is not approved, withholds the figures or makes the total read
+  ``AUDIT_INCOMPLETE``; another deployment's portfolio is never read.
 
 Every figure is SYNTHETIC / ILLUSTRATIVE.
 """
@@ -18,7 +24,10 @@ from __future__ import annotations
 import ast
 import html
 import inspect
+import json
 import re
+import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -32,16 +41,18 @@ from rest_framework.test import APIClient
 from assurance.economics import (
     charts_service,
     exposure_report,
+    portfolio,
     receipt_service,
     report,
     report_api,
     simulation_service,
     validity_service,
 )
-from assurance.economics.models import FinancialScenario, SimulationResult
+from assurance.economics.models import FinancialScenario, FinancialValidityCard, SimulationResult
 from assurance.models import Deployment
 from safety import stops
 from tests.economics_review import approve_for_receipt
+from tests.test_economics_portfolio import LARGE, made, simulated
 from tests.test_economics_read_routes import _signing
 from tests.test_economics_report import stored
 
@@ -288,6 +299,226 @@ def test_the_report_text_meets_the_persona_lint(deployment, people, monkeypatch)
 
 
 # ======================================================================
+# The deployment total: the portfolio's own figures, never recomputed
+# ======================================================================
+
+
+def _member(deployment, author, title, **kwargs):
+    """An approved scenario version that a portfolio may total (annual, graded), run
+    once and carded through the services, never the simulate route (a run slot)."""
+    scenario = made(deployment, author, title=title, **kwargs)
+    approve_for_receipt(scenario)
+    return scenario, simulated(scenario)
+
+
+def _totalled(deployment):
+    """The deployment's portfolio, totalled through the service (the simulate route
+    takes a run slot, which a server without fcntl cannot read)."""
+    wanted = portfolio.parse_request(
+        {"seed": 2026, "policy": "quick_10k", "reporting_currency": "USD", "valuation_date": "2026-10-06"},
+        policies=report_api.SIMULATION_POLICIES, parse_seed=report_api.parse_simulate,
+    )
+    outcome = portfolio.simulate_portfolio(deployment, wanted)
+    assert outcome.result is not None, (outcome.code, outcome.detail)
+    return outcome.result
+
+
+def _portfolio_api(client, deployment) -> dict:
+    response = client.get(f"/api/assurance/deployments/{deployment.uuid}/economics/portfolio/")
+    assert response.status_code == 200, response.content
+    return json.loads(response.content)
+
+
+def _total_rows(deployment) -> list[tuple[str, str]]:
+    return dict(exposure_report.document(deployment)["sections"])[exposure_report.TOTAL_HEADING]
+
+
+def _row(rows, label) -> str:
+    (value,) = [value for name, value in rows if name == label]
+    return value
+
+
+def _api_totals(served: dict) -> dict[str, str]:
+    """Every figure the portfolio's route serves for each line, as the report labels it."""
+    severe = served["summary"]["severe_percentile"]
+    figures = {}
+    for line, block in served["summary"]["lines"].items():
+        for key, figure in exposure_report.TOTAL_FIGURES:
+            figure = f"{figure} (P{severe})" if key == "severe_plausible" else figure
+            figures[f"{exposure_report.LINE_LABELS[line]}, total: {figure}"] = f"USD {block[key]}"
+    return figures
+
+
+def test_the_deployment_total_is_the_portfolios_own(deployment, people):
+    """Two approved versions, totalled: the report's total is the portfolio route's,
+    figure for figure (EAL, P10 to P90, severe, expected shortfall, both lines), in the
+    document and on the page; never a sum of the scenarios' own figures."""
+    _member(deployment, people["analyst"], "Payment agent")
+    _member(deployment, people["analyst"], "Refund agent", amount=LARGE, rate="0.2")
+    row = _totalled(deployment)
+    client = _client(people["owner"])
+    served = _portfolio_api(client, deployment)
+    assert served["portfolio"]["uuid"] == str(row.uuid) and served["integrity"]["verified"] is True
+    rows = _total_rows(deployment)
+    expected = _api_totals(served)
+    assert len(expected) == 2 * len(exposure_report.TOTAL_FIGURES)
+    assert {label: value for label, value in rows if label in expected} == expected
+    text = _text(_page(client, deployment))
+    for label, value in expected.items():
+        assert f"{label} {value}" in text
+    # The portfolio's P90 is not the sum of the scenarios' own P90s (section 24).
+    own = [m["own"]["gross_cash"]["p90"] for m in served["scenarios"]["included"]]
+    summed = f"USD {sum(Decimal(v) for v in own)}"
+    assert _row(rows, "Gross exposure (cash, before insurance), total: P90") != summed
+    assert _row(rows, "Status of the total") == exposure_report.TOTAL_COMPLETE
+    assert _row(rows, "Portfolio").startswith(f"{row.uuid}; recorded ")
+    integrity = _row(rows, "Gross exposure (cash, before insurance), total: integrity")
+    assert integrity.startswith("integrity checks verified: 5 checks of the portfolio's stored rows")
+    assert integrity.endswith("; runs not verified: none") and "“Payment agent”" in integrity
+    assert _row(rows, "Net exposure (cash retained after insurance), total: integrity") == integrity
+    assert lint.lint(text).ok
+
+
+def test_a_scenario_that_may_not_be_totalled_is_named_and_never_summed(deployment, people):
+    """An Unknown version and one whose rows fail a check are named with the portfolio's
+    reasons, neither is in the figures, and the total reads AUDIT_INCOMPLETE ("at
+    least"), its integrity line naming the run it cannot vouch for."""
+    _member(deployment, people["analyst"], "Payment agent")
+    _member(deployment, people["analyst"], "Refund agent", amount=LARGE, rate="0.2")
+    unknown, _ = _member(deployment, people["analyst"], "Unknown agent", unknown=True)
+    tampered, tampered_run = _member(deployment, people["analyst"], "Tampered agent")
+    FinancialValidityCard._base_manager.filter(simulation=tampered_run).update(confidence_grade="A")
+    _totalled(deployment)
+    client = _client(people["owner"])
+    served = _portfolio_api(client, deployment)
+    codes = {e["scenario"]: e["code"] for e in served["scenarios"]["excluded"]}
+    assert codes == {str(unknown.uuid): "unknown", str(tampered.uuid): "unverified"}
+    rows = _total_rows(deployment)
+    assert {label: value for label, value in rows if label in _api_totals(served)} == _api_totals(served)
+    not_totalled = [value for label, value in rows if label == "Not totalled"]
+    assert len(not_totalled) == 2
+    assert any(v.startswith(f"“Unknown agent” ({unknown.uuid}): unknown: ") for v in not_totalled)
+    assert any(v.startswith(f"“Tampered agent” ({tampered.uuid}): unverified: ") for v in not_totalled)
+    assert _row(rows, "Status of the total").startswith("AUDIT_INCOMPLETE: 2 gaps")
+    assert _row(rows, "Reads as").startswith("at least")
+    integrity = _row(rows, "Gross exposure (cash, before insurance), total: integrity")
+    assert f"runs not verified: “Tampered agent” ({tampered.uuid}; run {tampered_run.uuid})" in integrity
+    text = _text(_page(client, deployment))
+    gaps = text.partition("What is not measured")[2]
+    assert f"Deployment total: not totalled: “Unknown agent” ({unknown.uuid}): unknown" in gaps
+    assert f"Deployment total: not totalled: “Tampered agent” ({tampered.uuid}): unverified" in gaps
+
+
+def test_one_unverified_run_makes_the_total_audit_incomplete_and_shows_no_figure(deployment, people):
+    """A totalled run's card edited after the portfolio was totalled: the portfolio's
+    re-check refuses it, so the report shows no total, names the run, and reads
+    AUDIT_INCOMPLETE; never the figures it held before."""
+    a, run_a = _member(deployment, people["analyst"], "Payment agent")
+    _member(deployment, people["analyst"], "Refund agent", amount=LARGE, rate="0.2")
+    _totalled(deployment)
+    client = _client(people["owner"])
+    before = _api_totals(_portfolio_api(client, deployment))
+    FinancialValidityCard._base_manager.filter(simulation=run_a).update(confidence_grade="A")
+    served = _portfolio_api(client, deployment)
+    assert served["integrity"]["failed"] == ["member_rows"]
+    rows = _total_rows(deployment)
+    assert not {label for label, _ in rows} & set(before)
+    assert _row(rows, "Totals") == "not shown: named under “What is not measured”"
+    assert _row(rows, "Status of the total").startswith("AUDIT_INCOMPLETE: ")
+    integrity = _row(rows, "Integrity")
+    assert integrity.startswith("integrity checks failed: member_rows; runs verified: “Refund agent”")
+    assert f"runs not verified: “Payment agent” ({a.uuid}; run {run_a.uuid}): its stored rows fail card_grade" \
+        in integrity
+    text = _text(_page(client, deployment))
+    assert not any(f"{label} {value}" in text for label, value in before.items())
+    assert f"Deployment total: {report.UNKNOWN_BANNER}: {report.STORED_ROW_UNVERIFIED}" in text
+
+
+def test_a_total_of_a_version_that_is_not_approved_is_never_shown(deployment, people):
+    """The portfolio totals current versions, approved or not: a total that holds a
+    draft is withheld and the draft named, never shown or re-summed without it."""
+    _member(deployment, people["analyst"], "Payment agent")
+    draft = made(deployment, people["analyst"], title="Draft agent")
+    simulated(draft)
+    _totalled(deployment)
+    served = _portfolio_api(_client(people["owner"]), deployment)
+    assert str(draft.uuid) in {m["scenario"] for m in served["scenarios"]["included"]}
+    rows = _total_rows(deployment)
+    assert not {label for label, _ in rows} & set(_api_totals(served))
+    text = _text(_page(_client(people["owner"]), deployment))
+    assert (f"Deployment total: scenario version “Draft agent” ({draft.uuid}) is totalled, but it is not approved: "
+            "no review is recorded") in text
+
+
+def test_another_deployments_portfolio_is_never_this_ones_total(deployment, people):
+    """Another tenant's portfolio, totalled after this one's, is never read: the total
+    is this deployment's latest portfolio, of its own scenario versions."""
+    _member(deployment, people["analyst"], "Payment agent")
+    mine = _totalled(deployment)
+    elsewhere = Deployment.objects.create(name="someone-elses", owner=people["other"])
+    _member(elsewhere, people["analyst"], "Their agent", amount=LARGE)
+    theirs = _totalled(elsewhere)
+    assert theirs.pk > mine.pk
+    served = _portfolio_api(_client(people["owner"]), deployment)
+    rows = _total_rows(deployment)
+    assert _row(rows, "Portfolio").startswith(f"{mine.uuid};")
+    assert {label: value for label, value in rows if label in _api_totals(served)} == _api_totals(served)
+    text = _text(_page(_client(people["owner"]), deployment))
+    assert "Their agent" not in text and str(theirs.uuid) not in text
+    assert _row(rows, "Status of the total") == exposure_report.TOTAL_COMPLETE
+
+
+def test_a_version_recorded_after_the_portfolio_is_named_and_no_portfolio_is_a_gap(deployment, people):
+    text = _text(_page(_client(people["owner"]), deployment))
+    assert f"Deployment total: not measured: {exposure_report.NO_PORTFOLIO}" in text
+    assert "AUDIT_INCOMPLETE" in text
+    _member(deployment, people["analyst"], "Payment agent")
+    _totalled(deployment)
+    later = made(deployment, people["analyst"], title="Later agent")
+    rows = _total_rows(deployment)
+    assert _row(rows, "Status of the total").startswith("AUDIT_INCOMPLETE: 1 gaps")
+    text = _text(_page(_client(people["owner"]), deployment))
+    assert (f"Deployment total: scenario version “Later agent” ({later.uuid}) is named nowhere in the portfolio: it "
+            "was recorded after the portfolio was totalled") in text
+
+
+def test_a_portfolio_fault_leaves_the_total_unmeasured_and_the_report_served(deployment, people, monkeypatch):
+    import assurance.economics as package
+
+    _version(deployment, people["analyst"], approve=True)
+    monkeypatch.delattr(package, "portfolio")
+    monkeypatch.setitem(sys.modules, "assurance.economics.portfolio", None)
+    text = _text(_page(_client(people["owner"]), deployment))
+    assert "Deployment total: not measured: the portfolio could not be read (ModuleNotFoundError)" in text
+    assert "Expected annual loss (EAL)" in text
+
+
+def test_the_total_is_escaped_read_only_and_signs_nothing(deployment, people, monkeypatch):
+    """A totalled version's title is the customer's own text: escaped in the HTML and
+    the PDF. Reading the total writes no row and runs, signs or verifies nothing."""
+    _member(deployment, people["analyst"], HOSTILE)
+    _totalled(deployment)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the exposure report signs, verifies, runs and asks no engine")
+
+    for name in ("engine_signer", "engine_keyring", "verify_stored_receipt", "issue_receipt"):
+        monkeypatch.setattr(receipt_service, name, never)
+    monkeypatch.setattr(portfolio, "simulate_portfolio", never)
+    monkeypatch.setattr(portfolio, "_engine", never)
+    client = _client(people["owner"])
+    with CaptureQueriesContext(connection) as queries:
+        page = _page(client, deployment)
+        pdf = client.get(_url(deployment, "?output=pdf"))
+    writes = [q["sql"] for q in queries.captured_queries
+              if q["sql"].lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))]
+    assert writes == []
+    assert "<script" not in page and html.escape(HOSTILE, quote=True) in page
+    assert "Gross exposure (cash, before insurance), total: P90" in _text(page)
+    assert pdf.status_code == 200 and b"(<) Tj (script) Tj (>) Tj" in pdf.content
+
+
+# ======================================================================
 # The spec and the README
 # ======================================================================
 
@@ -297,6 +528,8 @@ def test_the_report_text_meets_the_persona_lint(deployment, people, monkeypatch)
     ("docs/economics/spec-v1.md", exposure_report.SELECTION_RULE),
     ("docs/economics/spec-v1.md", "never re-verified by the report"),
     ("README.md", "economics/exposure-report/"),
+    ("docs/economics/spec-v1.md", exposure_report.TOTAL_RULE),
+    ("README.md", "the deployment total"),
 ])
 def test_the_spec_and_the_readme_state_the_report(path, phrase):
     assert phrase in " ".join((REPO / path).read_text(encoding="utf-8").split())

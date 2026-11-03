@@ -9105,5 +9105,44 @@ the HTML and in the PDF (a scenario's title is the customer's own). Access is se
 `nosniff`, the HTML carries a `default-src 'none'` content security policy, and the
 PDF is a download, byte-identical for the same rows. The route is in
 `safety.stops.NOT_STOPS`, and a fault in `report_api` leaves it unserved and nothing
-else. Its operation class under G14 (#211, not yet merged) is to be declared when that
-lands.
+else. Its operation class under G14 (#211) is an assessment, as `roi/`'s is
+(`safety/degraded.py`).
+
+### 38.1 The deployment total
+
+The report carries one total across the deployment's scenarios, under "Deployment
+total". It never makes one: a total across scenarios is the portfolio's (section 33),
+which draws them together with their correlation groups and shared loss events, and
+never sums their P90s (the owner's specification, section 24). The rule, as the report
+states it: the deployment's latest portfolio (section 33), as GET .../economics/portfolio/ serves it: its own figures, never recomputed here; shown only where the portfolio may be totalled, its stored rows verify, and every scenario version it totals is this deployment's and approved.
+
+- **The portfolio's own figures.** The total is `portfolio.build_document` of the
+  deployment's latest `PortfolioResult` (`portfolio.latest`), the document
+  `GET .../economics/portfolio/` serves: for the gross and the net line, its expected
+  annual loss, P10, P50, P90, severe-but-plausible figure and expected shortfall, as
+  served. Market value is not totalled. The report adds, subtracts and rounds nothing;
+  `tests/test_economics_exposure_report.py` holds it equal to the route's answer.
+- **Only what the portfolio may total.** The figures are shown only where the
+  portfolio's stored rows verify (`integrity.verified`), it completed, it is not
+  `excluded_from_totals` (no Unknown or stale banner), and every version it totals is
+  one of this deployment's and approved now (section 38's approval rule). A portfolio
+  totals current versions whether or not they are approved: one that totals a version
+  that is not approved is withheld and that version named, never shown and never
+  re-summed without it.
+- **Every version not totalled is named.** Each version the portfolio excludes is
+  listed by title with its code and the portfolio's reason (`portfolio.EXCLUSIONS`),
+  and a version recorded after the portfolio was totalled is named as such. None is
+  silently summed or dropped.
+- **Integrity.** Each total carries the portfolio's integrity line: its stored rows'
+  checks (`portfolio.INTEGRITY_CHECKS`), the runs its re-check vouches for, and the
+  runs it does not (`integrity.scenarios_failed`, and a version excluded as
+  `unverified`). One run not vouched for makes the total read `AUDIT_INCOMPLETE`, and
+  where it is a run the portfolio totals, no figure is shown.
+- **Unmeasured is never green.** No portfolio, a portfolio that cannot be read, an
+  excluded version, a banner, a version not approved or not in the portfolio: each is
+  a gap, named under "What is not measured" with the prefix "Deployment total", and
+  the total and the report read `AUDIT_INCOMPLETE`.
+- **Same access, read-only.** The total is part of the same document, behind the same
+  route, access rules, escaping and headers; reading it writes no row, runs no engine
+  and signs nothing. A portfolio that will not import leaves the total unmeasured and
+  the rest of the report served.

@@ -18,6 +18,13 @@ recomputes, signs and verifies nothing, and asks no engine.
   states it; a receipt is "on record", and its signature is not re-verified here.
 - **Every text is escaped**, in the HTML and in the PDF: a scenario's title is the
   customer's own text.
+- **The deployment total** is the deployment's latest portfolio (E5, section 33) as
+  :func:`portfolio.build_document` serves it to ``GET .../economics/portfolio/``:
+  its figures, never recomputed or re-summed here. They are shown only where the
+  portfolio itself may be totalled (its stored rows verify, it is not excluded from
+  totals) and every scenario version it totals is this deployment's and approved;
+  every version it does not total is named with the portfolio's reason, and one run it
+  cannot vouch for makes the total read ``AUDIT_INCOMPLETE``.
 
 Nothing here is on a stop path: it is reached only from its route in
 :mod:`.report_api`, which imports it inside the view.
@@ -64,6 +71,19 @@ FIGURE_LABELS = (
     ("p90", "P90"),
     ("severe_plausible", "Severe but plausible"),
 )
+TOTAL_HEADING = "Deployment total"
+TOTAL_RULE = (
+    "the deployment's latest portfolio (section 33), as GET .../economics/portfolio/ serves it: its own figures, "
+    "never recomputed here; shown only where the portfolio may be totalled, its stored rows verify, and every "
+    "scenario version it totals is this deployment's and approved"
+)
+#: The figures a portfolio serves for each line it totals, in order.
+TOTAL_FIGURES = FIGURE_LABELS + (("expected_shortfall", "Expected shortfall"),)
+NO_PORTFOLIO = (
+    "no portfolio has been totalled for this deployment (POST .../economics/portfolio/simulate/ totals one)"
+)
+#: What the total reads where nothing about it is a gap.
+TOTAL_COMPLETE = "the loss of every current scenario version of this deployment, each approved, each run vouched for"
 
 
 def _approval(version: FinancialScenario) -> str | None:
@@ -145,6 +165,119 @@ def _residual(version: FinancialScenario, gaps: list[str]) -> list[tuple[str, st
     return rows + _lines(summary, "Residual: ", gaps)
 
 
+# ------------------------------------------------------------------ the deployment total
+
+
+def _portfolio_module():
+    """``(the portfolio module, None)``, or ``(None, why)`` where it does not import: a
+    portfolio fault leaves the total unmeasured and named, and the rest of the report
+    served (the portfolio's routes sit in a guard of their own, section 33)."""
+    try:
+        from . import portfolio
+    except Exception as error:  # noqa: BLE001 - any import fault of the portfolio is a named gap, never a 500
+        return None, f"the portfolio could not be read ({type(error).__name__})"
+    return portfolio, None
+
+
+def _run(entry: dict) -> str:
+    return f"“{entry.get('title')}” ({entry.get('scenario')}; run {entry.get('result')})"
+
+
+def _total_integrity(served: dict, members: list[dict], excluded: list[dict], untrusted: bool) -> str:
+    """The total's integrity line, in the portfolio's own words: its stored rows'
+    checks, each run it totals that its re-check vouches for, and each it does not."""
+    integrity = served["integrity"]
+    checks = f"{len(integrity['checks'])} checks of the portfolio's stored rows ({', '.join(integrity['checks'])})"
+    head = (f"integrity checks verified: {checks}, none failed" if integrity["verified"]
+            else f"integrity checks failed: {', '.join(integrity['failed'])}")
+    if untrusted:
+        return f"{head}; no run is vouched for: the portfolio's stored inputs no longer give their digest"
+    failing = {entry.get("scenario"): entry.get("reason") for entry in integrity.get("scenarios_failed") or []}
+    verified = [_run(m) for m in members if m.get("scenario") not in failing]
+    unverified = [f"{_run(m)}: {failing[m.get('scenario')]}" for m in members if m.get("scenario") in failing]
+    unverified += [f"{_run(e)}: {e.get('reason')}" for e in excluded if e.get("code") == "unverified"]
+    return (f"{head}; runs verified: {'; '.join(verified) or 'none'}; runs not verified: "
+            f"{'; '.join(unverified) or 'none'}")
+
+
+def _total(deployment, gaps: list[str]) -> list[tuple[str, str]]:
+    """The deployment total: the latest portfolio's own figures, as its route serves
+    them, or why none is shown. Every gap of the total is named, prefixed, in ``gaps``."""
+    rows: list[tuple[str, str]] = [("Rule", TOTAL_RULE)]
+    own: list[str] = []
+    module, why = _portfolio_module()
+    row = None if module is None else module.latest(deployment)
+    if why is not None:
+        own.append(f"not measured: {why}")
+    elif row is None:
+        own.append(f"not measured: {NO_PORTFOLIO}")
+    else:
+        served = module.build_document(row)
+        held = served["portfolio"]
+        scenarios = served["scenarios"]
+        untrusted = "not_reported" in scenarios
+        members = [] if untrusted else list(scenarios["included"])
+        excluded = [] if untrusted else list(scenarios["excluded"])
+        rows += [
+            ("Portfolio", f"{held['uuid']}; recorded {held['recorded_at']}; seed {held['seed']}; {held['draws']} draws; "
+                          f"reporting currency {held['reporting_currency']}; valuation date {held['valuation_date']}"),
+            ("Reads as", served["reads_as"]),
+            ("Grade", ((served["grade"] or {}).get("grade") or "not graded")),
+        ]
+        if served["banner"]:
+            own.append(f"{served['banner']}: {served['banner_reason']}")
+        if untrusted:
+            own.append(f"the portfolio's scenarios: {scenarios['not_reported']}")
+        # What the portfolio totals must be this deployment's approved scenario versions:
+        # read, never re-selected. One that is not withholds the figures.
+        versions = {str(v.uuid): v for v in FinancialScenario.objects.filter(deployment=deployment).order_by("id")}
+        blockers = []
+        for member in members:
+            version = versions.get(member.get("scenario"))
+            if version is None:
+                blockers.append(f"“{member.get('title')}” ({member.get('scenario')}) is totalled, but it is not a "
+                                "scenario version of this deployment")
+                continue
+            refused = _approval(version)
+            if refused is not None:
+                blockers.append(f"{_named(version)} is totalled, but it is not approved: {refused}")
+        own.extend(blockers)
+        rows.extend(("Totalled", f"{_run(m)}; graded {m.get('graded')}") for m in members)
+        for entry in excluded:
+            named = f"“{entry.get('title')}” ({entry.get('scenario')}): {entry.get('code')}: {entry.get('reason')}"
+            rows.append(("Not totalled", named))
+            own.append(f"not totalled: {named}")
+        if not untrusted:
+            listed = {m.get("scenario") for m in members} | {e.get("scenario") for e in excluded}
+            own.extend(f"{_named(v)} is named nowhere in the portfolio: it was recorded after the portfolio was "
+                       "totalled" for sid, v in versions.items() if sid not in listed)
+        integrity = _total_integrity(served, members, excluded, untrusted)
+        summary = served["summary"]
+        shown = (served["integrity"]["verified"] is True and served["status"] == SIMULATION_COMPLETED
+                 and served["excluded_from_totals"] is False and not blockers and "lines" in summary)
+        if shown:
+            code, severe = served["currency"]["code"], summary.get("severe_percentile")
+            for line, block in summary["lines"].items():
+                name = f"{LINE_LABELS.get(line, line)}, total"
+                for key, figure in TOTAL_FIGURES:
+                    figure = f"{figure} (P{severe})" if key == "severe_plausible" and severe else figure
+                    value = block.get(key)
+                    if value is None:
+                        own.append(f"{name}, {figure}: not measured: "
+                                   f"{(block.get('not_reported') or {}).get(key, 'not reported')}")
+                    rows.append((f"{name}: {figure}", "not measured" if value is None else f"{code} {value}"))
+                rows.append((f"{name}: integrity", integrity))
+            rows.append((LINE_LABELS["market_value"], "not totalled"))
+        else:
+            rows += [("Totals", "not shown: named under “What is not measured”"), ("Integrity", integrity)]
+        rows.extend(("Limitation of the total", text) for text in served["limitations"])
+    status = core_status.AUDIT_INCOMPLETE if own else TOTAL_COMPLETE
+    rows.insert(1, ("Status of the total", f"{status}: {len(own)} gaps named under “What is not measured”"
+                    if own else status))
+    gaps.extend(f"{TOTAL_HEADING}: {gap}" for gap in own)
+    return rows
+
+
 def document(deployment) -> dict:
     """The report of ``deployment``, as plain text in sections; nothing escaped yet."""
     selected, passed_over = select(deployment)
@@ -206,7 +339,8 @@ def document(deployment) -> dict:
                                 f"{entry.get('effective_date')}"))
         sections.append(("Assumptions and their sources", assumptions))
         sections.append(("Limitations", [("", text) for text in built["limitations"]]))
-    sections.insert(0, ("Scenarios of this deployment", versions or [("", "no scenario version is recorded")]))
+    sections.append((TOTAL_HEADING, _total(deployment, gaps)))
+    sections.insert(0,("Scenarios of this deployment", versions or [("", "no scenario version is recorded")]))
     status = core_status.AUDIT_INCOMPLETE if gaps else COMPLETE
     summary_rows.insert(1, ("Status", f"{status}: {len(gaps)} gaps named under “What is not measured”"
                             if gaps else status))

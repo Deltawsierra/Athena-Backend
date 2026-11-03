@@ -1193,6 +1193,12 @@ dashboard needs (section 30):
   date and limitations -- and names every gap under "What is not measured"; a report
   with a gap reads `AUDIT_INCOMPLETE`. With no such version it says so and shows no
   figure. Every text is escaped; it is answered `no-store`, and it writes nothing.
+  Its "Deployment total" section is the deployment total: the latest portfolio's own
+  figures, exactly as `GET .../economics/portfolio/` serves them (never recomputed),
+  shown only where the portfolio may be totalled, its stored rows verify and every
+  version it totals is this deployment's and approved; each version it does not total
+  is named with its reason, each total carries the portfolio's integrity line (which
+  runs it vouches for and which not), and one gap makes it read `AUDIT_INCOMPLETE`.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
