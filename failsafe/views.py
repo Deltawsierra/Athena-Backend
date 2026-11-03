@@ -10,11 +10,13 @@ required for stand-down and terminate.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import itertools
 import json
 import logging
+import re
 import secrets
 import threading
 
@@ -53,8 +55,8 @@ _ADMIN_ONLY_ACTIONS = {"terminate"}
 
 logger = logging.getLogger(__name__)
 
-#: The most commands one list read returns besides the stops awaiting a
-#: signature. It was 100.
+#: The most commands one page of the list returns besides the stops awaiting a
+#: signature, what is in flight first (_Read). It was 100.
 COMMAND_LIST_LIMIT = 50
 
 #: The actions that stop an engine (safety.stops drafts them as stops), and
@@ -100,8 +102,17 @@ def stop_lane_read_bytes():
 
 _AWAITING = FailsafeCommand.STATUS_AWAITING
 _READY = FailsafeCommand.STATUS_READY
+#: What is in flight: a command awaiting a signature, or ready for the engine.
+#: Every other status is history (consumed, expired, canceled, superseded).
 _IN_FLIGHT = (_AWAITING, _READY)
 _STATUSES = tuple(value for value, _label in FailsafeCommand.STATUS_CHOICES)
+_HISTORY = tuple(value for value in _STATUSES if value not in _IN_FLIGHT)
+
+#: The most commands of each of the state read's other lists -- the starts
+#: awaiting a signature, and the ready commands -- one page returns.
+STATE_LIST_LIMIT = 20
+#: The state read's ``recent``: its newest commands, on its first page only.
+RECENT_LIMIT = 10
 
 
 def _by_service_token(request):
@@ -196,20 +207,61 @@ def _newest(qs, parts, limit, expiry, in_flight_only):
     return out, len(keys) > limit
 
 
-def _parts(statuses, actions):
-    """Filters covering ``statuses`` x ``actions``, each served by an index in
-    creation order (see FailsafeCommand.Meta.indexes)."""
-    parts = []
-    for state in statuses:
-        if actions is None and state != _AWAITING:
-            parts.append({"status": state})
+def _awaiting_parts(actions, signed=(True, False)):
+    """Filters for the commands of ``actions`` awaiting a signature, each served
+    by an index in creation order (see FailsafeCommand.Meta.indexes)."""
+    return [{"status": _AWAITING, "action": action, "signed": one} for action in actions for one in signed]
+
+
+def _ready_parts(actions):
+    return [{"status": _READY, "action": action} for action in actions]
+
+
+def _lane_keys(qs, tiers, limit, after):
+    """The keys -- (tier, created_at, pk) -- of a lane's next ``limit`` + 1
+    commands after the key ``after`` (None: from the lane's start), in the
+    lane's order: tier by tier, and in each tier newest first, the primary key
+    breaking a tie in creation time.
+
+    A keyset, never an offset: a command drafted while a reader pages is
+    newer than every key of its tier the reader has passed, so it never moves
+    a page boundary -- no command is skipped or listed twice because others
+    were added. Each part is one index read of at most ``limit`` + 1 keys, so
+    the work is the limit and the number of parts, whatever the number of
+    commands."""
+    keys = []
+    for tier, parts in enumerate(tiers):
+        if after is not None and tier < after[0]:
             continue
-        for action in actions or (*STOP_ACTIONS, *START_ACTIONS):
-            if state == _AWAITING:
-                parts += [{"status": state, "action": action, "signed": signed} for signed in (True, False)]
-            else:
-                parts.append({"status": state, "action": action})
-    return parts
+        for part in parts:
+            rows = qs.filter(**part)
+            if after is not None and tier == after[0]:
+                rows = rows.filter(created_at__lte=after[1]).exclude(created_at=after[1], pk__gte=after[2])
+            keys += [
+                (tier, created, pk)
+                for pk, created in rows.order_by("-created_at", "-pk").values_list("pk", "created_at")[: limit + 1]
+            ]
+    keys.sort(key=lambda key: (-key[0], key[1], key[2]), reverse=True)
+    return keys[: limit + 1]
+
+
+def _lane(qs, tiers, limit, after, expiry):
+    """A lane's next ``limit`` commands after ``after``: [(key, command)], in
+    the lane's order, and whether more remain past them. A command in flight
+    past its window is marked expired and passed over (command None), so a
+    page is never held on it; one gone since its key was read is passed over
+    too."""
+    keys = _lane_keys(qs, tiers, limit, after)
+    more = len(keys) > limit
+    keys = keys[:limit]
+    rows = {command.pk: command for command in _fetch([pk for _tier, _created, pk in keys])}
+    entries = []
+    for key in keys:
+        command = rows.get(key[2])
+        if command is not None and expiry.due(command.pk, command.status, command.expires_at):
+            command = None
+        entries.append((key, command))
+    return entries, more
 
 
 def _awaiting_stops(qs, expiry):
@@ -301,11 +353,18 @@ class _Page:
     header."""
 
     def __init__(self):
-        self.left = stop_lane_read_bytes()
+        self.whole = self.left = stop_lane_read_bytes()
         self.more = False
+        #: The uuid of a command passed over because it alone is larger than a
+        #: whole page (take_lane), or None.
+        self.too_large = None
 
     def cut(self, more):
         self.more = self.more or bool(more)
+
+    @staticmethod
+    def _size(row):
+        return len(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) + 1
 
     def take(self, commands):
         out = []
@@ -313,7 +372,7 @@ class _Page:
             self.more = self.more or bool(commands)
             return out
         for row in FailsafeCommandSerializer(commands, many=True).data:
-            size = len(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) + 1
+            size = self._size(row)
             if size > self.left:
                 self.left = 0
                 self.more = True
@@ -321,6 +380,35 @@ class _Page:
             self.left -= size
             out.append(row)
         return out
+
+    def take_lane(self, entries):
+        """A lane's entries (_lane) in order until the page is full: (rows, the
+        key of the last entry passed, whether every entry was passed). An entry
+        is passed when it is listed, or passed over: past its window, gone, or
+        -- once, and ending the page -- larger alone than a whole page, which
+        no page could list. That one is named (``too_large``), never dropped
+        unsaid, and the next page starts after it, so no reader following the
+        cursor is held on it."""
+        out, last = [], None
+        for key, command in entries:
+            if command is None:
+                last = key
+                continue
+            if self.left <= 0:
+                self.more = True
+                return out, last, False
+            row = FailsafeCommandSerializer(command).data
+            size = self._size(row)
+            if size > self.whole:
+                self.too_large, self.left, self.more = str(command.uuid), 0, True
+                return out, key, key == entries[-1][0]
+            if size > self.left:
+                self.left, self.more = 0, True
+                return out, last, False
+            self.left -= size
+            out.append(row)
+            last = key
+        return out, last, True
 
 
 def _canonical_unsigned_draft(user, engine_id, action, reason, ttl, before=None):
@@ -422,7 +510,8 @@ def _read_kind(request, view):
     engine_id, and for the list its status -- as the view reads them. Never
     the raw query string: round 4 made every read distinct by adding
     ``&n=<i>``, which the view ignores, and none was shared (a pause took
-    0.33 s instead of 0.05 s)."""
+    0.33 s instead of 0.05 s). A page after the first is told apart by its
+    cursor, as given."""
     params = request.query_params
     engine_id = params.get("engine_id") or ""
     status_ = ""
@@ -430,7 +519,9 @@ def _read_kind(request, view):
         status_ = params.get("status") or ""
         if status_ and status_ not in _STATUSES:
             status_ = "(none)"  # every status the view does not know reads the same: no rows
-    return (view, request.user.pk, _by_service_token(request), engine_id, status_)
+    kind = (view, request.user.pk, _by_service_token(request), engine_id, status_)
+    cursor = params.get(CURSOR_PARAM) or ""
+    return (*kind, cursor) if cursor else kind
 
 
 def _audit(command, event, request, **detail):
@@ -459,9 +550,16 @@ def commands(request):
         # bounded by its row and byte limits, not by the number of commands.
         # The stop commands awaiting a signature come first (_awaiting_stops)
         # and are never cut by the row cap, so no flood of other drafts hides
-        # one. X-Failsafe-More says whether anything was left out.
-        rows, more = _SHARED_READS.read(_read_kind(request, "commands"), lambda: _list(request))
-        return Response(rows, headers={MORE_HEADER: "true" if more else "false"})
+        # one. X-Failsafe-More says whether anything was left out, and
+        # X-Failsafe-Next which cursor reads the next page (_Read).
+        try:
+            read = _Read(request, "commands")
+        except _BadCursor as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        rows, more, following, too_large = _SHARED_READS.read(
+            _read_kind(request, "commands"), lambda: _list(request, read)
+        )
+        return Response(rows, headers=_page_headers(more, following, too_large))
 
     serializer = DraftCommandSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -658,36 +756,174 @@ def _supersede_past_limit(newest):
 MORE_HEADER = "X-Failsafe-More"
 
 
-def _list(request):
-    """The list read: (rows, more)."""
-    qs = FailsafeCommand.objects.all()
-    engine_id = request.query_params.get("engine_id")
-    state_ = request.query_params.get("status")
-    if engine_id:
-        qs = qs.filter(engine_id=engine_id)
-    statuses = _STATUSES if not state_ else tuple(s for s in _STATUSES if s == state_)
+#: The header both stop-lane reads carry when they say more: the cursor that
+#: reads their next page, passed back as given in the query parameter
+#: CURSOR_PARAM. The state read says it in its body's ``next`` too.
+NEXT_HEADER = "X-Failsafe-Next"
+CURSOR_PARAM = "cursor"
+#: The header naming a command a page passed over because it alone is larger
+#: than a whole page (_Page.take_lane). Open it by its uuid.
+TOO_LARGE_HEADER = "X-Failsafe-Too-Large"
+#: The longest cursor a read takes; a longer one is answered 400.
+CURSOR_LIMIT = 1024
+_CURSOR_VERSION = 1
+_CURSOR_TEXT = re.compile(r"[A-Za-z0-9_-]+")
+_PK_LIMIT = 2**63 - 1
+
+
+class _BadCursor(ValueError):
+    """A cursor this read cannot follow: answered 400, never 500."""
+
+
+class _Read:
+    """One stop-lane read: what it reads and in what order.
+
+    Its first page is what it always was, in the order that matters: the stop
+    commands awaiting a signature in a co-signer's order (_awaiting_stops),
+    then each of its lanes. A lane is a keyset over tiers (_lane_keys); its
+    first page is its first rows, and each page after reads the next. The
+    lanes put everything in flight before any history, and the stops first:
+
+    * the list (an operator's session): the ready stops; then the resumes and
+      releases awaiting a signature or ready; then history -- consumed,
+      expired, canceled and superseded -- at most COMMAND_LIST_LIMIT a page;
+    * the list (the service token): the ready stops, at most AWAITING_STOP_LIMIT;
+    * the state: the starts awaiting a signature (not for the service token),
+      and the ready stops then (not for the service token) the ready starts,
+      at most STATE_LIST_LIMIT a page each.
+
+    When the first page's awaiting stops are cut -- more than
+    AWAITING_STOP_LIMIT of them, or by the byte cap -- the pages after it read
+    lane ``s``: every stop command awaiting a signature, signed ones first,
+    newest first, once each. Those the first page listed are among them: the
+    first page is a priority view, and a reader following the cursor may meet
+    a stop twice, never not at all."""
+
+    def __init__(self, request, view):
+        self.view = view
+        self.by_token = _by_service_token(request)
+        engine_id = request.query_params.get("engine_id")
+        self.qs = FailsafeCommand.objects.all()
+        if engine_id:
+            self.qs = self.qs.filter(engine_id=engine_id)
+        if view == "commands":
+            state_ = request.query_params.get("status")
+            statuses = _STATUSES if not state_ else tuple(s for s in _STATUSES if s == state_)
+        else:
+            statuses = _IN_FLIGHT
+        awaiting, ready = _AWAITING in statuses, _READY in statuses
+        lanes = []
+        if awaiting:
+            lanes.append(("s", [_awaiting_parts(STOP_ACTIONS, (True,)), _awaiting_parts(STOP_ACTIONS, (False,))],
+                          AWAITING_STOP_LIMIT))
+        ready_stops = _ready_parts(STOP_ACTIONS) if ready else []
+        if view == "commands" and self.by_token:
+            lanes.append(("t", [ready_stops], AWAITING_STOP_LIMIT))
+        elif view == "commands":
+            starts = (_awaiting_parts(START_ACTIONS) if awaiting else []) + (_ready_parts(START_ACTIONS) if ready else [])
+            history = [{"status": state_} for state_ in statuses if state_ in _HISTORY]
+            lanes.append(("t", [ready_stops, starts, history], COMMAND_LIST_LIMIT))
+        elif self.by_token:
+            lanes.append(("r", [ready_stops], STATE_LIST_LIMIT))
+        else:
+            lanes.append(("a", [_awaiting_parts(START_ACTIONS)], STATE_LIST_LIMIT))
+            lanes.append(("r", [ready_stops, _ready_parts(START_ACTIONS)], STATE_LIST_LIMIT))
+        self.lanes = lanes
+        # A cursor is for the read that gave it: the view, the credential, and
+        # the parameters the view reads (never the account: it names no rows).
+        _view, _account, *what = _read_kind(request, view)[:5]
+        self.binding = hashlib.sha256(json.dumps([view, *what]).encode("utf-8")).hexdigest()[:16]
+        self.after = self._cursor(request.query_params.get(CURSOR_PARAM) or "")
+
+    def _cursor(self, text):
+        """The lanes a cursor continues, each with the key it continues after
+        (None: from its start); None for the first page. _BadCursor when it is
+        not one this read gave."""
+        if not text:
+            return None
+        if len(text) > CURSOR_LIMIT or not _CURSOR_TEXT.fullmatch(text):
+            raise _BadCursor(f"the cursor is not one this read gives (at most {CURSOR_LIMIT} URL-safe base64 characters)")
+        try:
+            data = json.loads(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+            raise _BadCursor("the cursor cannot be read") from exc
+        if not isinstance(data, dict) or set(data) != {"v", "k", "l"}:
+            raise _BadCursor("the cursor cannot be read")
+        if type(data["v"]) is not int or data["v"] != _CURSOR_VERSION:
+            raise _BadCursor("the cursor is of a version this read does not take")
+        if data["k"] != self.binding:
+            raise _BadCursor("the cursor is for another read: another view, engine, status or credential")
+        lanes, tiers = data["l"], {name: len(tiers) for name, tiers, _limit in self.lanes}
+        if not isinstance(lanes, dict) or not lanes or not set(lanes) <= set(tiers):
+            raise _BadCursor("the cursor names no lane of this read")
+        return {name: self._key(position, tiers[name]) for name, position in lanes.items()}
+
+    @staticmethod
+    def _key(position, tiers):
+        if position is None:
+            return None
+        if not isinstance(position, list) or len(position) != 3:
+            raise _BadCursor("the cursor holds a position that is not one")
+        tier, created, pk = position
+        if type(tier) is not int or not 0 <= tier < tiers or type(pk) is not int or not 0 < pk <= _PK_LIMIT:
+            raise _BadCursor("the cursor holds a position that is not one")
+        if not isinstance(created, str) or len(created) > 64:
+            raise _BadCursor("the cursor holds a time that is not one")
+        try:
+            created = timezone.datetime.fromisoformat(created)
+        except ValueError as exc:
+            raise _BadCursor("the cursor holds a time that is not one") from exc
+        # The read writes the time as stored: with its zone when the project
+        # keeps zones, without one when it does not.
+        if timezone.is_aware(created) != timezone.is_aware(timezone.now()):
+            raise _BadCursor("the cursor holds a time that is not one")
+        return (tier, created, pk)
+
+    def encode(self, continuing):
+        lanes = {
+            name: None if key is None else [key[0], key[1].isoformat(), key[2]] for name, key in continuing.items()
+        }
+        text = json.dumps({"v": _CURSOR_VERSION, "k": self.binding, "l": lanes}, separators=(",", ":"))
+        return base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
+
+    def page(self, expiry, page):
+        """This page's rows, by lane, in lane order -- {name: rows} -- and the
+        cursor of the next page, or None when nothing is left."""
+        rows, continuing, first = {}, {}, self.after is None
+        for name, tiers, limit in self.lanes:
+            if first and name == "s":
+                stops, stops_more = _awaiting_stops(self.qs, expiry)
+                rows[name] = page.take(stops)
+                if stops_more or len(rows[name]) < len(stops):
+                    continuing[name] = None
+                continue
+            if not first and name not in self.after:
+                continue  # a lane a page before this one finished
+            after = None if first else self.after[name]
+            entries, more = _lane(self.qs, tiers, limit, after, expiry)
+            rows[name], last, passed = page.take_lane(entries)
+            if more or not passed:
+                continuing[name] = after if last is None else last
+        return rows, (self.encode(continuing) if continuing else None)
+
+
+def _list(request, read):
+    """The list read: (rows, more, the next page's cursor, a command too large
+    for any page)."""
     expiry = _Expiry()
-    stops, stops_more = _awaiting_stops(qs, expiry) if _AWAITING in statuses else ([], False)
-    if _by_service_token(request):
-        # The service token reads the stop commands in flight, nothing else.
-        rest, rest_more = _newest(qs, _parts([s for s in statuses if s == _READY], STOP_ACTIONS),
-                                  AWAITING_STOP_LIMIT, expiry, in_flight_only=True)
-    else:
-        rest, rest_more = _newest(qs, _rest_parts(statuses), COMMAND_LIST_LIMIT, expiry, in_flight_only=False)
-    expiry.mark()
     page = _Page()
-    page.cut(stops_more or rest_more)
-    rows = page.take([*stops, *rest])
-    return rows, page.more
+    lanes, following = read.page(expiry, page)
+    expiry.mark()
+    rows = [row for name, _tiers, _limit in read.lanes for row in lanes.get(name, [])]
+    return rows, following is not None, following, page.too_large
 
 
-def _rest_parts(statuses):
-    """Every command of ``statuses`` except the stop commands awaiting a
-    signature, which _awaiting_stops reads."""
-    parts = _parts([s for s in statuses if s != _AWAITING], None)
-    if _AWAITING in statuses:
-        parts += _parts([_AWAITING], START_ACTIONS)
-    return parts
+def _page_headers(more, following, too_large):
+    return {
+        MORE_HEADER: "true" if more else "false",
+        **({NEXT_HEADER: following} if following else {}),
+        **({TOO_LARGE_HEADER: too_large} if too_large else {}),
+    }
 
 
 @api_view(["GET"])
@@ -895,10 +1131,12 @@ def state(request):
     its work is bounded by its row and byte limits and not by the number of
     commands. The stop commands awaiting a signature come first, at most
     AWAITING_STOP_LIMIT and never cut by the row cap (_awaiting_stops); every
-    other list is an index read of its few newest rows; the rows come to at
-    most stop_lane_read_bytes(), in that order (_Page); ``more`` (and the
-    X-Failsafe-More header) says whether an awaiting or ready command was left
-    out by either limit -- ``recent`` is the newest ten and is not counted;
+    other list is an index read of its next few rows, the ready stops before
+    the ready starts (_Read); the rows come to at most stop_lane_read_bytes(),
+    in that order (_Page); ``more`` (and the X-Failsafe-More header) says
+    whether an awaiting or ready command was left out by either limit, and
+    ``next`` (and X-Failsafe-Next) the cursor that reads the next page --
+    ``recent`` is the newest ten, on the first page only, and is not counted;
     commands found past their window are marked expired in one write, at most
     EXPIRE_PER_READ of them (_Expiry) -- a read never walks every command to
     expire it; and the engine is waited for FAILSAFE_STATE_ENGINE_SECONDS at
@@ -906,7 +1144,11 @@ def state(request):
     time (_SharedReads), never one that started before they arrived. With the
     service token it shows the stop commands in flight and the engine's state:
     no resume or release, and no history."""
-    commands_ = _SHARED_READS.read(_read_kind(request, "state"), lambda: _in_flight(request))
+    try:
+        read = _Read(request, "state")
+    except _BadCursor as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    commands_, too_large = _SHARED_READS.read(_read_kind(request, "state"), lambda: _in_flight(request, read))
     engine_state, engine_state_available = _engine_live_state()
     return Response(
         {
@@ -915,39 +1157,29 @@ def state(request):
             "engine_state_available": engine_state_available,
             **commands_,
         },
-        headers={MORE_HEADER: "true" if commands_["more"] else "false"},
+        headers=_page_headers(commands_["more"], commands_["next"], too_large),
     )
 
 
-def _in_flight(request):
-    """The state view's commands: in flight, and the most recent."""
-    engine_id = request.query_params.get("engine_id")
-    qs = FailsafeCommand.objects.all()
-    if engine_id:
-        qs = qs.filter(engine_id=engine_id)
+def _in_flight(request, read):
+    """The state view's commands: in flight, and on the first page the most
+    recent; and a command too large for any page."""
     expiry = _Expiry()
-    awaiting, more = _awaiting_stops(qs, expiry)
-    if _by_service_token(request):
-        ready, ready_more = _newest(qs, _parts([_READY], STOP_ACTIONS), 20, expiry, in_flight_only=True)
-        recent = []
-    else:
-        starts, starts_more = _newest(qs, _parts([_AWAITING], START_ACTIONS), 20, expiry, in_flight_only=True)
-        awaiting += starts
-        more = more or starts_more
-        ready, ready_more = _newest(qs, _parts([_READY], None), 20, expiry, in_flight_only=True)
-        recent, _history = _newest(qs, [{}], 10, expiry, in_flight_only=False)
-    expiry.mark()
     page = _Page()
-    page.cut(more or ready_more)
-    awaiting, ready = page.take(awaiting), page.take(ready)
-    in_flight_more = page.more
+    lanes, following = read.page(expiry, page)
+    recent = []
+    if read.after is None and not read.by_token:
+        recent, _history = _newest(read.qs, [{}], RECENT_LIMIT, expiry, in_flight_only=False)
+    expiry.mark()
+    # ``recent`` is the newest few and is not counted in ``more``.
     recent = page.take(recent)
     return {
-        "awaiting_signatures": awaiting,
-        "ready": ready,
+        "awaiting_signatures": [*lanes.get("s", []), *lanes.get("a", [])],
+        "ready": lanes.get("r", []),
         "recent": recent,
-        "more": in_flight_more,
-    }
+        "more": following is not None,
+        "next": following,
+    }, page.too_large
 
 
 @api_view(["GET"])
