@@ -2244,6 +2244,11 @@ COMMANDS: dict[str, str] = {
     # Review round 1 of #169 (spec, section 35.9): binds rows recorded before the row
     # key; prints counts only.
     "bind_economics_rows": "commands",
+    # AB-GRANT-LEASE: re-asserts each held role grant's signed record before its lease
+    # ends and revokes any no longer held; prints two counts, or why it could not run
+    # (a variable's name, an exception's class) -- never a key, a token or a record.
+    "reconcile_role_grants": "commands: re-asserts held role grants' records, revokes withdrawn ones; prints "
+    "counts, or the variable or exception class it could not run for",
 }
 
 

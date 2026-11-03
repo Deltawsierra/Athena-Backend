@@ -42,3 +42,12 @@ class AssuranceConfig(AppConfig):
         # check`, when role separation is not in force. Never refuses a start.
         checks.register(closure_forward_credentials)
         closure_forward.say_credential()
+
+        # The identity emitter (authority chain short 2): a role grant recorded is
+        # signed once it commits; a role withdrawn -- a demotion, a deactivation, a
+        # removal -- has the grant it ends revoked once the change is answered, never
+        # before (assurance.identity_emitter.after_the_answer). The accounts app sends
+        # the signals and imports none of this.
+        from . import identity_emitter
+
+        identity_emitter.connect()
