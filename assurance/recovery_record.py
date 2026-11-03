@@ -530,3 +530,87 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
             f"nothing moved: what this step rests on supports no state that may follow {previous.state!r}",
         )
     return steps
+
+
+# ------------------------------------------------------------------ the reads
+
+
+def served(row) -> dict:
+    """One step as its reads serve it: every derived field as recorded, what it rests
+    on, its coverage manifest with what ``coverage.coverage_ratio`` measures of it, and
+    who accepted and recorded it (``None`` when nobody is on record). No summary badge:
+    the state is one of S1's words, beside its conditions and gaps."""
+    measured = cov.coverage_ratio(manifest_of(row.finding, row.coverage))
+    return {
+        "ref": str(row.uuid),
+        "version": row.version,
+        "state": row.state,
+        "reopens": row.reopens or None,
+        "conditions": row.conditions,
+        "gaps": row.gaps,
+        "restrictions": row.restrictions,
+        "release": row.release,
+        "residual_uncertainty": row.residual_uncertainty,
+        "links": row.links,
+        "coverage": {
+            "manifest": row.coverage,
+            "observed_sources": measured.numerator,
+            "required_sources": measured.denominator,
+            "complete": measured.complete,
+            "missing": {
+                source: [{"start": i.start, "end": i.end} for i in left] for source, left in measured.missing.items() if left
+            },
+            "unknown_inventory": list(measured.unknown_inventory),
+        },
+        "accepted_by": row.accepted_by.username if row.accepted_by_id else None,
+        "accepted_until": row.accepted_until.isoformat() if row.accepted_until else None,
+        "recorded_by": row.recorded_by.username if row.recorded_by_id else None,
+        "recorded_at": row.recorded_at.isoformat(),
+    }
+
+
+def _steps_of(finding_ids) -> dict:
+    from .models import RecoveryRecord
+
+    rows = (
+        RecoveryRecord.objects.filter(finding_id__in=finding_ids)
+        .select_related("finding", "accepted_by", "recorded_by")
+        .order_by("finding_id", "version")
+    )
+    steps: dict = {}
+    for row in rows:
+        steps.setdefault(row.finding_id, []).append(row)
+    return steps
+
+
+def _incident(finding, steps: list) -> dict:
+    last = steps[-1] if steps else None
+    return {
+        "finding": str(finding.uuid),
+        "title": finding.title,
+        "severity": finding.severity,
+        "current": None if last is None else {"version": last.version, "state": last.state, "release": last.release},
+        "steps": [served(step) for step in steps],
+    }
+
+
+def finding_record(finding) -> dict:
+    """One incident's recovery record: every step, oldest first. Two queries."""
+    return {"deployment": str(finding.deployment.uuid), **_incident(finding, _steps_of([finding.pk]).get(finding.pk, []))}
+
+
+def deployment_records(deployment, *, offset: int, page_size: int) -> dict:
+    """The deployment's incidents -- its findings that have a recovery record -- one page
+    of them, each with every step oldest first, and how many there are: the count and
+    the page are of this deployment's incidents only. Three queries."""
+    from django.db.models import Exists, OuterRef
+
+    from .history_reads import _envelope, _page
+    from .models import Finding, RecoveryRecord
+
+    incidents = Finding.objects.filter(
+        Exists(RecoveryRecord.objects.filter(finding_id=OuterRef("pk"))), deployment_id=deployment.pk
+    ).order_by("id")
+    page, total = _page(incidents, offset, page_size)
+    steps = _steps_of([finding.pk for finding in page])
+    return _envelope(deployment, "incidents", [_incident(f, steps.get(f.pk, [])) for f in page], total, offset, page_size)

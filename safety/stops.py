@@ -717,6 +717,9 @@ NOT_STOPS = {
     "deployment-tool-contracts": _get(),
     "deployment-tool-contract-bindings": _get(),
     "deployment-decision-history": _get(),
+    # A deployment's recovery records (assurance.recovery_record, SPINE SP-1): each
+    # incident's steps as recorded. GET only; it records, derives and repairs nothing.
+    "deployment-recovery-records": _get(),
     "deployment-coverage-manifest-view": _get(),
     "deployment-revalidation-plan": _get(),
     "deployment-check-invalidations": {
@@ -759,6 +762,14 @@ NOT_STOPS = {
     "finding-repair-contracts": {
         "GET": _READ,
         "POST": "records a new version of a finding's repair contract: tracking work, not stopping it",
+    },
+    # A finding's recovery record (assurance.recovery_record, SPINE SP-1): its steps read,
+    # and the next ones recorded, with the owner's acceptance. Its own append-only table;
+    # it reads signed permits and receipts and moves no decision, finding or engine.
+    "finding-recovery-record": {
+        "GET": _READ,
+        "POST": "records the next steps of a finding's recovery and the owner's acceptance: recovery records, "
+        "append-only; it starts and stops nothing",
     },
     "provider-list": {"GET": _READ, "POST": "creates a provider record: configuration that starts and stops nothing"},
     "provider-detail": {
