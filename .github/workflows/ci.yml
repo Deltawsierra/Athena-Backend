@@ -166,7 +166,9 @@ jobs:
   # reading the plans and the rows each statement visits, sees it.
   # It also runs the launch-path tripwire (no place in this backend's code, routed or not,
   # starts a scan without the preflight first) and readiness's hung-engine and cache
-  # tests, whose sockets and timeouts are the platform's own.
+  # tests, whose sockets and timeouts are the platform's own, with the engine health
+  # check's total deadline against a dripping engine, and the LLM scan's registering
+  # of the model it tested (no secret kept, nothing on a held launch).
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -232,6 +234,8 @@ jobs:
             tests/test_a_log_text_is_bounded.py \
             tests/test_no_launch_path_skips_the_preflight.py \
             tests/test_readiness_never_waits_on_a_slow_engine.py \
+            tests/test_the_engine_health_check_holds_a_total_deadline.py \
+            tests/test_every_llm_scan_registers_its_model.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \

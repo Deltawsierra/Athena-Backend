@@ -1565,7 +1565,13 @@ reads all of this backend's code, routed or not, and fails on any place that can
 start a scan (a launch call, held or named in a string, or the engine's launch route)
 unless the preflight is asked first in the same function, or the place is a private
 helper reached only from code that asks it. An unrouted LLM scan view that asked
-nothing (`pentest/views_llm.py`) was deleted for that reason. A defender
+nothing (`pentest/views_llm.py`) was deleted for that reason. The routed LLM scan
+keeps what it tested on the scan (`target_config`): the adapter, the model, the
+target's name and the endpoint (scheme, host, port and path; no login, query or
+fragment). Nothing else the caller sent is kept, so no key reaches the record. It is
+written only once the preflight lets the launch go, and the scan's ingest registers
+the model as a Provider and Asset, so the asset inventory names the model each LLM
+scan tested. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
 
@@ -1581,8 +1587,11 @@ its own and names each one, with the reason:
 - **the database**: `SELECT 1`, and the row read back must be the one asked for;
 - **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`. It is
   asked under its own short timeout (0.5 s to connect, 1 s to read), never the long
-  one a scan is given, so a hung engine reads `unknown` well inside the bound and
-  holds no thread;
+  one a scan is given, and answered within 1.5 s in all. A hung engine, or one that
+  sends a byte inside every read timeout, reads `unknown` inside the bound. The ask
+  runs on a thread of its own, one at a time: a dripped body is cut off at 1.5 s, and
+  while a dripped status line or headers hold that thread, the check answers at once
+  without asking again;
 - **Mythos-Core**: the modules this backend loads import, and its word for unknown
   is still `unknown`.
 

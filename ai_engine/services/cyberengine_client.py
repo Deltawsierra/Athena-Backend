@@ -1,6 +1,7 @@
 import contextlib
 import functools
 import re
+import threading
 import time
 from urllib.parse import quote, urlencode
 
@@ -8,7 +9,9 @@ import requests
 from django.conf import settings as django_settings
 from django.conf import settings
 from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
+from urllib3.exceptions import HTTPError as _Urllib3Error
 from urllib3.exceptions import ProxyError as _ProxyConnectError
+from urllib3.exceptions import ReadTimeoutError as _ReadTimeoutError
 
 from safety import outbound
 
@@ -28,6 +31,24 @@ ENGINE_TIMEOUT = (
 # within this is not ready. Not read from settings, so no setting can stretch it
 # past the readiness bound (tests/test_readiness_never_waits_on_a_slow_engine.py).
 HEALTH_TIMEOUT = (0.5, 1.0)
+
+# The whole of one /health ask, in seconds: connect, the status line and headers,
+# and the body, however they arrive. HEALTH_TIMEOUT bounds each socket operation,
+# not their sum, so an engine that sent a byte inside every read timeout -- one
+# a second, say -- held the check for as long as it kept dripping. health() answers
+# by this deadline whatever the engine does; it is inside readiness's 2 s bound,
+# and not read from settings either.
+HEALTH_DEADLINE_SECONDS = 1.5
+
+# The most of a /health answer that is read: its contract is {"status": "ok"}.
+MAX_HEALTH_BODY = 4 * 1024
+
+# One /health ask in flight in this process at a time. The ask runs on a thread of
+# its own, so health() can answer at its deadline; an engine that drips its status
+# line and headers holds that thread past it (no read of the body can bound them),
+# and while it does, health() answers at once that nothing is established rather
+# than leaving another thread behind on every readiness probe.
+_HEALTH_ASK = threading.BoundedSemaphore(1)
 
 
 # How long to keep collecting a scan the engine is running for us, and how
@@ -72,6 +93,13 @@ def _saying_no_login_of_its_target(method):
         with _saying_none_of(outbound.logins_in(target)):
             return method(self, target, *args, **kwargs)
     return call
+
+
+def _no_health_answer(why: str) -> "EngineError":
+    """The engine did not answer /health in time: unreachable, raised from a requests
+    timeout (``from requests.ReadTimeout(why)``), which readiness reads as ``unknown``
+    (nothing is established), never ``degraded``."""
+    return EngineError(f"Engine unreachable: {why}", kind=ENGINE_UNREACHABLE)
 
 
 def _excerpt(text: str) -> str:
@@ -516,9 +544,11 @@ class CyberEngineClient:
 
         return body
 
-    def _send_get(self, path: str, *, timeout=None) -> requests.Response:
+    def _send_get(self, path: str, *, timeout=None, stream: bool = False) -> requests.Response:
         """The engine's answer to a GET, whatever its status; raises only when there was
-        none. ``timeout`` is ENGINE_TIMEOUT unless the caller names its own."""
+        none. ``timeout`` is ENGINE_TIMEOUT unless the caller names its own. ``stream``:
+        the body is left for the caller to read (health() alone asks for it)."""
+        streamed = {"stream": True} if stream else {}
         try:
             # The engine's lane (safety.outbound): a redirect followed only while it
             # stays on the engine's host, the environment's proxy and nothing else
@@ -526,6 +556,7 @@ class CyberEngineClient:
             return outbound.get(
                 f"{self.base_url}{path}", headers=self.headers,
                 timeout=ENGINE_TIMEOUT if timeout is None else timeout, engine=True,
+                **streamed,
             )
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
@@ -700,9 +731,78 @@ class CyberEngineClient:
 
         Asked under :data:`HEALTH_TIMEOUT`, never ENGINE_TIMEOUT: a hung engine is a
         failed read (EngineError, unreachable, its cause a requests Timeout) inside
-        the readiness bound, not a thread held for a scan's read timeout."""
+        the readiness bound, not a thread held for a scan's read timeout.
+
+        And answered by :data:`HEALTH_DEADLINE_SECONDS` in all: an engine that drips
+        its answer inside every read timeout is the same failed read at the deadline.
+        The ask runs on a thread of its own (:data:`_HEALTH_ASK`, one at a time), and
+        reads the body against the same deadline, so a dripping body ends the ask and
+        closes its connection there; a status line or headers dripped hold only that
+        one thread, and every ask meanwhile answers at once."""
+        deadline = time.monotonic() + HEALTH_DEADLINE_SECONDS
+        if not _HEALTH_ASK.acquire(blocking=False):
+            why = "an earlier /health ask is still waiting on the engine"
+            raise _no_health_answer(why) from requests.ReadTimeout(why)
+        outcome: dict = {}
+        answered = threading.Event()
+
+        def ask():
+            try:
+                outcome["answer"] = self._health_answer(deadline)
+            except BaseException as exc:  # noqa: BLE001 - handed back to health() below, never lost
+                outcome["error"] = exc
+            finally:
+                _HEALTH_ASK.release()
+                answered.set()
+
+        try:
+            threading.Thread(target=ask, name="engine /health", daemon=True).start()
+        except RuntimeError as exc:
+            _HEALTH_ASK.release()
+            raise EngineError("Engine unreachable: the /health ask could not start",
+                              kind=ENGINE_UNREACHABLE) from exc
+        if not answered.wait(max(0.0, deadline - time.monotonic())):
+            why = f"no whole answer to /health within {HEALTH_DEADLINE_SECONDS:g} s"
+            raise _no_health_answer(why) from requests.ReadTimeout(why)
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["answer"]
+
+    def _health_answer(self, deadline: float) -> dict:
+        """health()'s ask, on its own thread: the body read as it arrives, chunk by
+        chunk, and no longer than ``deadline``."""
         path = "/health"
-        resp = self._send_get(path, timeout=HEALTH_TIMEOUT)
+        resp = self._send_get(path, timeout=HEALTH_TIMEOUT, stream=True)
+        chunks = []
+        size = 0
+        with resp:
+            try:
+                while True:
+                    if time.monotonic() >= deadline:
+                        why = f"the /health answer was still arriving after {HEALTH_DEADLINE_SECONDS:g} s"
+                        raise _no_health_answer(why) from requests.ReadTimeout(why)
+                    chunk = resp.raw.read1(MAX_HEALTH_BODY, decode_content=True)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_HEALTH_BODY:
+                        raise EngineError(
+                            f"Engine answered /health with more than {MAX_HEALTH_BODY} bytes",
+                            kind=ENGINE_UNREADABLE, status=resp.status_code,
+                        )
+                    chunks.append(chunk)
+            except (_ReadTimeoutError, TimeoutError):
+                why = "the /health answer stopped arriving within its read timeout"
+                raise _no_health_answer(why) from requests.ReadTimeout(why)
+            except (requests.RequestException, _Urllib3Error, OSError, ValueError) as exc:
+                raise EngineError(
+                    f"Engine unreachable: its /health answer could not be read ({type(exc).__name__})",
+                    kind=ENGINE_UNREACHABLE,
+                ) from exc
+        # Read in full, as an answer that was not streamed is: the key withheld from
+        # it (safety.outbound withholds it from every answer it reads itself).
+        resp._content = outbound.withheld_body(b"".join(chunks), [self.headers["X-API-Key"]])
+        resp._content_consumed = True
         if not (200 <= resp.status_code < 300):
             raise self._refused(resp)
         return self._read_json(resp, path)
