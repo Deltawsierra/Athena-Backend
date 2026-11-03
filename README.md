@@ -278,9 +278,10 @@ pause), at most 500; then at most 50 ready resumes and releases, newest first;
 in at most 4,000,000 bytes, under the 5 MiB an engine reads of an answer (an
 answer past that is cut, and the engine decodes none of it, its stops included).
 No start is on a page that left a stop for the next page. A resume or release
-older than a ready stop of its engine is held back while that stop is ready: the
-engine applies an answer in its order, so it would undo the newer stop; draft a
-new one after the stop. `X-Failsafe-More` says whether anything was left out and
+drafted at or before a stop of its engine that is `ready` or `consumed` is never
+delivered: the engine applies an answer in its order, so it would undo the newer
+stop. The poll marks it `superseded`, with an audit event naming the stop; draft
+a new one after the stop. `X-Failsafe-More` says whether anything was left out and
 `X-Failsafe-Next` carries the cursor for the rest (`?cursor=`, same
 `engine_id`); the engine's client reads only the first page, which always starts
 with the stops. Commands past their window are passed over and marked expired,

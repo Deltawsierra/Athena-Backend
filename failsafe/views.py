@@ -22,7 +22,7 @@ import threading
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import Max, OuterRef, Subquery
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -1253,6 +1253,8 @@ def pending(request):
     newest first, so 10,000 ready resumes put a stand-down 10,000th, behind
     1.7 MB; and past the engine's 5 MiB read limit the engine cuts the body,
     cannot decode it, and drops every command in it, the stops with them.
+    A start drafted at or before a ready or consumed stop of its engine is
+    never delivered, and is marked superseded (_PollRead).
     X-Failsafe-More says whether anything was left out, and X-Failsafe-Next
     which ``cursor`` reads the rest (the engine's client reads the first page
     only, and every first page carries the stops). Commands past their window
@@ -1269,6 +1271,7 @@ def pending(request):
     page = _Page(POLL_READ_BYTES, FailsafeCommand.as_command_dict)
     lanes, following = read.page(expiry, page)
     expiry.mark()
+    read.supersede_held()
     out = [*lanes.get("p", []), *lanes.get("q", [])]
     return Response(out, headers=_page_headers(following is not None, following, page.too_large))
 
@@ -1292,6 +1295,15 @@ POLL_START_LIMIT = COMMAND_LIST_LIMIT
 #: 5 MiB of an answer (mythos_core.http.safe_http.MAX_RESPONSE_BYTES, by
 #: default) and decodes nothing of one it had to cut: every stop in it is lost.
 POLL_READ_BYTES = 4_000_000
+#: The statuses of a stop that is in force or has been applied: ready (the
+#: engine polls it) and consumed (the engine took it). A start drafted at or
+#: before one of these, for its engine, is never delivered (_PollRead).
+#: Not awaiting a signature or superseded (never signed through), not
+#: canceled (withdrawn by an operator before it was taken), and not expired:
+#: a stop is ready for its whole window, so every start older than it is
+#: superseded by a poll in that window, and an expired stop may never have
+#: been ready at all.
+STOP_IN_FORCE = (_READY, FailsafeCommand.STATUS_CONSUMED)
 
 
 class _PollRead(_Read):
@@ -1308,13 +1320,19 @@ class _PollRead(_Read):
       the lanes its cursor continues; a reader that follows them polls the
       first page again for any stop made ready since.
 
-    A start is held back while a NEWER stop of its engine is ready (drafted at
-    or after it). The engine applies an answer in its order, so a resume or
-    release older than a stop, answered after it, would undo the stop that
-    came after it: a release signed, then a stand-down, both first heard in
-    one poll, left the engine running. It has nothing to undo while that stop
-    is ready, and a start drafted after the stop is answered. A start is
-    never a stop, so holding one back never holds back a stop.
+    A start drafted at or before a stop of its engine that is ready or
+    consumed (STOP_IN_FORCE) is never delivered, and the poll marks it
+    superseded, with an audit event naming that stop. The engine applies an
+    answer in its order, so a resume or release older than a stop, answered
+    after it, would undo the stop that came after it: a release signed, then
+    a stand-down, both first heard in one poll, left the engine running. And
+    held back only while the stop was READY, it was delivered one poll after
+    the stop stopped being ready, undoing it then. Superseded, it is history:
+    it is never ready again (a signed command is never revived), whatever
+    becomes of the stop. A start drafted after the stop is answered. A start
+    is never a stop, so holding one back never holds back a stop; and the
+    write that marks it is after the answer is built, at most
+    POLL_START_LIMIT rows, and never fails the poll (supersede_held).
 
     Each part is one index read of at most its limit + 1 keys
     (fsc_st_act_ct, fsc_eng_st_act_ct): the work is the limits, whatever the
@@ -1333,18 +1351,60 @@ class _PollRead(_Read):
         ]
         self.binding = hashlib.sha256(json.dumps(["pending", engine_id]).encode("utf-8")).hexdigest()[:16]
         self.after = self._cursor(request.query_params.get(CURSOR_PARAM) or "")
+        #: The starts this read held back: {pk: (stop uuid, stop action)}.
+        self.held = {}
 
-    def _newest_stops(self, engines):
-        """The creation time of the newest ready stop of each of ``engines``:
-        one grouped read of their ready stops, by the index on (engine,
-        status, action, creation time)."""
+    def _stopped_after(self, pks):
+        """Of the starts ``pks``, those a stop in force of their engine was
+        drafted at or after: {pk: (the stop's uuid, its action)}. One read:
+        each start's question is an EXISTS-style search of the index on
+        (engine, status, action, creation time) that stops at the first stop
+        found, so it does not grow with the stops (or the consumed history)
+        of the engine."""
+        stops = FailsafeCommand.objects.filter(
+            engine_id=OuterRef("engine_id"),
+            status__in=STOP_IN_FORCE,
+            action__in=STOP_ACTIONS,
+            created_at__gte=OuterRef("created_at"),
+        ).order_by()
         rows = (
-            FailsafeCommand.objects.filter(status=_READY, action__in=STOP_ACTIONS, engine_id__in=sorted(engines))
+            FailsafeCommand.objects.filter(pk__in=pks)
             .order_by()
-            .values("engine_id")
-            .annotate(newest=Max("created_at"))
+            .annotate(stop_uuid=Subquery(stops.values("uuid")[:1]), stop_action=Subquery(stops.values("action")[:1]))
+            .filter(stop_uuid__isnull=False)
+            .values_list("pk", "stop_uuid", "stop_action")
         )
-        return {row["engine_id"]: row["newest"] for row in rows}
+        return {pk: (str(stop_uuid), stop_action) for pk, stop_uuid, stop_action in rows}
+
+    def supersede_held(self):
+        """Mark the starts this read held back superseded, each with an audit
+        event naming the stop it was drafted before. Each is one conditional
+        write (still ready), so two polls at once never mark one twice. A
+        write that fails is logged and the poll is answered: the start stays
+        held back on every poll while the stop is in force."""
+        if not self.held:
+            return
+        try:
+            now = timezone.now()
+            with transaction.atomic():
+                events = []
+                for pk, (stop_uuid, stop_action) in self.held.items():
+                    if FailsafeCommand.objects.filter(pk=pk, status=_READY).update(
+                        status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
+                    ):
+                        events.append(FailsafeAuditEvent(
+                            command_id=pk,
+                            event=FailsafeAuditEvent.EVENT_SUPERSEDED,
+                            detail={
+                                "by": "engine poll",
+                                "superseded_by": stop_uuid,
+                                "reason": f"drafted at or before the {stop_action} {stop_uuid} of its engine, "
+                                          "which is ready or consumed: delivered after it, it would undo that stop",
+                            },
+                        ))
+                FailsafeAuditEvent.objects.bulk_create(events)
+        except Exception:  # noqa: BLE001 - a failed write must not fail the engine's poll
+            logger.exception("could not mark %d held-back failsafe starts superseded", len(self.held))
 
     def page(self, expiry, page):
         """This page's rows by lane, and the next page's cursor or None. No
@@ -1360,13 +1420,10 @@ class _PollRead(_Read):
                 continue
             entries, more = _lane(self.qs, tiers, limit, after, expiry)
             if name == "q":
-                engines = {command.engine_id for _key, command in entries if command is not None}
-                newest = self._newest_stops(engines) if engines else {}
-                entries = [
-                    (key, None if command is not None and command.engine_id in newest
-                     and command.created_at <= newest[command.engine_id] else command)
-                    for key, command in entries
-                ]
+                pks = [command.pk for _key, command in entries if command is not None]
+                self.held = self._stopped_after(pks) if pks else {}
+                entries = [(key, None if command is not None and command.pk in self.held else command)
+                           for key, command in entries]
             rows[name], last, passed = page.take_lane(entries)
             if more or not passed:
                 continuing[name] = after if last is None else last

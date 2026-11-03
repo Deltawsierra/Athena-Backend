@@ -18,8 +18,9 @@ Now the answer is the same JSON list, with every ready stop first --
 terminate, then stand-down, then pause -- and at most POLL_START_LIMIT starts
 after them, in at most POLL_READ_BYTES; X-Failsafe-More and X-Failsafe-Next
 page the rest, and no start is on a page that left a stop for the next. A start
-older than a ready stop of its engine is held back. Each read is an index
-range of its limit (fsc_st_act_ct, fsc_eng_st_act_ct).
+drafted at or before a ready or consumed stop of its engine is never delivered,
+and is marked superseded. Each read is an index range of its limit
+(fsc_st_act_ct, fsc_eng_st_act_ct).
 """
 
 import json
@@ -252,8 +253,11 @@ def test_a_start_older_than_a_ready_stop_is_held_back_and_a_newer_one_is_answere
     """A release signed, then a stand-down, both first heard in one poll: the
     engine applies the answer in order, so a release answered after the
     stand-down left the engine running (master answered both). The older
-    release is held back while the stand-down is ready; one drafted after it
-    is answered, after it; another engine's release is not held by it."""
+    release is never delivered and is marked superseded, naming the stop; one
+    drafted after the stop is answered, after it; another engine's release is
+    not held by it."""
+    from failsafe.models import FailsafeAuditEvent, FailsafeCommand
+
     at = timezone.now() - timedelta(hours=1)
     old_release = _make(["release"], at)[0]
     other = _make(["release"], at, engine_id="athena-2")[0]
@@ -262,8 +266,67 @@ def test_a_start_older_than_a_ready_stop_is_held_back_and_a_newer_one_is_answere
     everyone = [c["nonce"] for c in _poll("/api/failsafe/pending/").json()]
     assert everyone == [stand_down.nonce, other.nonce], everyone
     assert old_release.nonce not in everyone
+    assert FailsafeCommand.objects.get(pk=old_release.pk).status == "superseded"
+    event = FailsafeAuditEvent.objects.get(command_id=old_release.pk, event="superseded")
+    assert event.detail["superseded_by"] == str(stand_down.uuid) and str(stand_down.uuid) in event.detail["reason"]
+    assert FailsafeCommand.objects.get(pk=other.pk).status == "ready"
     new_release = _make(["release"], at + timedelta(minutes=2))[0]
     assert [c["nonce"] for c in _poll().json()] == [stand_down.nonce, new_release.nonce]
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+def test_a_start_drafted_before_a_stop_is_not_delivered_once_the_engine_took_the_stop():
+    """A release drafted, then a stand-down. The engine polls and gets the
+    stand-down; the stand-down is consumed (no longer ready). Held back only
+    while a stop was READY, the release was delivered by the next poll and
+    resumed the engine, undoing the stop one poll later. Now it is superseded
+    by the first poll, and no poll after carries it. A release drafted after
+    the stop is still delivered."""
+    from failsafe.models import FailsafeCommand
+
+    at = timezone.now() - timedelta(hours=1)
+    release = _make(["release"], at)[0]
+    stand_down = _make(["stand_down"], at + timedelta(minutes=1))[0]
+    assert [c["nonce"] for c in _poll().json()] == [stand_down.nonce]
+    # The engine took it. No route here marks a command consumed; this is
+    # the state an engine's acknowledgement would leave.
+    FailsafeCommand.objects.filter(pk=stand_down.pk).update(status="consumed")
+    for _ in range(2):
+        assert [c["nonce"] for c in _poll().json()] == [], "a release drafted before the stop was delivered after it"
+    assert FailsafeCommand.objects.get(pk=release.pk).status == "superseded"
+    later = _make(["release"], at + timedelta(minutes=2))[0]
+    assert [c["nonce"] for c in _poll().json()] == [later.nonce]
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+def test_a_start_older_than_a_consumed_stop_is_held_even_when_it_cannot_be_marked(monkeypatch):
+    """The stand-down is consumed before any poll sees the older release, and
+    the write that would mark the release superseded fails: every poll still
+    holds it back, by the consumed stop alone. A stop canceled by an operator
+    holds nothing back."""
+    from django.db import OperationalError
+    from django.db.models import QuerySet
+
+    from failsafe.models import FailsafeCommand
+
+    at = timezone.now() - timedelta(hours=1)
+    resume = _make(["resume"], at)[0]
+    pause = _make(["pause"], at + timedelta(minutes=1))[0]
+    FailsafeCommand.objects.filter(pk=pause.pk).update(status="consumed")
+    not_held = _make(["resume"], at, engine_id="athena-2")[0]
+    withdrawn = _make(["stand_down"], at + timedelta(minutes=1), engine_id="athena-2")[0]
+    FailsafeCommand.objects.filter(pk=withdrawn.pk).update(status="canceled")
+
+    def locked(*args, **kwargs):
+        raise OperationalError("database is locked")
+
+    monkeypatch.setattr(QuerySet, "update", locked)
+    for _ in range(2):
+        assert [c["nonce"] for c in _poll().json()] == [], "a resume drafted before a consumed pause was delivered"
+    assert FailsafeCommand.objects.get(pk=resume.pk).status == "ready"  # not marked: the write failed
+    assert [c["nonce"] for c in _poll("/api/failsafe/pending/?engine_id=athena-2").json()] == [not_held.nonce]
 
 
 # --- 3. The reads are index ranges -----------------------------------------------------------
