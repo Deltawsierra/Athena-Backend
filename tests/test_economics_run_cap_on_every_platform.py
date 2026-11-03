@@ -310,8 +310,15 @@ def _flock_as_msvcrt():
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise OSError(errno.EACCES, "Permission denied") from None
-        elif mode in (1, 3):  # LK_LOCK, LK_RLCK: Windows retries for 10 s; this waits
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        elif mode in (1, 3):  # LK_LOCK, LK_RLCK: Windows WAITS, retrying once a second for 10 s
+            for _attempt in range(10):
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    time.sleep(1)
+                else:
+                    return
+            raise OSError(errno.EDEADLK, "Resource deadlock avoided")
         elif mode == 0:  # LK_UNLCK
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         else:
@@ -397,7 +404,7 @@ def test_a_windows_lock_failing_on_the_hosts_slot_gives_the_tenants_back(windows
     assert run_cap._probe("tenant-a") == "free"
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_a_simulate_with_the_windows_lock_runs_and_at_capacity_is_the_503(windows_lock, caps):
     caps(host=1, tenant=1)
     analyst = User.objects.create_user(username="ann-winlock", password="x", role="analyst")
@@ -408,7 +415,8 @@ def test_a_simulate_with_the_windows_lock_runs_and_at_capacity_is_the_503(window
     assert response.status_code == 201, (response.status_code, response.content[:300])
     held = run_cap._hold("someone-else")
     try:
-        refused = run_cap._client(analyst).post(url, {"seed": 82, "policy": QUICK}, format="json")
+        refused, took = run_cap._post_within(analyst, url, {"seed": 82, "policy": QUICK})
         assert "every economics run slot" in run_cap._refused_at_capacity(refused)["detail"]
+        assert took < run_cap.REFUSED_WITHIN, took
     finally:
         held.release()

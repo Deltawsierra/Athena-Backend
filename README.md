@@ -1257,10 +1257,11 @@ these routes unserved.
 A simulate request runs its Monte Carlo in the worker that serves it, for up to 120 s,
 so the two simulate routes (and any later Monte Carlo route, which registers with one
 line, `@capacity.capped`) run only in a free slot (`assurance/economics/capacity.py`;
-spec, section 32). A slot is an exclusive `flock` on a small file every worker on the
-host shares, taken WITHOUT WAITING: when none is free the request is answered at once,
-503 with `Retry-After` and code `economics_capacity`, and nothing runs or is recorded.
-The kernel releases a dead worker's flock, so a slot never leaks; every other exit
+spec, section 32). A slot is an exclusive lock on a small file every worker on the
+host shares (`flock` on POSIX, `msvcrt.locking` on byte 0 on Windows), taken WITHOUT
+WAITING: when none is free the request is answered at once, 503 with `Retry-After` and
+code `economics_capacity`, and nothing runs or is recorded. The operating system
+releases a dead worker's lock, so a slot never leaks; every other exit
 (an answer, a refusal, an exception, gunicorn's abort) releases it in a `finally`. The
 caps, each read from the environment by name:
 
@@ -1277,10 +1278,13 @@ caps, each read from the environment by name:
 No stop takes a slot: a scan's Stop and every operator stop are answered within their
 bound while every slot is held (`tests/test_economics_run_cap.py`).
 
-On Windows there is no `fcntl`, so no slot can be locked and none is ever granted: a
-simulate is refused with the same 503 (`economics_capacity`, "the economics run slots
-cannot be read on this server") and is never run uncapped. Nothing else is affected, and
-no stop route is (`tests/test_economics_run_cap_without_fcntl.py`).
+On Windows the slots are locked with `msvcrt` (one attempt, `LK_NBLCK`, never the
+waiting `LK_LOCK`), so a simulation runs there under the same caps, with the same 503
+when they are full, and a worker ended by `TerminateProcess` gives its slots back
+(`tests/test_economics_run_cap_on_every_platform.py`, which CI runs on Linux and on
+windows-latest). A host with no lock at all (neither `fcntl` nor `msvcrt`) is refused
+with the same 503 (`economics_capacity`, "the economics run slots cannot be read on this
+server") and never run uncapped (`tests/test_economics_run_cap_without_fcntl.py`).
 
 ### Continuous financial assurance (E6)
 
