@@ -6,12 +6,17 @@ from safety.revoke import RevokeView
 from safety.sign_in import SignInView
 
 from .api_views import health
+from .readiness import readiness
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     # Imported but never routed, so the desktop client's health probe and any
     # load balancer check received a 404.
     path("api/health/", health, name="health"),
+    # Readiness beside liveness: each dependency named, ok / degraded / unknown, with
+    # why, from bounded checks (config.readiness). Liveness above is unchanged. Under
+    # /api/health/, so the gateway skips it as it skips liveness (audit.middleware).
+    path("api/health/ready/", readiness, name="readiness"),
 
     # Auth / JWT
     # Failed sign-ins are limited per address and username, not by the shared

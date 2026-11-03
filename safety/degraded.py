@@ -99,6 +99,9 @@ _R, _E, _A = EVIDENCE_READ, EFFECT, ASSESSMENT
 #: plain Django view, which serves every method.
 ROUTES = {
     "health": {"GET": _R},
+    # Each dependency's state with its reason: a not-ready answer is itself this
+    # class's degraded answer (503, unknown, the dependency named).
+    "readiness": {"GET": _R},
     "token_obtain_pair": {"POST": _E},
     "api-root": {"GET": _R},
     "accounts:api-root": {"GET": _R},

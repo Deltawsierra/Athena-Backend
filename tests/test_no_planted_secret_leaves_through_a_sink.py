@@ -411,6 +411,9 @@ class Engine:
         document = json.loads(body or b"{}") if body else {}
         if path == "/defend":
             return 200, {"allow": True, "action": "allow"}
+        # The engine's liveness, in its contract: what the readiness route asks.
+        if (method, path) == ("GET", "/health"):
+            return 200, {"status": "ok"}
         if (method, path) == ("POST", "/api/scan"):
             run_id = str(uuid.uuid4())
             # The engine names a target with its userinfo replaced (athena-engine's
@@ -877,6 +880,11 @@ class World:
     def boot(self, docs, signals):
         anonymous = self.client()
         signals["health"] = self.call(docs, "api.answers", anonymous, "get", "/api/health/", "health").status_code
+        # Readiness: each dependency named with its reason, which is never a message a
+        # dependency raised, so nothing planted can travel in it.
+        signals["readiness"] = self.call(
+            docs, "api.answers", anonymous, "get", "/api/health/ready/", "readiness"
+        ).status_code
         token = self.call(
             docs, "api.answers", anonymous, "post", "/api/token/", "token_obtain_pair",
             data={"username": "canary-admin", "password": CANARY["request.password"]}, format="json",
@@ -1760,6 +1768,7 @@ _READ = "api.answers"
 #: is not one. A route that is an export is called by some path above.
 ROUTES: dict[str, str] = {
     "health": _READ,
+    "readiness": _READ,
     "api-root": _DOCS + "the API's index of routes",
     "token_obtain_pair": _READ,
     "token_refresh": _READ,
@@ -2355,6 +2364,7 @@ def test_every_path_ran(observed):
     assert broke == {}, "\n\n".join(f"{name}:\n{why}" for name, why in broke.items())
     s = {run.name: run.signals for run in observed.paths}
     assert s["boot"]["health"] == 200
+    assert s["boot"]["readiness"] == 200, s["boot"]
     assert s["boot"]["sign_in"] == 200 and s["boot"]["wrong_password"] == 401
     assert s["scan_success"]["launch"] == 200, s["scan_success"]
     assert s["scan_success"]["status"] == "completed", s["scan_success"]
