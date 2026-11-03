@@ -487,6 +487,60 @@ def test_a_poll_cursor_is_for_its_own_engine_and_a_bad_one_is_400():
     assert APIClient().get(_with_cursor("/api/failsafe/pending/", first[NEXT])).status_code == 401
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("rates")
+def test_the_poll_never_waits_for_the_write_lock():
+    """Another connection holds the database's write lock -- a stop being
+    drafted or signed at that moment -- while the engine polls with starts to
+    mark superseded and commands to mark expired. The poll answers within
+    STOP_LATENCY_BOUND, the stop first and the held starts left out, without
+    waiting for the lock (round 3 waited: one poll 0.44 s on Windows); its
+    writes are refused and logged, and the next poll after the lock is let
+    go makes them. What the poll delivers is the same either way."""
+    from failsafe.models import FailsafeCommand
+
+    at = timezone.now() - timedelta(hours=1)
+    _make(_starts(1000), at)
+    _make(_starts(10), at, expires=PAST)
+    pause = _make(["pause"], at + timedelta(minutes=30))[0]
+    holding, release, failures = threading.Event(), threading.Event(), []
+
+    def writer():
+        try:
+            from django.db import transaction
+
+            with transaction.atomic():
+                FailsafeCommand.objects.filter(pk=pause.pk).update(reason="")
+                holding.set()
+                release.wait(5)
+        except Exception as exc:  # noqa: BLE001 - reported by the test
+            failures.append(exc)
+        finally:
+            connection.close()
+
+    holder = threading.Thread(target=writer)
+    holder.start()
+    try:
+        assert holding.wait(30), "the write lock was never taken"
+        took = []
+        for _ in range(3):
+            began = time.perf_counter()
+            body = _poll().json()
+            took.append(time.perf_counter() - began)
+            assert [c["nonce"] for c in body] == [pause.nonce]
+        marked_while_held = FailsafeCommand.objects.filter(status="superseded").count()
+    finally:
+        release.set()
+        holder.join(30)
+    assert failures == []
+    slow = [round(t, 4) for t in took if t > STOP_LATENCY_BOUND]
+    assert slow == [], f"a poll waited for the write lock: {slow}"
+    assert marked_while_held == 0  # refused, not waited for
+    assert [c["nonce"] for c in _poll().json()] == [pause.nonce]
+    assert FailsafeCommand.objects.filter(status="superseded").count() > 0
+    assert FailsafeCommand.objects.filter(status="expired").count() == 10
+
+
 # --- 6. A stop signed during the flood reaches the poll within its bound ---------------------
 
 
@@ -511,6 +565,13 @@ def test_a_stop_signed_during_a_flood_reaches_the_engine_poll_within_its_bound(s
     def engine():
         try:
             client = APIClient()
+            # The engine's first poll in this thread is not timed: a cold
+            # thread's first request costs about 0.3 s with no command in the
+            # table at all (measured: 0.29-0.33 s empty, 0.30-0.35 s under
+            # this flood; every poll after it 2-30 ms), so it measures the
+            # process, not the flood. Every poll after it is timed, the stop
+            # comes after it, and each must answer within the bound.
+            client.get("/api/failsafe/pending/?engine_id=athena-1", HTTP_X_FAILSAFE_POLL_TOKEN=POLL_TOKEN)
             while not done.is_set():
                 began = time.perf_counter()
                 answer = client.get("/api/failsafe/pending/?engine_id=athena-1", HTTP_X_FAILSAFE_POLL_TOKEN=POLL_TOKEN)

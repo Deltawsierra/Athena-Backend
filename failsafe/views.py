@@ -19,9 +19,10 @@ import logging
 import re
 import secrets
 import threading
+from contextlib import contextmanager
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Max, OuterRef, Subquery
 from django.http import Http404
 from django.shortcuts import get_object_or_404
@@ -1270,10 +1271,44 @@ def pending(request):
     expiry = _Expiry()
     page = _Page(POLL_READ_BYTES, FailsafeCommand.as_command_dict)
     lanes, following = read.page(expiry, page)
-    expiry.mark()
-    read.supersede_held()
+    # The poll's only writes, after its answer is built, and never waiting
+    # for the database's write lock: a stop drafted or signed at the same
+    # moment holds it, and a write that waited for it held this poll -- and
+    # so every stop in its answer -- behind that (0.44 s of one poll on
+    # Windows). Refused at once, each is logged, and the next poll tries
+    # again; neither changes what the answer delivers.
+    with _not_waiting_for_the_write_lock():
+        expiry.mark()
+        read.supersede_held()
     out = [*lanes.get("p", []), *lanes.get("q", [])]
     return Response(out, headers=_page_headers(following is not None, following, page.too_large))
+
+
+@contextmanager
+def _not_waiting_for_the_write_lock():
+    """Writes in this block are refused at once, never queued, when another
+    connection holds the database's write lock (SQLite: busy_timeout 0 for
+    the block, then put back as it was). Other databases: unchanged. A
+    failure to set or put it back is logged and changes nothing else."""
+    before = None
+    if connection.vendor == "sqlite":
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("PRAGMA busy_timeout")
+                before = int(cursor.fetchone()[0])
+                cursor.execute("PRAGMA busy_timeout = 0")
+        except Exception:  # noqa: BLE001 - the poll is answered whatever this does
+            logger.exception("could not stop the engine poll's writes waiting for the write lock")
+            before = None
+    try:
+        yield
+    finally:
+        if before is not None:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(f"PRAGMA busy_timeout = {before:d}")
+            except Exception:  # noqa: BLE001 - the poll is answered whatever this does
+                logger.exception("could not put back the database's busy timeout after the engine poll")
 
 
 #: The stop actions in the order the engine's poll answers them: the strongest
@@ -1432,7 +1467,10 @@ class _PollRead(_Read):
                     for pk in mine
                 ])
         except Exception:  # noqa: BLE001 - a failed write must not fail the engine's poll
-            logger.exception("could not mark %d held-back failsafe starts superseded", len(held))
+            # Refused at once when another write holds the lock (pending): the
+            # starts stay held back by the read, and the next poll marks them.
+            logger.warning("could not mark %d held-back failsafe starts superseded this poll", len(held),
+                           exc_info=True)
 
     def page(self, expiry, page):
         """This page's rows by lane, and the next page's cursor or None. No
