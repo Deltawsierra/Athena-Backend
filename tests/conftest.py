@@ -71,6 +71,21 @@ def _economics_run_slots(tmp_path_factory):
         os.environ["ATHENA_ECONOMICS_SLOT_DIR"] = before
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _worker_reports(tmp_path_factory):
+    """A directory of this run's own for the workers' reports
+    (``assurance.worker_reports``), so ``/api/health/`` in one test run never reads a
+    report another run on the machine left. A nested pytest inherits it."""
+    directory = tmp_path_factory.mktemp("worker-reports")
+    before = os.environ.get("ATHENA_WORKER_REPORT_DIR")
+    os.environ["ATHENA_WORKER_REPORT_DIR"] = str(directory)
+    yield directory
+    if before is None:
+        os.environ.pop("ATHENA_WORKER_REPORT_DIR", None)
+    else:
+        os.environ["ATHENA_WORKER_REPORT_DIR"] = before
+
+
 #: The row key every test runs with (review round 1 of #169, M1; spec, section 35.9):
 #: SYNTHETIC, for tests only, as the tests' receipt keys are. A test of the key-less
 #: behaviour unsets it with monkeypatch.

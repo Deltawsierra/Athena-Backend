@@ -203,7 +203,7 @@ jobs:
         run: |
           python -c "import mythos_core.http, mythos_core.failsafe"
           python manage.py check
-          python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.economics.capacity"
+          python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.worker_reports, assurance.economics.capacity"
           python manage.py makemigrations --check --dry-run
 
       - name: Test (pin guard, stop paths, Windows-equivalent tests, SPINE's statement budget and scope)
@@ -216,6 +216,7 @@ jobs:
             tests/test_economics_run_cap_without_fcntl.py \
             tests/test_oplog_without_select.py \
             tests/test_an_unrecorded_dispatch_is_always_named.py \
+            tests/test_health_counts_every_worker.py \
             tests/test_failsafe_control_plane.py \
             tests/test_no_control_holds_back_a_stop.py \
             tests/test_no_dispatch_holds_back_a_stop.py \
