@@ -168,6 +168,9 @@ ROUTES = {
     "deployment-economics-scenario-results": {"GET": _R},
     "deployment-economics-scenarios": {"GET": _R},
     "deployment-economics-receipt": {"GET": _R},
+    # The deployment's economic-exposure report (economics spec section 38): an
+    # assessment; over incomplete inputs it reads AUDIT_INCOMPLETE itself.
+    "deployment-economics-exposure-report": {"GET": _A},
     "deployment-economics-scenario-freshness": {"GET": _R},
     "deployment-economics-assurance": {"GET": _R, "POST": _E},
     "deployment-economics-scenario-refresh": {"POST": _E},

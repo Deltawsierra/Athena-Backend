@@ -600,6 +600,9 @@ NOT_STOPS = {
     # lock and no transaction; nothing a stop or the decision reads.
     "deployment-economics-scenarios": _get(),
     "deployment-economics-receipt": _get(),
+    # The deployment's economic-exposure report (spec section 38): a read of economics
+    # rows rendered as HTML or PDF; it records, signs and verifies nothing.
+    "deployment-economics-exposure-report": _get(),
     # Continuous financial assurance (assurance.economics.report_api, E6, spec section
     # 34): a run's freshness read, the deployment's stale exposure checked, and a stale
     # scenario refreshed. Economics records only; SPINE's rows are read, never written.
