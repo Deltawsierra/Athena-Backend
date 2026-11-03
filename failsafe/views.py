@@ -19,9 +19,10 @@ import logging
 import re
 import secrets
 import threading
+from contextlib import contextmanager
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Max
 from django.http import Http404
 from django.shortcuts import get_object_or_404
@@ -33,7 +34,7 @@ from rest_framework.response import Response
 
 from accounts.permissions import IsAdminOrAnalyst
 
-from .models import FailsafeAuditEvent, FailsafeCommand
+from .models import FailsafeAuditEvent, FailsafeCommand, FailsafeStopMark
 from .serializers import (
     DraftCommandSerializer,
     FailsafeAuditEventSerializer,
@@ -162,9 +163,14 @@ class _Expiry:
             if room > 0:
                 # The window's end is stored as the ISO string that was signed;
                 # the index narrows the candidates and each is checked exactly.
+                # In the index's own order, not the model's (newest first):
+                # sorting by creation time read and sorted EVERY command past
+                # its window to take the first few (a temp B-tree), so the
+                # read grew with the backlog it is there to clear.
                 candidates = (
                     FailsafeCommand.objects.filter(status__in=_IN_FLIGHT, expires_at__lt=self.now.isoformat())
                     .exclude(pk__in=list(self.pks))
+                    .order_by()
                     .values_list("pk", "expires_at")[:room]
                 )
                 self.pks.update((pk, None) for pk, end in candidates if _due(end, self.now))
@@ -352,8 +358,11 @@ class _Page:
     says about it: in the state read's body, and in both reads' X-Failsafe-More
     header."""
 
-    def __init__(self):
-        self.whole = self.left = stop_lane_read_bytes()
+    def __init__(self, whole=None, row=None):
+        self.whole = self.left = stop_lane_read_bytes() if whole is None else whole
+        #: A command as this page lists it (take_lane): the console's row, or
+        #: the engine's command document (pending).
+        self._row = row or (lambda command: FailsafeCommandSerializer(command).data)
         self.more = False
         #: The uuid of a command passed over because it alone is larger than a
         #: whole page (take_lane), or None.
@@ -397,7 +406,7 @@ class _Page:
             if self.left <= 0:
                 self.more = True
                 return out, last, False
-            row = FailsafeCommandSerializer(command).data
+            row = self._row(command)
             size = self._size(row)
             if size > self.whole:
                 self.too_large, self.left, self.more = str(command.uuid), 0, True
@@ -1031,6 +1040,7 @@ def submit_signature(request, cmd_uuid):
         valid = distinct_valid_signers(command.as_command_dict(), command.signatures, keyring)
         if len(valid) >= command.required_signatures:
             command.mark_ready()
+            _mark_stop_made_ready(command)
             _audit(command, FailsafeAuditEvent.EVENT_READY, request,
                    signers=sorted(valid))
 
@@ -1171,6 +1181,7 @@ def _in_flight(request, read):
     if read.after is None and not read.by_token:
         recent, _history = _newest(read.qs, [{}], RECENT_LIMIT, expiry, in_flight_only=False)
     expiry.mark()
+    _supersede_listed_starts(lanes.get("r", []))
     # ``recent`` is the newest few and is not counted in ``more``.
     recent = page.take(recent)
     return {
@@ -1235,18 +1246,281 @@ def pending(request):
 
     A poll with the token is a stop (safety.stops): no throttle refuses or
     counts it. One without it is answered 401 and stays under the anonymous
-    throttle, so the token cannot be guessed at speed."""
+    throttle, so the token cannot be guessed at speed.
+
+    Its work is bounded, and the stops come first (_PollRead). The answer is
+    the same JSON list of command documents as ever: every ready stop --
+    terminate, then stand-down, then pause -- before any start, then at most
+    POLL_START_LIMIT resumes and releases, newest first, in at most
+    POLL_READ_BYTES. It walked every ready command of the engine before,
+    newest first, so 10,000 ready resumes put a stand-down 10,000th, behind
+    1.7 MB; and past the engine's 5 MiB read limit the engine cuts the body,
+    cannot decode it, and drops every command in it, the stops with them.
+    A start drafted at or before a ready or consumed stop of its engine is
+    never delivered, and is marked superseded (_PollRead).
+    X-Failsafe-More says whether anything was left out, and X-Failsafe-Next
+    which ``cursor`` reads the rest (the engine's client reads the first page
+    only, and every first page carries the stops). Commands past their window
+    are passed over and marked expired, at most EXPIRE_PER_READ in one write
+    that never fails the poll (_Expiry): it wrote each one, one by one."""
     if not poll_token_ok(request):
         return Response({"detail": "poll token required"}, status=status.HTTP_401_UNAUTHORIZED)
 
-    engine_id = request.query_params.get("engine_id")
-    qs = FailsafeCommand.objects.filter(status=FailsafeCommand.STATUS_READY)
-    if engine_id:
-        qs = qs.filter(engine_id=engine_id)
-    now = timezone.now()
-    out = []
-    for command in qs:
-        if _expire_if_due(command, now):
-            continue
-        out.append(command.as_command_dict())
-    return Response(out)
+    try:
+        read = _PollRead(request)
+    except _BadCursor as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    expiry = _Expiry()
+    page = _Page(POLL_READ_BYTES, FailsafeCommand.as_command_dict)
+    lanes, following = read.page(expiry, page)
+    # The poll's only write, after its answer is built, and only when it
+    # came across commands past their window: never waiting for the
+    # database's write lock (a stop drafted or signed at the same moment
+    # holds it). Refused at once, it is logged and the next poll tries again;
+    # it never changes what the answer delivers. Held starts are NOT marked
+    # here: the poll only reads, and the state read marks them (_supersede).
+    with _not_waiting_for_the_write_lock():
+        expiry.mark()
+    out = [*lanes.get("p", []), *lanes.get("q", [])]
+    return Response(out, headers=_page_headers(following is not None, following, page.too_large))
+
+
+@contextmanager
+def _not_waiting_for_the_write_lock():
+    """Writes in this block are refused at once, never queued, when another
+    connection holds the database's write lock (SQLite: busy_timeout 0 for
+    the block, then put back as it was). Other databases: unchanged. A
+    failure to set or put it back is logged and changes nothing else."""
+    before = None
+    if connection.vendor == "sqlite":
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("PRAGMA busy_timeout")
+                before = int(cursor.fetchone()[0])
+                cursor.execute("PRAGMA busy_timeout = 0")
+        except Exception:  # noqa: BLE001 - the poll is answered whatever this does
+            logger.exception("could not stop the engine poll's writes waiting for the write lock")
+            before = None
+    try:
+        yield
+    finally:
+        if before is not None:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(f"PRAGMA busy_timeout = {before:d}")
+            except Exception:  # noqa: BLE001 - the poll is answered whatever this does
+                logger.exception("could not put back the database's busy timeout after the engine poll")
+
+
+#: The stop actions in the order the engine's poll answers them: the strongest
+#: first, so a page cut by its limits still carries the strongest stop asked
+#: for. Any order of stops leaves an engine in the strongest of them (a pause
+#: does nothing to an engine stood down, and nothing follows a terminate).
+POLL_STOP_ORDER = ("terminate", "stand_down", "pause")
+#: The most ready stops one poll answers. Each is signed by an enrolled
+#: operator's key -- a draft flood makes none -- so this is far past any real
+#: number; past it the poll says more and answers the rest on its next page.
+POLL_STOP_LIMIT = AWAITING_STOP_LIMIT
+#: The most ready resumes and releases one poll answers, after every stop. A
+#: start needs an operator's signature too, and an engine has one or two in a
+#: window; 50 (the list's page) covers any real number, keeps the work and the
+#: bytes of a poll the same under a flood of them, and keeps what the engine
+#: verifies and applies after the stops to at most 50 commands.
+POLL_START_LIMIT = COMMAND_LIST_LIMIT
+#: The most bytes of commands one poll answers. The engine reads at most
+#: 5 MiB of an answer (mythos_core.http.safe_http.MAX_RESPONSE_BYTES, by
+#: default) and decodes nothing of one it had to cut: every stop in it is lost.
+POLL_READ_BYTES = 4_000_000
+#: The value a start is held back by when its engine's mark cannot be read:
+#: every start of that engine, on that poll (fail closed, for starts only).
+_UNREADABLE = object()
+
+
+def _mark_stop_made_ready(command):
+    """Move ``command``'s engine's FailsafeStopMark forward to it, when it is a
+    stop newer than the mark: inside the transaction that signs it into
+    force, one conditional UPDATE by the primary key, and an INSERT the first
+    time. In a savepoint, and never raised: a failure is logged and the
+    signature stands; the poll still holds back older starts by the ready
+    stop itself while it is ready."""
+    if command.action not in STOP_ACTIONS:
+        return
+    try:
+        with transaction.atomic():
+            fields = {"created_at": command.created_at, "stop_uuid": command.uuid, "action": command.action}
+            moved = FailsafeStopMark.objects.filter(
+                engine_id=command.engine_id, created_at__lt=command.created_at
+            ).update(updated_at=timezone.now(), **fields)
+            if not moved and not FailsafeStopMark.objects.filter(engine_id=command.engine_id).exists():
+                FailsafeStopMark.objects.create(engine_id=command.engine_id, **fields)
+    except Exception:  # noqa: BLE001 - a stop's signature must never fail on its mark
+        logger.exception("could not move the stop mark of engine %r to %s", command.engine_id, command.uuid)
+
+
+def _stop_marks(engines):
+    """{engine_id: (created_at, stop uuid, action)} of the marks of
+    ``engines``: one read of their rows by the primary key. _UNREADABLE when
+    the read fails."""
+    try:
+        return {
+            mark.engine_id: (mark.created_at, str(mark.stop_uuid), mark.action)
+            for mark in FailsafeStopMark.objects.filter(engine_id__in=sorted(engines))
+        }
+    except Exception:  # noqa: BLE001 - an unreadable mark holds every start back, never a stop
+        logger.exception("could not read the stop marks of %d engines", len(engines))
+        return _UNREADABLE
+
+
+def _supersede(held):
+    """Mark the starts ``held`` ({pk: (stop uuid, stop action)}) superseded,
+    each with an audit event naming the stop it was drafted before: one
+    UPDATE of at most EXPIRE_PER_READ rows still ready, one read of the rows
+    that write changed (its own ``updated_at``, so two reads at once never
+    record one twice), and one insert, in one transaction that never waits
+    for the write lock. A failure is logged, never raised."""
+    held = dict(list(held.items())[:EXPIRE_PER_READ])
+    if not held:
+        return
+    try:
+        now = timezone.now()
+        with _not_waiting_for_the_write_lock(), transaction.atomic():
+            changed = FailsafeCommand.objects.filter(pk__in=list(held), status=_READY).update(
+                status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
+            )
+            if not changed:
+                return
+            mine = FailsafeCommand.objects.filter(
+                pk__in=list(held), status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
+            ).order_by().values_list("pk", flat=True)
+            FailsafeAuditEvent.objects.bulk_create([
+                FailsafeAuditEvent(
+                    command_id=pk,
+                    event=FailsafeAuditEvent.EVENT_SUPERSEDED,
+                    detail={
+                        "by": "state read",
+                        "superseded_by": held[pk][0],
+                        "reason": f"drafted at or before the {held[pk][1]} {held[pk][0]}, the newest stop made "
+                                  "ready for its engine: delivered after it, it would undo that stop",
+                    },
+                )
+                for pk in mine
+            ])
+    except Exception:  # noqa: BLE001 - a failed write must not fail the read
+        logger.warning("could not mark %d held-back failsafe starts superseded", len(held), exc_info=True)
+
+
+def _supersede_listed_starts(rows):
+    """The ready resumes and releases a state read listed that the newest stop
+    made ready for their engine (its mark) was drafted at or after:
+    superseded (_supersede). Only by a mark: a start of an engine with none is
+    held back by the poll but never marked. At most STATE_LIST_LIMIT rows, by
+    their uuid, then their engines' marks by the primary key."""
+    uuids = [row["uuid"] for row in rows if row.get("action") in START_ACTIONS and row.get("status") == _READY]
+    if not uuids:
+        return
+    try:
+        starts = list(FailsafeCommand.objects.filter(uuid__in=uuids).order_by().values_list(
+            "pk", "engine_id", "created_at"))
+    except Exception:  # noqa: BLE001 - nothing here may fail the read
+        logger.exception("could not read %d listed starts", len(uuids))
+        return
+    marks = _stop_marks({engine_id for _pk, engine_id, _created in starts})
+    if marks is _UNREADABLE:
+        return
+    _supersede({pk: marks[engine_id][1:] for pk, engine_id, created in starts
+                if engine_id in marks and created <= marks[engine_id][0]})
+
+
+class _PollRead(_Read):
+    """The engine's poll (pending): a keyset read in two lanes, as the
+    console's reads are (_Read, _lane_keys).
+
+    * ``p``, the ready stops: terminate, then stand-down, then pause (tiers),
+      each newest first, at most POLL_STOP_LIMIT a page. Every first page --
+      every poll the engine's client makes -- starts with them.
+    * ``q``, the ready starts, resumes and releases, newest first, at most
+      POLL_START_LIMIT a page, and only on a page that left no stop for the
+      next: when the stops are cut, by their row limit or the bytes, the
+      starts wait for the stops' last page. A page after the first reads only
+      the lanes its cursor continues; a reader that follows them polls the
+      first page again for any stop made ready since.
+
+    A start drafted at or before the newest stop ever made ready for its
+    engine is never delivered. That stop is the engine's FailsafeStopMark
+    (moved forward in the transaction that signs a stop into force, and kept
+    after the stop's window), or a ready stop on this page if newer. The
+    engine applies an answer in its order, so a resume or release older than
+    a stop, answered after it, would undo the stop that came after it: a
+    release signed, then a stand-down, both first heard in one poll, left
+    the engine running; and held back only while the stop was READY, it was
+    delivered once the stop was not. The poll reads one mark row per engine
+    on its page, by the primary key: its work does not grow with the starts
+    or with the history of stops. An engine with no mark, or whose mark
+    cannot be read, has every start held back (fail closed, for starts only:
+    no stop is ever held). The poll writes nothing for it; the state read
+    marks such starts superseded (_supersede_listed_starts). A start drafted
+    after the stop is answered.
+
+    Each part is one index read of at most its limit + 1 keys
+    (fsc_st_act_ct, fsc_eng_st_act_ct): the work is the limits, whatever the
+    number of ready commands."""
+
+    def __init__(self, request):
+        self.view = "pending"
+        self.by_token = False
+        engine_id = request.query_params.get("engine_id") or ""
+        self.qs = FailsafeCommand.objects.filter(status=_READY)
+        if engine_id:
+            self.qs = self.qs.filter(engine_id=engine_id)
+        self.lanes = [
+            ("p", [[{"action": action}] for action in POLL_STOP_ORDER], POLL_STOP_LIMIT),
+            ("q", [[{"action": action} for action in START_ACTIONS]], POLL_START_LIMIT),
+        ]
+        self.binding = hashlib.sha256(json.dumps(["pending", engine_id]).encode("utf-8")).hexdigest()[:16]
+        self.after = self._cursor(request.query_params.get(CURSOR_PARAM) or "")
+        #: The starts this read held back (pks).
+        self.held = set()
+
+    @staticmethod
+    def _held(start, marks, ready_stops):
+        """Whether ``start`` is held back: its engine's mark is missing or
+        unreadable, or the newer of its mark and the newest ready stop of its
+        engine on this page was drafted at or after it."""
+        if marks is _UNREADABLE or start.engine_id not in marks:
+            return True
+        newest = marks[start.engine_id][0]
+        ready = ready_stops.get(start.engine_id)
+        if ready is not None and ready > newest:
+            newest = ready
+        return start.created_at <= newest
+
+    def page(self, expiry, page):
+        """This page's rows by lane, and the next page's cursor or None. No
+        start is on a page that left a stop for the next one: the starts wait
+        for the stops' last page."""
+        rows, continuing, ready_stops = {}, {}, {}
+        for name, tiers, limit in self.lanes:
+            if self.after is not None and name not in self.after:
+                continue  # a lane a page before this one finished
+            after = None if self.after is None else self.after[name]
+            if name == "q" and "p" in continuing:
+                continuing[name] = after
+                continue
+            entries, more = _lane(self.qs, tiers, limit, after, expiry)
+            if name == "p":
+                for _key, command in entries:
+                    if command is None:
+                        continue
+                    seen = ready_stops.get(command.engine_id)
+                    if seen is None or command.created_at > seen:
+                        ready_stops[command.engine_id] = command.created_at
+            if name == "q":
+                starts = [command for _key, command in entries if command is not None]
+                marks = _stop_marks({command.engine_id for command in starts}) if starts else {}
+                self.held = {command.pk for command in starts if self._held(command, marks, ready_stops)}
+                entries = [(key, None if command is not None and command.pk in self.held else command)
+                           for key, command in entries]
+            rows[name], last, passed = page.take_lane(entries)
+            if more or not passed:
+                continuing[name] = after if last is None else last
+        return rows, (self.encode(continuing) if continuing else None)
