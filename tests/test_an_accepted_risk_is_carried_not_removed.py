@@ -424,6 +424,18 @@ _GOVERNING = [
     # kinds a chain outcome never takes (it reads them as unclassified).
     ("assurance.composition", "SIGNER_EVIDENCE", "mythos-signin-collector"),
     ("assurance.composition", "SIGNER_EVIDENCE", "mythos-grant-collector"),
+    # Identity slice 1: the customer-run collector's signers, and what decides whether
+    # an identity signer's record proves a hop -- the witness each signer is, the
+    # signers whose key must be bound to its issuers, how a bound key's record names a
+    # subject, and the longest token a session may stand on.
+    ("assurance.composition", "SIGNER_EVIDENCE", "customer-signin-collector"),
+    ("assurance.composition", "SIGNER_EVIDENCE", "customer-grant-collector"),
+    *[("assurance.identity_evidence", "SIGNER_WITNESS", key) for key in (
+        "mythos-signin-collector", "mythos-grant-collector", "customer-signin-collector", "customer-grant-collector",
+    )],
+    *[("assurance.identity_evidence", name, None) for name in (
+        "ISSUER_BOUND_SIGNERS", "SUBJECT_SCHEME", "MAX_TOKEN_LIFETIME_SECONDS",
+    )],
     ("assurance.composition", "IDENTITY_EVIDENCE_KINDS", None),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_authorization_check"),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_unclassified_signer"),

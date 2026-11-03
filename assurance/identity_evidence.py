@@ -11,24 +11,44 @@ nothing else, an evidence document the signed digest names, its own route and it
 own credential, and the hop proven only by what the document says, re-read against
 its signed digest on every read.
 
-THE KEYS. Each kind has a signer of its own, named for what signs it:
+THE KEYS. Each kind has a signer of its own for each party that may run a collector,
+named for who runs it and what it signs:
 
-- ``mythos-signin-collector`` signs ``authentication`` records: the Mythos-run
-  collector that reads the customer's identity provider's sign-in log;
-- ``mythos-grant-collector`` signs ``delegation`` records: the Mythos-run collector
-  that reads the identity provider's delegation grants and their revocations.
+- ``mythos-signin-collector`` signs ``authentication`` records and
+  ``mythos-grant-collector`` signs ``delegation`` records: the Mythos-run sources --
+  this backend's own emitter today (:mod:`assurance.identity_emitter`);
+- ``customer-signin-collector`` signs ``authentication`` records and
+  ``customer-grant-collector`` signs ``delegation`` records: a collector the customer
+  runs at its own relying party, the one place an identity provider's signature on an
+  ID token can be checked.
 
 :data:`assurance.composition.SIGNER_EVIDENCE` maps each to its kind and to nothing
 else. The keyring refuses one key filed under two engines (and so under two kinds),
 so a sign-in key never proves a delegation, and neither is an Achilles key.
 
-WHO WITNESSED IT. Per the owner's 5 Oct scope call, a Mythos-run collector's evidence
-is labelled Mythos-witnessed, with a customer-run or third-party collector planned.
-Every document carries ``witness``, and it must be the witness its signer is
-(:data:`SIGNER_WITNESS`): a Mythos key cannot sign a record that claims a customer
-witnessed it. What proves a hop names the witness. It does not weaken the proof,
-because no basis rule here reads Mythos-witnessed evidence as weaker: the observed
-effect that proves ``produces`` is Mythos-witnessed too (v6.0 spec, limitation 10).
+WHO WITNESSED IT. Every document carries ``witness``, and it must be the witness its
+signer is (:data:`SIGNER_WITNESS`): a Mythos-run signer's records are
+Mythos-witnessed (the owner's 5 Oct scope call), a customer-run collector's are
+customer-witnessed (the owner's 3 Nov call) -- so a Mythos key cannot sign a record
+that claims a customer witnessed it, nor a customer's key one that claims Mythos did.
+What proves a hop names the witness. It does not weaken the proof, because no basis
+rule here reads either witness as weaker (v6.0 spec, limitation 10).
+
+WHICH IDENTITY PROVIDER A KEY SPEAKS FOR. The chain rule matches a hop's refs to a
+record's and never compares issuers, so a key that may sign for any subject could
+prove a sign-in at an identity provider it never read. A keyring entry may therefore
+bind its key to the issuers it speaks for (``"issuers": [...]``,
+:class:`assurance.observed_outcomes.Keyring`), and then every identity ref a record
+signed by that key makes -- ``person`` and ``principal``; ``grant.principal.ref`` and
+``grant.agent`` -- must be ``oidc:<issuer>#<subject>`` (:data:`SUBJECT_SCHEME`) for an
+issuer in the binding, an authentication's being its own ``identity_provider.issuer``
+(protocol ``oidc``). The ``#`` is part of the prefix, so a key bound to
+``.../realms/a`` never speaks for ``.../realms/ab``. An issuer-bound signer
+(:data:`ISSUER_BOUND_SIGNERS`, the customer's) MUST be bound: unbound, or with a
+malformed binding, its key vouches for nothing. A Mythos-run signer may be: unbound,
+it reads exactly as before. The binding is checked at intake (:func:`examine`) and on
+every read (:func:`in_force`), so withdrawing an issuer from a key's binding unproves
+its records, as withdrawing the key does.
 
 THE DOCUMENTS.
 
@@ -83,7 +103,7 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -107,18 +127,43 @@ DELEGATION_SCHEMA = "mythos.delegation/v1"
 GRANT_SCHEMA = "mythos.delegation-grant/v1"
 SCHEMAS: dict[str, str] = {AUTHENTICATION: AUTHENTICATION_SCHEMA, DELEGATION: DELEGATION_SCHEMA}
 
-#: Who witnessed a record. Today only ``mythos`` signs; the others are named so a
-#: customer-run or third-party collector has a word waiting for it.
+#: Who witnessed a record: Mythos (a Mythos-run source) or the customer (a collector
+#: the customer runs); a third party is named so a third-party collector has a word
+#: waiting for it.
 WITNESS_MYTHOS = "mythos"
 WITNESS_CUSTOMER = "customer"
 WITNESS_THIRD_PARTY = "third_party"
 WITNESSES: frozenset[str] = frozenset({WITNESS_MYTHOS, WITNESS_CUSTOMER, WITNESS_THIRD_PARTY})
 #: Who each identity signer is, as a witness. A signer of an identity kind missing
-#: here witnesses nothing, and its records are refused.
+#: here witnesses nothing, and its records are refused. It decides whether a record
+#: proves a hop, so the policy pin moves with it (assurance.policy).
 SIGNER_WITNESS: dict[str, str] = {
     "mythos-signin-collector": WITNESS_MYTHOS,
     "mythos-grant-collector": WITNESS_MYTHOS,
+    "customer-signin-collector": WITNESS_CUSTOMER,
+    "customer-grant-collector": WITNESS_CUSTOMER,
 }
+#: The identity signers whose key must carry an issuer binding in the keyring: with
+#: none, or a malformed one, the key vouches for nothing. Pinned (assurance.policy).
+ISSUER_BOUND_SIGNERS: frozenset[str] = frozenset({"customer-signin-collector", "customer-grant-collector"})
+#: How a record signed by an issuer-bound key names a subject: this, formatted with an
+#: issuer of the key's binding, then a non-empty subject. The ``#`` belongs to the
+#: prefix (an OIDC issuer has no fragment), so one issuer's prefix is never the start
+#: of another's. Pinned (assurance.policy).
+SUBJECT_SCHEME = "oidc:{issuer}#"
+#: The protocol an authentication signed by an issuer-bound key names: the subjects
+#: are OpenID Connect ones.
+SUBJECT_PROTOCOL = "oidc"
+#: The longest-lived token a session record may stand on, in seconds: a day. With the
+#: chain's window (:data:`assurance.authority_chain.AUTHENTICATION_WINDOW_SECONDS`, a
+#: day) it caps the session one record may claim (``expires_at - authenticated_at``):
+#: a token issued at the far end of the window, at the longest lifetime any source
+#: issues -- the IdP collector refuses an ID token whose ``exp - iat`` passes a day
+#: (its ``max_token_lifetime``), Keycloak's SSO session maximum is 10 hours by
+#: default, an Entra ID token lives about an hour, and this backend's own sign-in
+#: session is its refresh token's lifetime, held under the cap by test. A session
+#: claimed past that is not a sign-in anyone issued. Pinned (assurance.policy).
+MAX_TOKEN_LIFETIME_SECONDS = 24 * 60 * 60
 
 AUTHENTICATION_FIELDS = frozenset(
     {
@@ -234,6 +279,12 @@ def validate_authentication(document: Any) -> dict[str, Any]:
     expires = _instant(document["expires_at"], "expires_at")
     if expires <= signed_in:
         raise EvidenceRefused("expires_at is after authenticated_at: a session ends after it opens")
+    longest = timedelta(seconds=rule.AUTHENTICATION_WINDOW_SECONDS + MAX_TOKEN_LIFETIME_SECONDS)
+    if expires - signed_in > longest:
+        raise EvidenceRefused(
+            f"expires_at is at most {int(longest.total_seconds())} s after authenticated_at: the chain's "
+            "window and the longest token lifetime, and no session one sign-in opens is longer"
+        )
     _witness(document)
     observed = _instant(document["observed_at"], "observed_at")
     if signed_in > observed + observed_outcomes.MAX_CLOCK_SKEW:
@@ -317,6 +368,61 @@ def replay_key(kind: str, document: dict) -> str:
     return f"delegation:{document['grant_digest']}:{revocation['state']}:{revocation['revoked_at'] or ''}"
 
 
+def subject_refs(kind: str, document: dict) -> tuple[tuple[str, str], ...]:
+    """Every identity ref a record makes, by field: who signed in and as whom, or who
+    delegated to which agent."""
+    if kind == AUTHENTICATION:
+        return (("person", document["person"]), ("principal", document["principal"]))
+    grant = document["grant"]
+    return (("grant.principal.ref", grant["principal"]["ref"]), ("grant.agent", grant["agent"]))
+
+
+def names_a_subject_of(ref: str, issuer: str) -> bool:
+    """Whether ``ref`` is ``oidc:<issuer>#<subject>``: the whole prefix, ``#``
+    included, then at least one character."""
+    prefix = SUBJECT_SCHEME.format(issuer=issuer)
+    return ref.startswith(prefix) and len(ref) > len(prefix)
+
+
+def binding_refusal(kind: str, engine: str, key_id: str | None, keyring, document: dict) -> str:
+    """Why the key ``key_id`` (``engine``'s) may not speak for the subjects
+    ``document`` names, by the issuer binding ``keyring`` gives it, or ``""``.
+
+    An issuer-bound signer's key with no binding speaks for nobody. Any key with a
+    binding speaks only for ``oidc:<issuer>#<subject>`` refs of the issuers it is
+    bound to -- an authentication's being its own provider's. A Mythos-run key with
+    no binding reads as before."""
+    issuers = observed_outcomes.issuers_of(keyring, key_id)
+    if issuers is None:
+        if engine in ISSUER_BOUND_SIGNERS:
+            return (
+                f"{engine!r}'s key is bound to no issuer in the keyring: an issuer-bound signer's key speaks "
+                "for no identity provider until its keyring entry names the issuers it speaks for"
+            )
+        return ""
+    bound = sorted(issuers)
+    if kind == AUTHENTICATION:
+        provider = document["identity_provider"]
+        if provider["issuer"] not in issuers:
+            return f"the record names issuer {provider['issuer']!r}; {engine!r}'s key speaks only for {bound}"
+        if provider["protocol"] != SUBJECT_PROTOCOL:
+            return (
+                f"the record names protocol {provider['protocol']!r}; a record by an issuer-bound key names "
+                f"{SUBJECT_PROTOCOL!r} subjects"
+            )
+        allowed = [provider["issuer"]]
+    else:
+        allowed = bound
+    for name, ref in subject_refs(kind, document):
+        if not any(names_a_subject_of(ref, issuer) for issuer in allowed):
+            return (
+                f"{name} {ref!r} is not {SUBJECT_SCHEME.format(issuer='<issuer>')}<subject> for an issuer "
+                f"{'the record names' if kind == AUTHENTICATION else 'its key speaks for'} ({allowed}): "
+                f"{engine!r}'s key proves only its own issuers' subjects"
+            )
+    return ""
+
+
 def principal_of(kind: str, document: dict) -> str:
     """The principal a record names -- the one a chain's hop names it by: the account
     signed in as, or the one that delegated."""
@@ -326,9 +432,10 @@ def principal_of(kind: str, document: dict) -> str:
 # ----------------------------------------------------------------------- intake
 
 
-def examine(kind: str, outcome: dict, document: Any) -> str:
-    """Why an AUTHENTIC ``outcome`` and the ``document`` posted beside it may not be
-    recorded as ``kind`` evidence, or ``""``."""
+def examine(kind: str, outcome: dict, document: Any, *, key_id: str | None, keyring) -> str:
+    """Why an AUTHENTIC ``outcome`` -- verified as ``key_id`` against ``keyring`` --
+    and the ``document`` posted beside it may not be recorded as ``kind`` evidence, or
+    ``""``."""
     engine = outcome["observer"]["engine"]
     mapped = composition.signer_evidence(engine)
     if mapped != kind:
@@ -358,7 +465,7 @@ def examine(kind: str, outcome: dict, document: Any) -> str:
             f"the evidence says it was witnessed by {document['witness']!r}; its signer {engine!r} is "
             f"{witness or 'no witness this platform names'}"
         )
-    return ""
+    return binding_refusal(kind, engine, key_id, keyring, document)
 
 
 @dataclass(frozen=True)
@@ -403,7 +510,7 @@ def ingest(deployment, kind: str, envelope: Any, document: Any, *, keyring=None,
     outcome, key_id, why = _verify(envelope, deployment, keyring, now, kind, document)
     if outcome is None:
         return None, Refusal(why)
-    why = examine(kind, outcome, document)
+    why = examine(kind, outcome, document, key_id=key_id, keyring=keyring)
     if why:
         return None, Refusal(why)
     outcome_id = outcome["outcome_id"]
@@ -493,6 +600,9 @@ def in_force(row, keyring, deployment_uuid: str) -> dict | None:
         oc.evidence_digest_of(document) != row.evidence_digest
         or document["deployment"] != deployment_uuid
         or document["witness"] != SIGNER_WITNESS.get(engine)
+        # The key's issuer binding as the keyring states it NOW: an issuer withdrawn
+        # from the binding unproves what the key signed for it.
+        or binding_refusal(row.kind, engine, verdict.key_id, keyring, document)
     ):
         return None
     return document
@@ -701,9 +811,13 @@ __all__ = [
     "DELEGATION",
     "DELEGATION_SCHEMA",
     "DELEGATION_SERVICE",
+    "ISSUER_BOUND_SIGNERS",
+    "MAX_TOKEN_LIFETIME_SECONDS",
     "SIGNER_WITNESS",
+    "SUBJECT_SCHEME",
     "BodyRefused",
     "EvidenceRefused",
+    "binding_refusal",
     "examine",
     "grant_digest",
     "in_force",

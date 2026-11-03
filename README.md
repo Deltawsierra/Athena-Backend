@@ -412,15 +412,19 @@ Two more signers sign records that are not chain outcomes, each on its own route
 with its own service credential (`assurance/identity_evidence.py`), and each proving
 one hop of an authority chain that starts at a person:
 
-- `authentication`: signed by the sign-in collector (observer
-  `mythos-signin-collector`) with a `mythos.authentication/v1` document -- a person
+- `authentication`: signed by a sign-in collector (observer
+  `mythos-signin-collector`, or `customer-signin-collector`) with a
+  `mythos.authentication/v1` document -- a person
   signed in as a principal, at an instant, through an identity provider. Posted to
   `POST /api/assurance/deployments/<uuid>/authentications/` with
   `X-Authentication-Evidence-Token` (`ASSURANCE_AUTHENTICATION_EVIDENCE_TOKEN` /
   `_USER`). It proves `authenticated_as` when the sign-in falls inside the chain's
-  window: at most a day before the effect, not after it, in a session still open.
-- `delegation`: signed by the grant collector (observer `mythos-grant-collector`)
-  with a `mythos.delegation/v1` document -- a principal delegated an agent a scope
+  window: at most a day before the effect, not after it, in a session still open. No
+  record may claim a session longer than two days (`expires_at - authenticated_at`:
+  the day of the window plus `MAX_TOKEN_LIFETIME_SECONDS`, a day, the longest token
+  any source issues); a longer one is refused.
+- `delegation`: signed by a grant collector (observer `mythos-grant-collector`, or
+  `customer-grant-collector`) with a `mythos.delegation/v1` document -- a principal delegated an agent a scope
   for a window, and whether the grant is revoked. Posted to
   `POST /api/assurance/deployments/<uuid>/delegations/` with
   `X-Delegation-Evidence-Token` (`ASSURANCE_DELEGATION_EVIDENCE_TOKEN` / `_USER`). It
@@ -428,8 +432,37 @@ one hop of an authority chain that starts at a person:
   the effect, and the grant was not revoked before the effect. A revocation is never
   refused for its age or order.
 
-Both collectors are Mythos-run today (`witness: mythos`, the owner's 5 Oct scope
-call); a customer-run or third-party collector is planned.
+Who witnessed a record is part of it, and fixed by who signed it
+(`SIGNER_WITNESS`): the `mythos-*` signers are the Mythos-run sources -- today this
+backend's own emitter, below -- and their records say `witness: mythos` (the owner's
+5 Oct scope call); the `customer-*` signers are a collector the customer runs at its
+own relying party, where the identity provider's signature on an ID token can be
+checked, and their records say `witness: customer` -- customer-witnessed (the owner's
+3 Nov call). Neither can sign a record claiming the other witnessed it. A
+third-party collector is planned.
+
+A keyring entry may bind its key to the identity providers it speaks for:
+
+```json
+[{"engine": "customer-signin-collector", "public_key": "<base64 raw Ed25519>",
+  "issuers": ["https://kc.example.com/realms/acme"]}]
+```
+
+A bound key's records name only `oidc:<issuer>#<subject>` refs of its own issuers
+(`person` and `principal`; a grant's principal and agent), a sign-in's being its own
+`identity_provider.issuer`, with protocol `oidc`. The `#` belongs to the prefix, so a
+key bound to `.../realms/a` never speaks for `.../realms/ab`. A `customer-*` key must
+be bound: with no `issuers`, or a malformed one (not a non-empty list of distinct
+issuers, or one holding `#`, whitespace or a control character), it vouches for
+nothing -- a malformed binding leaves that one key out of the keyring, logged at
+ERROR, and never makes the keyring unavailable to anything else. A `mythos-*` key
+with no binding reads exactly as before (the load logs a WARNING naming it); bound,
+it is held to its binding. The binding is checked when a record is taken in and on
+every read, so withdrawing an issuer from a key's binding unproves what the key
+signed for it, and the stored decision is recomputed at its next read (the binding
+is part of the keyring's fingerprint). The witness table, the issuer-bound signers,
+the subject scheme and the token lifetime are in the policy pin
+(`assurance/policy.py`).
 
 This backend emits both kinds itself (authority chain short 2, the owner's decision
 10; `assurance/identity_emitter.py`): until an identity provider is added as a second
