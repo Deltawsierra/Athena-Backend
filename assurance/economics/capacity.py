@@ -10,20 +10,24 @@ section 28 threat-model audit, S1).
 Every route that runs a Monte Carlo now takes a SLOT before it runs, and registers
 with ONE line: ``@capacity.capped`` on its handler (:func:`capped`).
 
-- **Across worker processes.** A slot is an exclusive ``flock`` on one small file in
-  :func:`slot_directory`, which every worker on the host shares. The kernel releases
-  a flock when the last descriptor of its open file closes, so a worker that dies by
-  any means (SIGKILL, the OOM killer, gunicorn's timeout) gives its slots back at
-  once: a slot cannot leak, and no lease, expiry or sweeper is needed. A database
-  lease was the alternative; it leaks a dead worker's slot until it expires, and it
-  would put a database read in front of the cap. The cap is per host, which is what
-  it protects: the host's pool of workers. Where there is no ``fcntl`` (Windows)
-  nothing can be locked and no slot is ever granted: every run is refused with the
-  same 503 (``unreadable``), never run uncapped, and that refusal cannot itself
-  raise (a second ``import fcntl`` inside its handler used to turn it into a 500).
-- **It never waits.** Every lock is taken with ``LOCK_NB``. When no slot is free the
-  request is answered AT ONCE: 503, ``Retry-After``, code ``economics_capacity``
-  (:func:`at_capacity`); nothing runs and nothing is recorded. Nothing queues.
+- **Across worker processes.** A slot is an exclusive lock on one small file in
+  :func:`slot_directory`, which every worker on the host shares, taken with the
+  platform's own lock (:func:`lock_kind`): ``flock`` on POSIX, and on Windows
+  ``msvcrt.locking`` on byte 0 of the file (``LockFile`` underneath). The operating
+  system releases either when the file's handle closes or its process dies, so a
+  worker that dies by any means (SIGKILL or ``TerminateProcess``, the OOM killer,
+  gunicorn's timeout) gives its slots back: a slot cannot leak, and no lease, expiry
+  or sweeper is needed. A database lease was the alternative; it leaks a dead
+  worker's slot until it expires, and it would put a database read in front of the
+  cap. The cap is per host, which is what it protects: the host's pool of workers.
+  Where neither lock exists nothing can be locked and no slot is ever granted: every
+  run is refused with the same 503 (``unreadable``), never run uncapped, and that
+  refusal cannot itself raise.
+- **It never waits.** Every lock is taken without waiting: ``LOCK_NB`` on POSIX,
+  ``LK_NBLCK`` (one attempt) on Windows, never ``LK_LOCK``, which retries for 10 s.
+  When no slot is free the request is answered AT ONCE: 503, ``Retry-After``, code
+  ``economics_capacity`` (:func:`at_capacity`); nothing runs and nothing is recorded.
+  Nothing queues.
 - **Two caps.** The global cap (:func:`global_cap`): ``ATHENA_ECONOMICS_RUN_CAP``
   where it is set, else ``max(1, WEB_CONCURRENCY - 2)`` -- ``WEB_CONCURRENCY`` is
   gunicorn's own variable for its worker count -- so at least two workers stay free
@@ -33,7 +37,7 @@ with ONE line: ``@capacity.capped`` on its handler (:func:`capped`).
   :mod:`assurance.models`).
 - **Given back on every exit.** The slots are released in a ``finally`` around the
   handler: its answer, a refusal, an exception, and a ``SystemExit`` (gunicorn's abort
-  of a timed-out worker); the process's death releases them in the kernel. A client
+  of a timed-out worker); the process's death releases them in the operating system. A client
   that disconnects is the same: the handler runs to its end (bounded by its deadline),
   and its ``finally`` releases.
 - **Off every stop.** Only a handler decorated :func:`capped` takes a slot, and no
@@ -47,6 +51,7 @@ The module imports nothing from Django at load, so a probe can load it on its ow
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import hashlib
 import os
@@ -54,8 +59,12 @@ import tempfile
 
 try:
     import fcntl
-except ImportError:  # Windows has no fcntl: no slot can be locked, so none is ever granted (below)
+except ImportError:  # Windows has no fcntl: its slots are locked with msvcrt (below)
     fcntl = None
+try:
+    import msvcrt
+except ImportError:  # every host but Windows: its slots are locked with fcntl
+    msvcrt = None
 
 #: The code a request is answered with when no slot is free.
 CODE = "economics_capacity"
@@ -72,6 +81,10 @@ DEFAULT_SLOT_DIRECTORY = os.path.join(tempfile.gettempdir(), "athena-economics-s
 
 #: Every handler :func:`capped` registered, by ``module.qualname``.
 CAPPED: set[str] = set()
+#: What Windows' one-attempt lock (``LK_NBLCK``) raises when another handle holds the
+#: byte: ``EACCES`` ("locking violation"). ``EDEADLOCK`` is what the waiting form
+#: answers after its retries; it is never used here, and would mean the same.
+_HELD_ELSEWHERE = frozenset({errno.EACCES, errno.EDEADLK})
 
 
 def _whole(text: str | None) -> int | None:
@@ -112,43 +125,89 @@ def slot_directory() -> str:
     return os.environ.get("ATHENA_ECONOMICS_SLOT_DIR") or DEFAULT_SLOT_DIRECTORY
 
 
+def lock_kind() -> str | None:
+    """How this host locks a slot: ``"flock"`` (POSIX), ``"msvcrt"`` (Windows), or
+    None where it has neither, and so can lock nothing: every run is then refused
+    (``"unreadable"``), never run uncapped."""
+    if fcntl is not None:
+        return "flock"
+    if msvcrt is not None:
+        return "msvcrt"
+    return None
+
+
+def _try_lock(descriptor: int, kind: str) -> bool:
+    """Lock the open slot file exclusively, WITHOUT WAITING: True when this call took
+    it, False when another handle holds it. Any other failure raises, and
+    :func:`acquire` refuses the run (``"unreadable"``)."""
+    if kind == "flock":
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+    # Windows: byte 0, one attempt (LK_NBLCK). The lock is per handle, so a second
+    # handle on the same file -- another worker's, or this process's own -- is refused,
+    # as a second open file is under flock. A byte past the end of the file may be
+    # locked, so the file stays empty.
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+    except OSError as error:
+        if error.errno in _HELD_ELSEWHERE:
+            return False
+        raise
+    return True
+
+
+def _unlock(descriptor: int, kind: str | None) -> None:
+    """Give one slot's lock back. It never raises: closing the handle releases the
+    lock in any case."""
+    with contextlib.suppress(OSError):
+        if kind == "flock":
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        elif kind == "msvcrt":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+
 class Slots:
     """The slots one run holds: released together, once."""
 
     def __init__(self, descriptors: list[int]):
         self._descriptors = descriptors
+        self._kind = lock_kind()
 
     def release(self) -> None:
         descriptors, self._descriptors = self._descriptors, []
         for descriptor in reversed(descriptors):
-            # LOCK_UN first: a child forked meanwhile shares the open file, and must not
-            # keep the slot. Closing the last descriptor releases it in any case. Without
-            # fcntl no slot was ever taken, so there is nothing to unlock: only to close.
-            if fcntl is not None:
-                with contextlib.suppress(OSError):
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            # Unlock first: a child forked meanwhile shares the open file, and must not
+            # keep the slot. Closing the last descriptor releases it in any case. With no
+            # lock at all no slot was ever taken, so there is nothing to unlock: only to
+            # close.
+            _unlock(descriptor, self._kind)
             with contextlib.suppress(OSError):
                 os.close(descriptor)
 
 
 def _take_one(directory: str, prefix: str, count: int) -> int | None:
     """An exclusive lock on the first free one of ``count`` slot files, WITHOUT
-    WAITING, or None when every one is held. Raises ``ImportError`` where there is no
-    ``fcntl`` (Windows): :func:`acquire` answers that as ``"unreadable"``."""
-    if fcntl is None:
-        raise ImportError("fcntl is not available on this platform: no run slot can be locked")
+    WAITING, or None when every one is held. Raises ``ImportError`` where the host has
+    no lock (:func:`lock_kind`): :func:`acquire` answers that as ``"unreadable"``."""
+    kind = lock_kind()
+    if kind is None:
+        raise ImportError("neither fcntl nor msvcrt is available on this platform: no run slot can be locked")
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     for index in range(count):
         descriptor = os.open(os.path.join(directory, f"{prefix}-{index}.lock"), flags, 0o600)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(descriptor)
-            continue
+            taken = _try_lock(descriptor, kind)
         except BaseException:
             os.close(descriptor)
             raise
-        return descriptor
+        if taken:
+            return descriptor
+        os.close(descriptor)
     return None
 
 
@@ -160,10 +219,11 @@ def acquire(tenant: str) -> tuple[Slots | None, str]:
     """``(slots, "")`` when one of the tenant's slots and one of the host's are free,
     both taken without waiting; else ``(None, why)``. ``why`` is ``"tenant"`` (the
     tenant's every slot is held), ``"host"`` (the host's every slot is held) or
-    ``"unreadable"`` (the slot files cannot be opened: refused, never run uncapped).
-    Where there is no ``fcntl`` (Windows) nothing can be locked, so every run is
-    ``"unreadable"``: the honest answer is the 503, never a run no cap counts."""
-    if fcntl is None:
+    ``"unreadable"`` (the slot files cannot be opened or locked: refused, never run
+    uncapped). Where the host has no lock at all (:func:`lock_kind` is None) nothing
+    can be locked, so every run is ``"unreadable"``: the honest answer is the 503,
+    never a run no cap counts."""
+    if lock_kind() is None:
         return None, "unreadable"
     held: list[int] = []
     try:
@@ -252,6 +312,7 @@ __all__ = [
     "at_capacity",
     "capped",
     "global_cap",
+    "lock_kind",
     "slot_directory",
     "tenant_cap",
     "workers",
