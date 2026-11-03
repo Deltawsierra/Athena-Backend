@@ -2127,6 +2127,21 @@ rewrite the severity a verdict is read from).
 `tests/test_no_target_credential_is_ever_shown.py` plants a key in each of those four
 places of a standard scan and of an LLM scan and walks every shown site.
 
+The defender gateway (`audit/middleware.py`) is sent a launch's target the same way.
+It asks the engine's `/defend` about every request that is not a stop, with the
+request's path, method, user agent, query string and body. The body was redacted by
+key alone, and `url` names no secret, so a launch's target went to the engine as it was
+typed. On `POST /api/pentest/scan/` (`url`) and `POST /api/pentest/llm-scan/`
+(`base_url`), the target's field now reaches the engine as `target_shown` shows it, in
+the query string too, in JSON, a form or multipart, at any depth and in every
+duplicate. The target the view reads is also withheld wherever else the launch says it
+(`target_said`). A launch body the gateway cannot read as a form or JSON, or one longer
+than it reads, has every URL in it shown that way instead. The scheme, host, port and
+path stay as they were, so the engine scores the same structure; a target that carries
+no credential reaches it unchanged. The caller's `Authorization` and `Cookie` headers
+were never sent and still are not. `tests/test_the_defender_is_sent_no_target_credential.py`
+reads what a stub engine on loopback was sent off the wire, and checks that no stop is sent.
+
 **The hybrid (the athena-dashboard).** This backend is the record and the governance
 gate: the target's bounds, consent, the engagement's authority and window, the preflight
 gate, the launch under the operator key with the scan's own launch key, and the
