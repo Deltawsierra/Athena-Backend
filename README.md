@@ -1560,7 +1560,12 @@ answers in a shape nothing can read. They used to proceed under the default
 `observe`. Observe still lets a `blocked` verdict proceed and records it on the scan;
 `enforce` refuses it. `tests/test_no_effect_launches_without_the_preflight.py` says,
 for every effect route, whether it launches, and fails on a launch call the
-preflight does not come before. A defender
+preflight does not come before. `tests/test_no_launch_path_skips_the_preflight.py`
+reads all of this backend's code, routed or not, and fails on any place that can
+start a scan (a launch call, held or named in a string, or the engine's launch route)
+unless the preflight is asked first in the same function, or the place is a private
+helper reached only from code that asks it. An unrouted LLM scan view that asked
+nothing (`pentest/views_llm.py`) was deleted for that reason. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
 
@@ -1574,7 +1579,10 @@ outage that is not its own.
 its own and names each one, with the reason:
 
 - **the database**: `SELECT 1`, and the row read back must be the one asked for;
-- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`;
+- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`. It is
+  asked under its own short timeout (0.5 s to connect, 1 s to read), never the long
+  one a scan is given, so a hung engine reads `unknown` well inside the bound and
+  holds no thread;
 - **Mythos-Core**: the modules this backend loads import, and its word for unknown
   is still `unknown`.
 
@@ -1584,6 +1592,11 @@ bound, or nothing configured to ask). The answer waits at most 2 s in all. A che
 still running then reads `unknown`, and the next probe waits on that same check, so
 a hung dependency holds one thread however often the probe polls. Every reason is
 named by the exception's type, never its message.
+
+A finished check's reading is served again for 1 s, counted from when the check was
+asked, so a flood of probes costs at most one check per dependency per second. The
+cache never serves an `ok` older than that: a reading that ages out while the answer
+waits on another check is asked again. Each reading carries `age_seconds`.
 
 Every dependency `ok` answers 200 with `status: "ok"`. Anything else answers 503,
 in the evidence-read shape above (`status: "unknown"`, `dependency` naming the first
