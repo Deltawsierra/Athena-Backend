@@ -25,6 +25,7 @@ from django.db import models, router
 from django.db.models import Q
 from django.utils import timezone
 from mythos_core import evidence as core_evidence
+from mythos_core import status as core_status
 
 from . import composition
 from .append_only import HistoryForeignKey, HistoryQuerySet, insert_only
@@ -4375,3 +4376,103 @@ class AchillesScanRefusal(models.Model):
 
     def __str__(self) -> str:
         return f"refused Achilles scan result ({self.code}) for deployment {self.deployment_id}"
+
+
+# ---------------------------------------------------------------------------
+# The recovery record (SPINE SP-1): one per incident, each step a row
+# ---------------------------------------------------------------------------
+
+
+class RecoveryRecordRewriteRefused(ValueError):
+    """A recorded recovery step was asked to change or go away. The record is
+    append-only: the next step of a recovery is a NEW row, and the one before stays."""
+
+
+class RecoveryRecordQuerySet(HistoryQuerySet):
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded step, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
+
+    refused = RecoveryRecordRewriteRefused
+    rewritten = "A recorded recovery step is never rewritten; the next step is a new record."
+    deleted = "A recorded recovery step is never deleted."
+
+
+class RecoveryRecord(models.Model):
+    """One step of an incident's recovery (SPINE SP-1, :mod:`assurance.recovery_record`).
+
+    The incident is a :class:`Finding`; its recovery record is its rows, oldest first,
+    the latest current. Each row is a ``mythos_core.status.Recovery`` (its ``uuid`` is
+    the Recovery's ``ref``) and what it rests on: ``links`` (the evidence, the decision
+    in force, the Action Gate permits, the reconciliation receipts, the repair contract
+    and the closure evidence, each resolved in the finding's own deployment), the
+    coverage manifest it was recorded with (``mythos_core.coverage``), the owner's
+    acceptance, and its residual uncertainty with the sources of each item.
+
+    THE STATE IS DERIVED, never typed in: ``state``, ``reopens``, ``conditions`` (each
+    with its witness), ``gaps``, ``restrictions``, ``release`` and
+    ``residual_uncertainty`` are what :func:`assurance.recovery_record.derive` computes
+    from the row's own ``links``, ``coverage`` and acceptance and the step before it,
+    and ``save`` refuses a row that says anything else. A declared coverage gap never
+    yields a recovered state, and its record's release reads ``AUDIT_INCOMPLETE``.
+
+    APPEND-ONLY: the model refuses an update or a delete of a recorded step, or a fresh
+    instance carrying its key, and its queryset a bulk one or an upsert. Its keys have
+    no reverse accessor. Two writes still reach a recorded row, both through the base
+    manager, which stays Django's plain one: the finding's cascade removes it, and
+    removing an account nulls ``accepted_by`` or ``recorded_by`` -- a stop, never held
+    back by this record.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    # The Recovery's ref: what a later step names when it reopens this one.
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    # No reverse accessor: nothing reads one, and one would move a recorded step. The
+    # deployment is the finding's, so no second column can disagree with it.
+    finding = models.ForeignKey(Finding, on_delete=models.CASCADE, related_name="+")
+    version = models.PositiveIntegerField()
+    state = models.CharField(max_length=32, choices=[(s, s) for s in core_status.RECOVERY_STATES])
+    reopens = models.CharField(max_length=36, blank=True, default="")
+    conditions = models.JSONField(default=list)
+    gaps = models.JSONField(default=list)
+    restrictions = models.JSONField(default=list)
+    links = models.JSONField(default=dict)
+    coverage = models.JSONField(default=dict)
+    release = models.CharField(max_length=16, choices=[(s, s) for s in core_status.RELEASE_STATES])
+    residual_uncertainty = models.JSONField(default=list)
+    # The deployment owner's acceptance, and when it ends. SET_NULL, so removing an
+    # account is never held back by a step it accepted or recorded.
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    accepted_until = models.DateTimeField(null=True, blank=True)
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    objects = RecoveryRecordQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["finding_id", "version"]
+        constraints = [
+            models.UniqueConstraint(fields=["finding", "version"], name="uq_recovery_record_finding_version"),
+            models.CheckConstraint(condition=models.Q(version__gte=1), name="recovery_record_version_from_one"),
+        ]
+
+    def save(self, *args, **kwargs):
+        from .recovery_record import check_derived
+
+        refusal = RecoveryRecordRewriteRefused(
+            "A recorded recovery step is history and is never rewritten; record the next step as a new row."
+        )
+        # An INSERT and nothing else (assurance.append_only), and only of what the
+        # derivation says: a typed-in state, condition or release is refused.
+        kwargs = insert_only(self, kwargs, refusal)
+        check_derived(self)
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise RecoveryRecordRewriteRefused("A recorded recovery step is history and is never deleted.")
+
+    def __str__(self) -> str:
+        return f"recovery step {self.version} ({self.state}) of finding {self.finding_id}"

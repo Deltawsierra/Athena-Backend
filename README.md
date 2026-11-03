@@ -895,6 +895,24 @@ starts and stops nothing, and it never launches (no `POST /api/scan`, no
 `POST /api/remediation/retest`). Nothing a Stop reads is touched: the write is one row of
 the check's own table, never a `PentestScan`, an `Engagement` or a `Finding`.
 
+## The recovery record (SPINE SP-1)
+
+One record per incident -- a finding -- of how far its recovery has got
+(`RecoveryRecord`, migration `assurance.0086`, `assurance/recovery_record.py`). Each row
+is one step, a `mythos_core.status.Recovery`: one of the seven recovery states with the
+conditions that support it, each naming its witness. The state is **derived, never typed
+in**, from what the step rests on, each link resolved in the finding's own deployment and
+refused otherwise: the evidence, the deployment's latest decision, the Action Gate permits
+(signed, verified now, permitted), the reconciliation receipts of those permits, the
+current repair contract, the closure evidence the gate would close on, and the
+deployment owner's acceptance (only `Deployment.owner` accepts; none without one). Each
+step is the furthest state S1 lets follow the last; a step that moves nothing is refused.
+**A declared coverage gap** (`mythos_core.coverage`) never yields `restored_with_restrictions`
+or `recovery_accepted`: the step names the gap and reads `AUDIT_INCOMPLETE`. Only an
+accepted recovery reads `PASS`. Residual uncertainty is kept with the source of each item.
+Append-only, as every history is (`assurance/append_only.py`); on no stop path, and read
+by no decision. Its routes (the history read and the owner's acceptance) follow in SP-1c.
+
 ## Economic Exposure: the customer parameter set
 
 Economic Exposure estimates what a finding could cost, as a range with its sources
@@ -1562,7 +1580,7 @@ through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
 Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
 pin, from the install pip recorded; otherwise it stops the run with one error naming each
 failed check and what to do. Each run ends with its verdict, for example
-`pin guard <sha>: mythos-core pinned 6447fd0, imported 6447fd0 from <path>: OK`. Its one
+`pin guard <sha>: mythos-core pinned c33571b, imported c33571b from <path>: OK`. Its one
 switch is described under "The shared pin guard" in Mythos-Core's README.
 `ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
 run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.
