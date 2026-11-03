@@ -122,7 +122,7 @@ from .workflow_chains import (
 )
 from .ripple import assess_ripple
 from .remediation import ContractRequired, IllegalTransition, apply_transition, assign
-from . import repair_contract
+from . import recovery_record, repair_contract
 from . import authority_chain_records
 from . import closure_evidence as evidence_route
 from . import closure_forward
@@ -182,6 +182,38 @@ def _require_admin(request) -> None:
     open — a non-admin gets a clean 403, not a silent success."""
     if not _is_admin(request.user):
         raise PermissionDenied("Changing the assurance record requires an admin role.")
+
+
+#: The answer to each recovery-step refusal that is not the body's fault (400): a step
+#: that moves nothing or may not follow the last is a conflict with the record as it
+#: stands; an acceptance by someone who may not give it is forbidden.
+_RECOVERY_REFUSED = {
+    **dict.fromkeys(
+        ("nothing_moved", "terminal", "raced", "transition_not_allowed", "reopen_must_name_earlier", "same_record"),
+        status.HTTP_409_CONFLICT,
+    ),
+    **dict.fromkeys(("not_the_owner", "no_owner"), status.HTTP_403_FORBIDDEN),
+}
+
+
+def _acceptance_end(value):
+    """When an owner's acceptance of a recovery ends: ``{"until": <ISO 8601 instant with
+    its offset>}`` and nothing else. In particular it names no person."""
+    from django.utils.dateparse import parse_datetime
+
+    refused = ValidationError(
+        {"accept": 'is {"until": <an ISO 8601 instant with its offset>} and names no one: the acceptance is the '
+                   "signed-in person's"}
+    )
+    if not isinstance(value, dict) or set(value) != {"until"} or not isinstance(value["until"], str):
+        raise refused
+    try:
+        until = parse_datetime(value["until"])
+    except ValueError:
+        raise refused from None
+    if until is None or until.tzinfo is None:
+        raise refused
+    return until
 
 
 def _rows_from_body(data, *, key: str, single_allowed: bool):
@@ -2988,6 +3020,25 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         offset = self._history_offset(request)
         return Response(history_reads.decision_history(deployment, offset=offset, page_size=self.HISTORY_PAGE_SIZE))
 
+    #: How many incidents one recovery-records read returns, the rest from ``?offset=``:
+    #: each carries every step of its recovery record.
+    RECOVERY_PAGE_SIZE = 50
+
+    @action(detail=True, methods=["get"], url_path="recovery-records", url_name="recovery-records")
+    def recovery_records_view(self, request, uuid=None):
+        """The deployment's recovery records (SPINE SP-1, :mod:`assurance.recovery_record`):
+        each incident -- a finding with a recovery record -- with every step oldest first,
+        each step's conditions with their witnesses, its gaps, restrictions and release,
+        and its residual uncertainty with the sources of each item. The deployment is
+        read through ``get_object()``, the per-user queryset, so a deployment the person
+        cannot read is answered as every other deployment read answers it. ``?offset=``
+        pages the incidents. A read: it records, derives and repairs nothing."""
+        deployment = self.get_object()
+        offset = self._history_offset(request)
+        return Response(
+            recovery_record.deployment_records(deployment, offset=offset, page_size=self.RECOVERY_PAGE_SIZE)
+        )
+
     @action(detail=True, methods=["get"], url_path="coverage-manifest")
     def coverage_manifest_view(self, request, uuid=None):
         """What was assessed, and what was not (Phase 2 item 1).
@@ -3782,6 +3833,38 @@ class FindingViewSet(
                 "current": current,
                 "contracts": [repair_contract.served(c, current_version=current) for c in contracts],
             }
+        )
+
+    @action(detail=True, methods=["get", "post"], url_path="recovery-record", url_name="recovery-record")
+    def recovery_record_view(self, request, uuid=None):
+        """The finding's recovery record (SPINE SP-1, :mod:`assurance.recovery_record`).
+
+        ``GET`` serves every step, oldest first, to any operator who can see the finding.
+        ``POST`` records the next steps -- admin-only, as every write to the assurance
+        record is (:func:`_require_admin`), and attributed to the caller. Body: what the
+        step rests on (``evidence``, ``permits``, ``receipts``, ``coverage``, ``gaps``,
+        ``restrictions``, ``residual_uncertainty``; one left out is carried from the step
+        before), and optionally ``accept: {"until": <instant>}``: the acceptance of the
+        signed-in person, who must be the deployment's owner. It names no one: who
+        accepts is the authenticated request user, never a field. The state, its
+        conditions and its release are derived, and a body naming them is refused. A
+        step that moves nothing -- links changed and no state with them -- is a 409."""
+        finding = self.get_object()
+        if request.method != "POST":
+            return Response(recovery_record.finding_record(finding))
+        _require_admin(request)
+        data = request.data
+        if not isinstance(data, dict):
+            raise ValidationError({"body": "must be an object"})
+        until = _acceptance_end(data["accept"]) if "accept" in data else None
+        body = {key: value for key, value in data.items() if key != "accept"}
+        try:
+            steps = recovery_record.record(finding, by=request.user, body=body, accept_until=until)
+        except recovery_record.RecoveryRefused as exc:
+            return Response({"code": exc.code, "detail": str(exc)}, status=_RECOVERY_REFUSED.get(exc.code, 400))
+        return Response(
+            {"finding": str(finding.uuid), "steps": [recovery_record.served(step) for step in steps]},
+            status=status.HTTP_201_CREATED,
         )
 
     @action(detail=True, methods=["post"], url_path="remediation/assign")

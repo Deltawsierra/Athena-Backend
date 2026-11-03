@@ -911,7 +911,18 @@ step is the furthest state S1 lets follow the last; a step that moves nothing is
 or `recovery_accepted`: the step names the gap and reads `AUDIT_INCOMPLETE`. Only an
 accepted recovery reads `PASS`. Residual uncertainty is kept with the source of each item.
 Append-only, as every history is (`assurance/append_only.py`); on no stop path, and read
-by no decision. Its routes (the history read and the owner's acceptance) follow in SP-1c.
+by no decision.
+
+`GET /api/assurance/deployments/<uuid>/recovery-records/` serves the deployment's incidents
+(`?offset=` pages them, 50 at a time), each with every step oldest first: its conditions
+and their witnesses, gaps, restrictions, release, coverage and residual uncertainty with
+its sources. `GET /api/assurance/findings/<uuid>/recovery-record/` serves one incident's.
+Both read through the per-user queryset, so a deployment or finding the person cannot read
+is a 404, exactly as one that does not exist. `POST` on the finding's route records the
+next steps (admin only, attributed to the caller); `"accept": {"until": <instant>}` is the
+signed-in person's acceptance, refused (403) unless they are the deployment's owner, and
+names no one. A refused link or field is a 400; a step that changes links and no state,
+or may not follow the last, is a 409 with the reason.
 
 ## Economic Exposure: the customer parameter set
 

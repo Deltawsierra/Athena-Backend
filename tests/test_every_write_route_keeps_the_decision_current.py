@@ -745,6 +745,13 @@ def _repair_contract():
     )
 
 
+def _recovery_record():
+    dep = _scanned()
+    finding = _finding(dep)
+    recompute_decision(dep)
+    return dep, lambda c: c.post(f"/api/assurance/findings/{finding.uuid}/recovery-record/", {}, format="json")
+
+
 def _remediation_assign():
     dep = _scanned()
     finding = _finding(dep)
@@ -1109,6 +1116,11 @@ CANNOT_MOVE = {
         "agrees what a repair must eliminate and preserve before it is worked on; the "
         "decision reads neither the contract nor the remediation workflow it gates",
         _repair_contract,
+    ),
+    ("FindingViewSet", "recovery_record_view", "post"): (
+        "records the steps of a finding's recovery in their own append-only table; the decision "
+        "reads no recovery record, and the step reads the finding, never writes it",
+        _recovery_record,
     ),
     ("FindingViewSet", "remediation_assign", "post"): (
         "who does the remediation work, not whether the risk is live",

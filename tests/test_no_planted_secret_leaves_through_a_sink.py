@@ -1816,6 +1816,9 @@ ROUTES: dict[str, str] = {
     "finding-remediation-assign": _DOCS + "assigns a finding's remediation; answers it, as finding-remediation reads it",
     "finding-remediation-transition": _DOCS + "moves a remediation; answers it, as finding-remediation reads it",
     "finding-repair-contracts": _READ,
+    # A finding's recovery record (SPINE SP-1): its steps, as recorded; the write answers
+    # the steps it recorded, as the read serves them.
+    "finding-recovery-record": _READ,
     # A retest check (assurance.retest_checks): the collect answers the check it recorded
     # -- the engine's detail, the target's login withheld -- and the finding's unchanged
     # closure standing; the list answers every check of the finding.
@@ -1843,6 +1846,8 @@ _DEPLOYMENT_READS = (
     # The histories behind approved-workflows, authority-chains and decision-support
     # (field guide G10): searched like them, over every deployment the paths made.
     "approval-history", "tool-contracts", "tool-contract-bindings", "decision-history",
+    # A deployment's recovery records (SPINE SP-1): every incident's steps, as recorded.
+    "recovery-records",
 )
 ROUTES.update({f"deployment-{name}": _READ for name in _DEPLOYMENT_READS})
 ROUTES.update(
