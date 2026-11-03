@@ -34,3 +34,10 @@ urlpatterns = [
 ]
 
 
+
+# A failure no view caught answers by its route's operation class (G14; owner
+# decision 13): an evidence read unknown, an effect held, an assessment audit
+# incomplete, each with the dependency that failed -- never a bare "Server Error
+# (500)" that names nothing. A stop, and anything it cannot place, keeps Django's
+# own 500 unchanged; it runs only after a view has raised (safety.degraded).
+handler500 = "safety.degraded.server_error"

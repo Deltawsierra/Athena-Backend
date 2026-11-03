@@ -298,7 +298,10 @@ def scan_through(factory, analyst, engagement, engine, url=TARGET):
         format="json",
     )
     force_authenticate(request, user=analyst)
+    # The preflight answers clean: these tests are about what a launch leaves behind, not the gate, and a
+    # bare Mock's answers are no verdict, which holds a launch in every mode (G14).
     with mock.patch("pentest.views.target_is_out_of_bounds", return_value=None), \
+            mock.patch("pentest.views.preflight.check", return_value={"verdict": "ok"}), \
             mock.patch("pentest.views.CyberEngineClient") as client, \
             mock.patch("pentest.views.render_scan_pdf_bytes", return_value=b"%PDF-"), \
             mock.patch("pentest.views.save_pdf_to_scan"):

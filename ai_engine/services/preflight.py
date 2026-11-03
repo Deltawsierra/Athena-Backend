@@ -188,9 +188,8 @@ def check(client: CyberEngineClient | None = None,
         report["attestation"] = _attestation_for(deployment_for_routes(), client, tenant_id)
     except EngineError as exc:
         # An engine that cannot answer is not an engine that answered yes.
-        # Under observe this is logged and the scan proceeds, because the
-        # gate is not yet the thing standing between a customer and their
-        # test; under enforce it is a refusal.
+        # In every mode this holds the launch (`_raise_if_enforcing`): a scan is
+        # an effect, and an effect whose gate could not be asked fails closed.
         report["error"] = str(exc)
         report["verdict"] = "unknown"
         report["detail"] = f"the engine could not be asked: {exc}"
@@ -659,10 +658,21 @@ def _store(key: str, report: dict[str, Any], at: float) -> None:
 
 
 def _raise_if_enforcing(report: dict[str, Any]) -> None:
+    """Refuse what this gate holds. ``unknown`` in EVERY mode: the engine could not
+    be asked, or answered in a shape nothing here can read, and a launch is an
+    effect, which fails closed when what it depends on has failed (G14; the owner's
+    decision 13). Observe mode was the default, so an engine that was down or
+    answering garbage let every scan proceed with nothing established. Observe
+    still means what it says for an answer the gate could read: a ``blocked``
+    verdict is recorded and the scan proceeds unless the mode is enforce."""
     verdict = report.get("verdict")
-    if verdict in ("blocked", "unknown") and report.get("mode") == "enforce":
+    if verdict == "unknown":
+        raise DeploymentNotApproved(
+            f"held, not launched: {report.get('detail') or 'the engine gave no verdict'}", report
+        )
+    if verdict == "blocked" and report.get("mode") == "enforce":
         raise DeploymentNotApproved(report.get("detail") or verdict, report)
-    if verdict in ("blocked", "unknown"):
+    if verdict == "blocked":
         log.warning(
             "[ASSURANCE] %s: %s (mode=observe, so the scan proceeds; set "
             "CYBERENGINE_ASSURANCE_MODE=enforce to refuse)",

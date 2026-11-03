@@ -1531,6 +1531,35 @@ until the next refresh. An engine answer that holds readable findings beside row
 this side cannot read ingests the readable ones and drops the rest uncounted, so
 one `info` finding beside unreadable rows reads `ready`.
 
+### Every operation says how it degrades
+
+`safety/degraded.py` names four operation classes and what each does when a
+dependency (the database, an engine, Mythos-Core, a connector, a signer) is down,
+slow or answering garbage (the owner's decision 13):
+
+- **Stop** (the stop set of `safety/stops.py`): always works. Nothing in this policy
+  gates one or changes what it answers.
+- **Evidence read**: an honest `unknown`, with the reason.
+- **Effect** (every write, a dispatch, an approval, a scan launch): `HOLD`. It never
+  proceeds.
+- **Assessment** (decision-support, receipts, compliance, posture, the defender's
+  verdict): `AUDIT_INCOMPLETE`, never a pass.
+
+Every route and method declares its class there. Stops are declared only in
+`safety/stops.py`. `tests/test_every_operation_says_how_it_degrades.py` walks the
+URLconf and fails on a route with no class. A failure that no view caught used to
+answer a bare HTML "Server Error (500)" that named nothing. It still answers 500,
+but as JSON: `detail` says why, `status` is the class's word (`unknown`, `HOLD`,
+`AUDIT_INCOMPLETE`), and `dependency` names what failed by its type, never by its
+message. A stop keeps Django's own 500.
+
+The scan launch and the reconcile's resend ask the preflight gate first. They are
+now held (409) in every mode when the engine cannot be asked, hangs past its timeout
+or answers in a shape nothing can read. They used to proceed under the default
+`observe`. Observe still lets a `blocked` verdict proceed and records it. A defender
+answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
+as "nothing detected".
+
 ## Verifying a receipt
 
 `GET /api/assurance/deployments/<uuid>/signed-assurance-receipt/` returns a
