@@ -270,6 +270,22 @@ the engine's answer; a longer answer reads as not reported. Two operators signin
 one command at once both count: each signature is added to the command as it is at
 that moment, under the write lock.
 
+The engines' poll (`GET /api/failsafe/pending/?engine_id=<id>`, with
+`X-Failsafe-Poll-Token`) answers the same JSON list of signed command documents
+as before, but its work no longer grows with the number of ready commands. Every
+ready stop comes first, the strongest first (terminate, then stand-down, then
+pause), at most 500; then at most 50 ready resumes and releases, newest first;
+in at most 4,000,000 bytes, under the 5 MiB an engine reads of an answer (an
+answer past that is cut, and the engine decodes none of it, its stops included).
+No start is on a page that left a stop for the next page. A resume or release
+older than a ready stop of its engine is held back while that stop is ready: the
+engine applies an answer in its order, so it would undo the newer stop; draft a
+new one after the stop. `X-Failsafe-More` says whether anything was left out and
+`X-Failsafe-Next` carries the cursor for the rest (`?cursor=`, same
+`engine_id`); the engine's client reads only the first page, which always starts
+with the stops. Commands past their window are passed over and marked expired,
+at most 200 per poll in one write, and a write that fails never fails the poll.
+
 Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
 engagements they created are kept, with the creator unlinked; such an engagement
 is visible to admins only. A contradiction they made on an assurance claim stays

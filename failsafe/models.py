@@ -101,6 +101,15 @@ class FailsafeCommand(models.Model):
             models.Index(
                 fields=["engine_id", "status", "action", "signed", "created_at"], name="fsc_eng_st_act_sig_ct"
             ),
+            # The ready commands of one action, newest first, with or without
+            # an engine: the engine's poll reads the ready stops, action by
+            # action, before a capped few ready starts, and the console's
+            # reads list the ready stops before the ready starts. Without
+            # these each was read by (status, created_at) and every ready
+            # command of another action was stepped past -- a flood of ready
+            # resumes, under a read for a ready stand-down (failsafe.views).
+            models.Index(fields=["status", "action", "created_at"], name="fsc_st_act_ct"),
+            models.Index(fields=["engine_id", "status", "action", "created_at"], name="fsc_eng_st_act_ct"),
             # An account's unsigned draft of one action for one engine: a stop
             # draft made again while it is unsigned returns it.
             models.Index(fields=["initiator", "engine_id", "action", "status", "signed"], name="fsc_draft_lookup"),

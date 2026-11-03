@@ -162,9 +162,14 @@ class _Expiry:
             if room > 0:
                 # The window's end is stored as the ISO string that was signed;
                 # the index narrows the candidates and each is checked exactly.
+                # In the index's own order, not the model's (newest first):
+                # sorting by creation time read and sorted EVERY command past
+                # its window to take the first few (a temp B-tree), so the
+                # read grew with the backlog it is there to clear.
                 candidates = (
                     FailsafeCommand.objects.filter(status__in=_IN_FLIGHT, expires_at__lt=self.now.isoformat())
                     .exclude(pk__in=list(self.pks))
+                    .order_by()
                     .values_list("pk", "expires_at")[:room]
                 )
                 self.pks.update((pk, None) for pk, end in candidates if _due(end, self.now))
@@ -352,8 +357,11 @@ class _Page:
     says about it: in the state read's body, and in both reads' X-Failsafe-More
     header."""
 
-    def __init__(self):
-        self.whole = self.left = stop_lane_read_bytes()
+    def __init__(self, whole=None, row=None):
+        self.whole = self.left = stop_lane_read_bytes() if whole is None else whole
+        #: A command as this page lists it (take_lane): the console's row, or
+        #: the engine's command document (pending).
+        self._row = row or (lambda command: FailsafeCommandSerializer(command).data)
         self.more = False
         #: The uuid of a command passed over because it alone is larger than a
         #: whole page (take_lane), or None.
@@ -397,7 +405,7 @@ class _Page:
             if self.left <= 0:
                 self.more = True
                 return out, last, False
-            row = FailsafeCommandSerializer(command).data
+            row = self._row(command)
             size = self._size(row)
             if size > self.whole:
                 self.too_large, self.left, self.more = str(command.uuid), 0, True
@@ -1235,18 +1243,131 @@ def pending(request):
 
     A poll with the token is a stop (safety.stops): no throttle refuses or
     counts it. One without it is answered 401 and stays under the anonymous
-    throttle, so the token cannot be guessed at speed."""
+    throttle, so the token cannot be guessed at speed.
+
+    Its work is bounded, and the stops come first (_PollRead). The answer is
+    the same JSON list of command documents as ever: every ready stop --
+    terminate, then stand-down, then pause -- before any start, then at most
+    POLL_START_LIMIT resumes and releases, newest first, in at most
+    POLL_READ_BYTES. It walked every ready command of the engine before,
+    newest first, so 10,000 ready resumes put a stand-down 10,000th, behind
+    1.7 MB; and past the engine's 5 MiB read limit the engine cuts the body,
+    cannot decode it, and drops every command in it, the stops with them.
+    X-Failsafe-More says whether anything was left out, and X-Failsafe-Next
+    which ``cursor`` reads the rest (the engine's client reads the first page
+    only, and every first page carries the stops). Commands past their window
+    are passed over and marked expired, at most EXPIRE_PER_READ in one write
+    that never fails the poll (_Expiry): it wrote each one, one by one."""
     if not poll_token_ok(request):
         return Response({"detail": "poll token required"}, status=status.HTTP_401_UNAUTHORIZED)
 
-    engine_id = request.query_params.get("engine_id")
-    qs = FailsafeCommand.objects.filter(status=FailsafeCommand.STATUS_READY)
-    if engine_id:
-        qs = qs.filter(engine_id=engine_id)
-    now = timezone.now()
-    out = []
-    for command in qs:
-        if _expire_if_due(command, now):
-            continue
-        out.append(command.as_command_dict())
-    return Response(out)
+    try:
+        read = _PollRead(request)
+    except _BadCursor as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    expiry = _Expiry()
+    page = _Page(POLL_READ_BYTES, FailsafeCommand.as_command_dict)
+    lanes, following = read.page(expiry, page)
+    expiry.mark()
+    out = [*lanes.get("p", []), *lanes.get("q", [])]
+    return Response(out, headers=_page_headers(following is not None, following, page.too_large))
+
+
+#: The stop actions in the order the engine's poll answers them: the strongest
+#: first, so a page cut by its limits still carries the strongest stop asked
+#: for. Any order of stops leaves an engine in the strongest of them (a pause
+#: does nothing to an engine stood down, and nothing follows a terminate).
+POLL_STOP_ORDER = ("terminate", "stand_down", "pause")
+#: The most ready stops one poll answers. Each is signed by an enrolled
+#: operator's key -- a draft flood makes none -- so this is far past any real
+#: number; past it the poll says more and answers the rest on its next page.
+POLL_STOP_LIMIT = AWAITING_STOP_LIMIT
+#: The most ready resumes and releases one poll answers, after every stop. A
+#: start needs an operator's signature too, and an engine has one or two in a
+#: window; 50 (the list's page) covers any real number, keeps the work and the
+#: bytes of a poll the same under a flood of them, and keeps what the engine
+#: verifies and applies after the stops to at most 50 commands.
+POLL_START_LIMIT = COMMAND_LIST_LIMIT
+#: The most bytes of commands one poll answers. The engine reads at most
+#: 5 MiB of an answer (mythos_core.http.safe_http.MAX_RESPONSE_BYTES, by
+#: default) and decodes nothing of one it had to cut: every stop in it is lost.
+POLL_READ_BYTES = 4_000_000
+
+
+class _PollRead(_Read):
+    """The engine's poll (pending): a keyset read in two lanes, as the
+    console's reads are (_Read, _lane_keys).
+
+    * ``p``, the ready stops: terminate, then stand-down, then pause (tiers),
+      each newest first, at most POLL_STOP_LIMIT a page. Every first page --
+      every poll the engine's client makes -- starts with them.
+    * ``q``, the ready starts, resumes and releases, newest first, at most
+      POLL_START_LIMIT a page, and only on a page that left no stop for the
+      next: when the stops are cut, by their row limit or the bytes, the
+      starts wait for the stops' last page. A page after the first reads only
+      the lanes its cursor continues; a reader that follows them polls the
+      first page again for any stop made ready since.
+
+    A start is held back while a NEWER stop of its engine is ready (drafted at
+    or after it). The engine applies an answer in its order, so a resume or
+    release older than a stop, answered after it, would undo the stop that
+    came after it: a release signed, then a stand-down, both first heard in
+    one poll, left the engine running. It has nothing to undo while that stop
+    is ready, and a start drafted after the stop is answered. A start is
+    never a stop, so holding one back never holds back a stop.
+
+    Each part is one index read of at most its limit + 1 keys
+    (fsc_st_act_ct, fsc_eng_st_act_ct): the work is the limits, whatever the
+    number of ready commands."""
+
+    def __init__(self, request):
+        self.view = "pending"
+        self.by_token = False
+        engine_id = request.query_params.get("engine_id") or ""
+        self.qs = FailsafeCommand.objects.filter(status=_READY)
+        if engine_id:
+            self.qs = self.qs.filter(engine_id=engine_id)
+        self.lanes = [
+            ("p", [[{"action": action}] for action in POLL_STOP_ORDER], POLL_STOP_LIMIT),
+            ("q", [[{"action": action} for action in START_ACTIONS]], POLL_START_LIMIT),
+        ]
+        self.binding = hashlib.sha256(json.dumps(["pending", engine_id]).encode("utf-8")).hexdigest()[:16]
+        self.after = self._cursor(request.query_params.get(CURSOR_PARAM) or "")
+
+    def _newest_stops(self, engines):
+        """The creation time of the newest ready stop of each of ``engines``:
+        one grouped read of their ready stops, by the index on (engine,
+        status, action, creation time)."""
+        rows = (
+            FailsafeCommand.objects.filter(status=_READY, action__in=STOP_ACTIONS, engine_id__in=sorted(engines))
+            .order_by()
+            .values("engine_id")
+            .annotate(newest=Max("created_at"))
+        )
+        return {row["engine_id"]: row["newest"] for row in rows}
+
+    def page(self, expiry, page):
+        """This page's rows by lane, and the next page's cursor or None. No
+        start is on a page that left a stop for the next one: the starts wait
+        for the stops' last page."""
+        rows, continuing = {}, {}
+        for name, tiers, limit in self.lanes:
+            if self.after is not None and name not in self.after:
+                continue  # a lane a page before this one finished
+            after = None if self.after is None else self.after[name]
+            if name == "q" and "p" in continuing:
+                continuing[name] = after
+                continue
+            entries, more = _lane(self.qs, tiers, limit, after, expiry)
+            if name == "q":
+                engines = {command.engine_id for _key, command in entries if command is not None}
+                newest = self._newest_stops(engines) if engines else {}
+                entries = [
+                    (key, None if command is not None and command.engine_id in newest
+                     and command.created_at <= newest[command.engine_id] else command)
+                    for key, command in entries
+                ]
+            rows[name], last, passed = page.take_lane(entries)
+            if more or not passed:
+                continuing[name] = after if last is None else last
+        return rows, (self.encode(continuing) if continuing else None)
