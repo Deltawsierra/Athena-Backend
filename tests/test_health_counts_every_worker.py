@@ -180,6 +180,75 @@ def _health():
     return answer.json()
 
 
+#: Every count health reads, and the counter that holds it in this worker. The names
+#: are the ones a reader of health reads (athena-dashboard's ``shared/backend-health.ts``,
+#: ``KNOWN_COUNTS``).
+COUNTERS = {
+    "stderr_lines_lost": (oplog, "STDERR_LOST"),
+    "log_records_dropped": (oplog, "LOG_DROPPED"),
+    "unrecorded_dispatches_refused": (dispatch, "_UNRECORDED_REFUSED"),
+    worker_reports.UNPUBLISHED: (worker_reports, "PUBLISH_FAILED"),
+}
+
+#: Health's "ok", whole: #217's status and message, and every count, each 0, so a
+#: reader can tell an "ok" that read its counts from one that reports none.
+OK = {
+    "status": "ok",
+    "message": "Django backend is alive.",
+    "counts": {
+        "stderr_lines_lost": 0,
+        "log_records_dropped": 0,
+        "unrecorded_dispatches_refused": 0,
+        "worker_reports_unpublished": 0,
+    },
+    "workers": {},
+}
+
+
+# ------------------------------------------------- "ok" carries its zero counts
+
+
+@pytest.mark.django_db
+def test_ok_carries_every_count_at_zero(reports):
+    body = _health()
+    assert body == OK, body
+    assert set(body["counts"]) == set(COUNTERS), body
+    assert all(type(n) is int and n == 0 for n in body["counts"].values()), body
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("where", ["this worker", "another worker"])
+@pytest.mark.parametrize("count", sorted(COUNTERS))
+def test_any_non_zero_count_still_reads_degraded_never_ok(reports, count, where):
+    """Each count above zero, in this worker or in another worker's report, reads
+    degraded with that count; it is never an "ok", and never carries ok's zeros."""
+    if where == "this worker":
+        module, name = COUNTERS[count]
+        getattr(module, name)[0] = 3
+        worker = worker_reports.worker_id()
+        state = worker_reports.THIS
+    else:
+        worker, state = "0123456789abcdef", worker_reports.LIVE
+        reports.directory.mkdir()
+        now = time.time()
+        (reports.directory / f"{worker}.json").write_text(
+            json.dumps(
+                {
+                    "id": worker, "host": "worker-b", "pid": 1, "published": now,
+                    "published_at": datetime.datetime.fromtimestamp(now, datetime.UTC).isoformat(),
+                    "exited": False, "counts": {**{one: 0 for one in COUNTERS}, count: 3},
+                }
+            ),
+            encoding="utf-8",
+        )
+    body = _health()
+    assert body["status"] == "degraded", body
+    assert body["degraded"] == {count: 3}, body
+    assert body["workers"] == {worker: {"state": state, count: 3}}, body
+    assert f"{count}=3" in body["message"], body
+    assert "counts" not in body and "unknown" not in body, body
+
+
 # ---------------------------------------------------------- the loss in another worker
 
 
@@ -218,7 +287,7 @@ def test_both_workers_counts_are_summed(reports):
 def test_a_live_worker_that_lost_nothing_leaves_health_ok(reports):
     b = reports.worker_b(lost=0)
     b.published()
-    assert _health() == {"status": "ok", "message": "Django backend is alive."}
+    assert _health() == OK
     b.exit()
 
 
@@ -237,6 +306,8 @@ def test_a_worker_killed_outright_reads_unknown_once_its_report_is_stale_never_o
     assert b.report()["exited"] is False
     within = _health()
     assert within["status"] == ("degraded" if lost else "ok"), within
+    if not lost:
+        assert within == OK, within
     bound = 0.5
     monkeypatch.setattr(worker_reports, "STALE_AFTER_SECONDS", bound)
     assert _wait_for(lambda: time.time() - b.report()["published"] > bound + 0.1)
@@ -329,7 +400,7 @@ def test_an_exited_workers_counts_stay_until_acknowledged_and_the_acknowledgemen
     call_command("acknowledge_worker_reports", b_id, by="operator-ann", stdout=out)
     after = datetime.datetime.now(datetime.UTC)
     assert f"worker report {b_id} (exited) acknowledged by operator-ann" in out.getvalue()
-    assert _health() == {"status": "ok", "message": "Django backend is alive."}
+    assert _health() == OK
     assert not b.report_path().exists()
 
     kept = list((reports.directory / worker_reports.ACKNOWLEDGED).glob(f"{b_id}-*.json"))
@@ -351,7 +422,7 @@ def test_a_stale_report_is_acknowledged_as_stale(reports, monkeypatch):
     out = io.StringIO()
     call_command("acknowledge_worker_reports", "--all", by="operator-ann", stdout=out)
     assert f"worker report {b_id} (stale) acknowledged by operator-ann" in out.getvalue()
-    assert _health() == {"status": "ok", "message": "Django backend is alive."}
+    assert _health() == OK
 
 
 @pytest.mark.django_db
@@ -374,7 +445,7 @@ def test_a_worker_that_exits_with_nothing_counted_leaves_nothing_to_acknowledge(
     b.published()
     b.exit()
     assert not b.report_path().exists()
-    assert _health() == {"status": "ok", "message": "Django backend is alive."}
+    assert _health() == OK
 
 
 # --------------------------------------------------- never on a stop's path

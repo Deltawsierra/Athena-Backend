@@ -1920,6 +1920,11 @@ as a small JSON file in one directory (`assurance/worker_reports.py`), and
   with the reason under `"unknown"`, keyed by the worker's random id. Counts
   anywhere read `"degraded"`, with the sums under `"degraded"` and each counting
   worker under `"workers"`.
+- **What `"ok"` carries.** `"status": "ok"` and the message, as before, and every
+  count it read under `"counts"`, each 0 (`stderr_lines_lost`, `log_records_dropped`,
+  `unrecorded_dispatches_refused`, `worker_reports_unpublished`), with `"workers"`
+  empty. A reader can tell an `"ok"` that read its counts from one that reports none
+  (a backend from before #217), and need not read a missing count as zero.
 - **Exited workers.** A worker that exits normally writes its last counts, marked
   exited; they stay in health's sums until an operator acknowledges them. One that
   exits with nothing counted removes its file. List and acknowledge with

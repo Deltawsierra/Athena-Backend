@@ -18,8 +18,10 @@ def health(request):
         "status": "ok" | "degraded" | "unknown" | "error",
         "message": "<short text>",
         "degraded": {"<count>": <n>, ...},              (only when "degraded")
+        "counts": {"<count>": 0, ...}                    (only when "ok": every count, each 0)
         "workers": {"<worker id>": {"state": ..., "<count>": <n>, ...}, ...}
-                                                         (when "degraded": the workers with a count)
+                                                         (when "degraded": the workers with a count;
+                                                          when "ok": empty, no worker has one)
         "unknown": {"<worker id>": "<why>", ...}          (when a worker's report reads unknown)
     }
 
@@ -31,7 +33,9 @@ def health(request):
     (:mod:`assurance.worker_reports`) -- an exited worker's until an operator
     acknowledges it (``manage.py acknowledge_worker_reports``). "unknown": a count
     could not be read -- this worker's, or another worker's report, unreadable or not
-    rewritten within its bound. Never "ok" unless every count was read and is zero.
+    rewritten within its bound. Never "ok" unless every count was read and is zero;
+    "ok" names every count it read under "counts", each 0, so a reader can tell an
+    "ok" with its counts from one that reports none (a backend from before #217).
     Always 200: it is the liveness probe, and the process is alive. The counts are
     plain reads and the reports small files; no lock a stop takes is taken here.
     Worker ids are random: the host and the pid behind each are in the command's list.
@@ -75,4 +79,7 @@ def health(request):
         return Response(body)
     if unknown:
         return Response({"status": "unknown", "message": f"Django backend is alive, and {unread}", "unknown": unknown})
-    return Response({"status": "ok", "message": "Django backend is alive."})
+    # Every count, as read, each 0 here (no count is non-zero, or it read degraded above).
+    return Response(
+        {"status": "ok", "message": "Django backend is alive.", "counts": dict(summary["counts"]), "workers": {}}
+    )

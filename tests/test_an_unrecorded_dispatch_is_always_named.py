@@ -364,7 +364,19 @@ def _health():
 
 @pytest.mark.django_db
 def test_health_is_ok_only_while_every_count_is_zero(counts_at_zero):
-    assert _health() == {"status": "ok", "message": "Django backend is alive."}
+    # "ok" names every count it read, each 0 (#226 adds the fourth, a worker's
+    # report it could not publish), and no worker with a count.
+    assert _health() == {
+        "status": "ok",
+        "message": "Django backend is alive.",
+        "counts": {
+            "stderr_lines_lost": 0,
+            "log_records_dropped": 0,
+            "unrecorded_dispatches_refused": 0,
+            "worker_reports_unpublished": 0,
+        },
+        "workers": {},
+    }
 
 
 @pytest.mark.django_db
