@@ -217,6 +217,7 @@ jobs:
             tests/test_oplog_without_select.py \
             tests/test_failsafe_control_plane.py \
             tests/test_no_in_flight_failsafe_command_is_left_off_a_list.py \
+            tests/test_the_engine_poll_does_bounded_work.py \
             tests/test_no_control_holds_back_a_stop.py \
             tests/test_no_dispatch_holds_back_a_stop.py \
             tests/test_no_stop_waits_on_an_engine_answer.py \

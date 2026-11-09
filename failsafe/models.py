@@ -101,6 +101,15 @@ class FailsafeCommand(models.Model):
             models.Index(
                 fields=["engine_id", "status", "action", "signed", "created_at"], name="fsc_eng_st_act_sig_ct"
             ),
+            # The ready commands of one action, newest first, with or without
+            # an engine: the engine's poll reads the ready stops, action by
+            # action, before a capped few ready starts, and the console's
+            # reads list the ready stops before the ready starts. Without
+            # these each was read by (status, created_at) and every ready
+            # command of another action was stepped past -- a flood of ready
+            # resumes, under a read for a ready stand-down (failsafe.views).
+            models.Index(fields=["status", "action", "created_at"], name="fsc_st_act_ct"),
+            models.Index(fields=["engine_id", "status", "action", "created_at"], name="fsc_eng_st_act_ct"),
             # An account's unsigned draft of one action for one engine: a stop
             # draft made again while it is unsigned returns it.
             models.Index(fields=["initiator", "engine_id", "action", "status", "signed"], name="fsc_draft_lookup"),
@@ -146,6 +155,28 @@ class FailsafeCommand(models.Model):
                 {"key_id": s["key_id"], "sig": s["sig"]} for s in self.signatures
             ],
         }
+
+
+class FailsafeStopMark(models.Model):
+    """The newest stop ever made ready for one engine: when it was drafted,
+    and which it is.
+
+    Written in the transaction that signs a stop into force (failsafe.views,
+    submit_signature) and moved only forward; never deleted, so it outlives
+    the stop's window. The engine's poll reads one row of it per engine on
+    its page, and never delivers a resume or release drafted at or before it:
+    delivered after that stop, the start would undo it. One row per engine,
+    whatever the number of stops, starts or consumed history."""
+
+    engine_id = models.CharField(max_length=200, primary_key=True)
+    #: The stop's own creation time (FailsafeCommand.created_at).
+    created_at = models.DateTimeField()
+    stop_uuid = models.UUIDField()
+    action = models.CharField(max_length=32)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.engine_id}: {self.action} {self.stop_uuid} @ {self.created_at:%Y-%m-%d %H:%M:%S}"
 
 
 class FailsafeAuditEvent(models.Model):
