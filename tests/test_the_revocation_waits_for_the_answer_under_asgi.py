@@ -63,6 +63,9 @@ User = get_user_model()
 WITHDRAWALS = ("demote", "remove", "deactivate_on_remove")
 #: How long the slow signer takes: far longer than any stop's bound.
 SLOW_SIGNER_SECONDS = 2.0
+#: How long a test waits, by the clock, for a step it set off on the request's thread
+#: before it says that step never came (see :func:`_until`).
+SIGNAL_DEADLINE_SECONDS = 30.0
 
 #: Every entry to the identity code (as AB-GRANT-LEASE's stop test watches them).
 IDENTITY_ENTRIES = {
@@ -204,6 +207,20 @@ def _run(coroutine):
     return contextvars.Context().run(asyncio.run, coroutine)
 
 
+async def _until(flag):
+    """Wait for ``flag``, a :class:`threading.Event` that a request's thread sets, for
+    up to :data:`SIGNAL_DEADLINE_SECONDS` of the clock; the loop serves its other
+    tasks meanwhile, and is woken the moment the flag is set.
+
+    Never by counting short sleeps. Python 3.12's clock on Windows (``time.monotonic``
+    is ``GetTickCount64`` there) moves in 15.625 ms ticks, and the loop runs every timer
+    due within one tick of now as due; so with a second task sleeping on the same loop
+    (the heartbeat) the two keep each other's timers due, the loop never blocks, and
+    3000 sleeps of 10 ms ran out in well under a second -- the Windows job on 19cf4b1
+    gave up on a revocation that was on its way (AB-ASGI-DEFER)."""
+    return await asyncio.get_running_loop().run_in_executor(None, flag.wait, SIGNAL_DEADLINE_SECONDS)
+
+
 def _serve(server, request, **kwargs):
     """Serve one request on a loop of its own; the loop's thread with what it answered."""
 
@@ -300,10 +317,7 @@ def test_a_withdrawal_whose_client_went_away_before_the_answer_is_still_revoked(
     async def serve():
         gone = asyncio.Event()
         served = asyncio.create_task(server.request(method, path, token=token, body=body, gone=gone))
-        for _ in range(3000):
-            if started.is_set():
-                break
-            await asyncio.sleep(0.01)
+        await _until(started)
         assert started.is_set(), "the demotion's view never started"
         gone.set()
         await asyncio.sleep(0.2)  # the handler sees the client gone and cancels the response
@@ -391,10 +405,7 @@ def test_a_stop_on_the_same_loop_is_answered_within_its_bound_while_a_revocation
 
         beat = asyncio.create_task(heartbeat())
         demotion = asyncio.create_task(server.request(d_method, d_path, token=d_token, body=d_body))
-        for _ in range(3000):
-            if signing.is_set():
-                break
-            await asyncio.sleep(0.01)
+        await _until(signing)
         assert signing.is_set(), "the demotion's revocation never began signing"
         made_during = not signed.is_set()
         pause = await server.request(p_method, p_path, token=p_token, body=p_body)
