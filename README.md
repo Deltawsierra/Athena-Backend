@@ -1891,9 +1891,47 @@ exit starts or runs the writers. What a process lost or refused since it started
 lines meant for stderr, log records dropped, unrecorded dispatches refused past the
 hard bound -- is counted, and any non-zero count makes `GET /api/health/` answer
 `"status": "degraded"` (still 200: the process is alive) with each count, and the
-sweep log it at WARNING whenever a count moves. The counts are per process. Everything else on a stop's path goes the same way, through a queue of
+sweep log it at WARNING whenever a count moves. Everything else on a stop's path goes the same way, through a queue of
 at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
+
+Health counts every worker, not only the one that answers. The counts are kept per
+process, and a probe reaches one worker, so each serving worker publishes its counts
+as a small JSON file in one directory (`assurance/worker_reports.py`), and
+`GET /api/health/` sums its own counts, read live, with every other worker's file:
+
+- **Where.** `ATHENA_WORKER_REPORT_DIR`, else a directory in the system's temporary
+  directory named for the checkout. Every worker of a host must name the same one.
+  A file, not a database row, so publishing never takes the database's one writer
+  a stop's own write needs; the economics run slots keep their per-host state the
+  same way. With several hosts, each host's health covers that host's workers --
+  the ones a load balancer's probe of that host is about -- unless the variable
+  names a directory every host shares (files never collide; keep the clocks in step,
+  since staleness is judged by each file's publication time).
+- **Off every stop.** A request costs a comparison and a liveness check; the first
+  one starts the publisher thread, which reads the counts every second and writes
+  when one moves, and every 10 s regardless. A slow or failing directory delays only
+  that thread. A failed publish is counted and shown as
+  `worker_reports_unpublished`, which reads degraded like the other counts. On
+  Windows, a replace refused because a reader has the file open is tried 5 times.
+- **Unknown, never ok.** A report that cannot be read, a directory that cannot be
+  listed, or a live worker's report not rewritten within 60 s (a worker killed
+  outright: SIGKILL, the OOM killer, `taskkill /F`) reads `"status": "unknown"`
+  with the reason under `"unknown"`, keyed by the worker's random id. Counts
+  anywhere read `"degraded"`, with the sums under `"degraded"` and each counting
+  worker under `"workers"`.
+- **What `"ok"` carries.** `"status": "ok"` and the message, as before, and every
+  count it read under `"counts"`, each 0 (`stderr_lines_lost`, `log_records_dropped`,
+  `unrecorded_dispatches_refused`, `worker_reports_unpublished`), with `"workers"`
+  empty. A reader can tell an `"ok"` that read its counts from one that reports none
+  (a backend from before #217), and need not read a missing count as zero.
+- **Exited workers.** A worker that exits normally writes its last counts, marked
+  exited; they stay in health's sums until an operator acknowledges them. One that
+  exits with nothing counted removes its file. List and acknowledge with
+  `python manage.py acknowledge_worker_reports` (`REPORT_ID ... --by NAME`, or
+  `--all --by NAME`): each acknowledged report is kept under `acknowledged/` in the
+  directory with who acknowledged it (the name given and the account that ran it)
+  and when, and the line is logged at WARNING. A live worker's report is refused.
 
 **Migration `assurance.0043`** adds `marker` as a nullable column with no default: a
 plain `ADD COLUMN`, so it copies no table and holds the write lock for no time
