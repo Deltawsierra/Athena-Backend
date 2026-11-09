@@ -1307,7 +1307,9 @@ def _not_waiting_for_the_write_lock():
         if before is not None:
             try:
                 with connection.cursor() as cursor:
-                    cursor.execute(f"PRAGMA busy_timeout = {before:d}")
+                    # The value read above, put back: an int under ":d", so this SQL
+                    # is "PRAGMA busy_timeout = <digits>" and writes no table.
+                    cursor.execute(f"PRAGMA busy_timeout = {before:d}")  # not-a-decision-writer: an int, put back
             except Exception:  # noqa: BLE001 - the poll is answered whatever this does
                 logger.exception("could not put back the database's busy timeout after the engine poll")
 
