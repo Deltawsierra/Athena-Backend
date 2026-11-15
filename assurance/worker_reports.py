@@ -102,8 +102,9 @@ PUBLISH_FAILED = [0]
 #: What a report is, as health and the command read it.
 LIVE, EXITED, STALE, THIS = "live", "exited", "stale", "this worker"
 
-#: This process's id, as ``[(pid, id)]``.
-_ID: list = []
+#: This process's id, by pid: ``{pid: id}``. One entry per process; a forked child,
+#: whose pid differs, makes its own.
+_ID: dict = {}
 #: This process's publisher, as ``[(pid, thread, directory, source)]``.
 _PUBLISHER: list = []
 #: The publisher's start, retried after a failure: ``{"pid", "failures", "next"}``.
@@ -123,15 +124,25 @@ def report_directory() -> str:
     return os.environ.get(DIRECTORY_VARIABLE) or DEFAULT_DIRECTORY
 
 
+def _new_id() -> str:
+    return uuid.uuid4().hex[:16]
+
+
 def worker_id() -> str:
     """This process's report id: random, made once per process (a forked child makes
-    its own, since its pid differs)."""
+    its own, since its pid differs).
+
+    One id, whichever thread asks first. At start-up the publisher's first write and
+    the first request can both ask before there is one: each makes a candidate, and
+    ``setdefault`` (one step under the interpreter's lock, and no lock of this
+    module's, so nothing here is waited on) keeps the first and hands both the same.
+    Before, each kept its own: the report was written under one id while the worker
+    named itself another, so its own report read as another worker's."""
     pid = os.getpid()
-    current = _ID[0] if _ID else None
-    if current is None or current[0] != pid:
-        current = (pid, uuid.uuid4().hex[:16])
-        _ID[:] = [current]
-    return current[1]
+    found = _ID.get(pid)
+    if found is None:
+        found = _ID.setdefault(pid, _new_id())
+    return found
 
 
 def local_counts(source) -> dict:

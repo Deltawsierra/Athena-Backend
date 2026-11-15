@@ -25,6 +25,7 @@ from django.db.backends.utils import CursorWrapper
 from mythos_core import status as core_status
 from rest_framework.test import APIClient
 
+from assurance import dispatch, oplog, worker_reports
 from config import readiness
 from safety import degraded, stops
 
@@ -155,13 +156,40 @@ def test_every_dependency_up_is_ready(engine):
     assert set(body["not_probed"]) == {"connectors", "the receipt signer"}
 
 
+@pytest.fixture
+def counts_at_zero(monkeypatch):
+    """Liveness's counts as a fresh process has them. They are this process's own (what
+    it lost or refused: ``dispatch.degraded_counts``), liveness reads "degraded" while
+    one is not zero, and tests that run before this one in the same process raise them."""
+    for module, name in (
+        (oplog, "STDERR_LOST"),
+        (oplog, "LOG_DROPPED"),
+        (dispatch, "_UNRECORDED_REFUSED"),
+        (worker_reports, "PUBLISH_FAILED"),
+    ):
+        monkeypatch.setattr(module, name, [0])
+    monkeypatch.setattr(dispatch, "_DEGRADED_REPORTED", [{}])
+
+
 @pytest.mark.django_db(transaction=True)
-def test_liveness_is_unchanged_whatever_readiness_says():
+def test_liveness_is_unchanged_whatever_readiness_says(counts_at_zero):
     api = APIClient(raise_request_exception=False)
+    alive = api.get("/api/health/")
     with mock.patch.multiple(CursorWrapper, execute=_refused, executemany=_refused):
         response = api.get("/api/health/")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "message": "Django backend is alive."}
+    assert response.status_code == alive.status_code == 200
+    # "ok" names every count it read, each 0, and no worker with a count (#226).
+    assert response.json() == alive.json() == {
+        "status": "ok",
+        "message": "Django backend is alive.",
+        "counts": {
+            "stderr_lines_lost": 0,
+            "log_records_dropped": 0,
+            "unrecorded_dispatches_refused": 0,
+            "worker_reports_unpublished": 0,
+        },
+        "workers": {},
+    }
 
 
 # --- Each dependency down: degraded, named, never ok ------------------------------------
