@@ -1553,12 +1553,48 @@ but as JSON: `detail` says why, `status` is the class's word (`unknown`, `HOLD`,
 `AUDIT_INCOMPLETE`), and `dependency` names what failed by its type, never by its
 message. A stop keeps Django's own 500.
 
-The scan launch and the reconcile's resend ask the preflight gate first. They are
-now held (409) in every mode when the engine cannot be asked, hangs past its timeout
-or answers in a shape nothing can read. They used to proceed under the default
-`observe`. Observe still lets a `blocked` verdict proceed and records it. A defender
+Every launch asks the preflight gate first: the scan launch, the reconcile's resend,
+and the LLM scan (`POST /api/pentest/llm-scan/`), which used to ask nothing. Each is
+held (409) in every mode when the engine cannot be asked, hangs past its timeout or
+answers in a shape nothing can read. They used to proceed under the default
+`observe`. Observe still lets a `blocked` verdict proceed and records it on the scan;
+`enforce` refuses it. `tests/test_no_effect_launches_without_the_preflight.py` says,
+for every effect route, whether it launches, and fails on a launch call the
+preflight does not come before. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
+
+### Liveness and readiness
+
+`GET /api/health/` is liveness. It answers `{"status": "ok"}` at once from this
+process, whatever is down, so a load balancer does not restart a backend for an
+outage that is not its own.
+
+`GET /api/health/ready/` is readiness. It asks each dependency on a bounded check of
+its own and names each one, with the reason:
+
+- **the database**: `SELECT 1`, and the row read back must be the one asked for;
+- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`;
+- **Mythos-Core**: the modules this backend loads import, and its word for unknown
+  is still `unknown`.
+
+Each reads `ok` (it answered as asked), `degraded` (it answered, and the answer was a
+failure: refused, raised, or not the answer) or `unknown` (no answer within the
+bound, or nothing configured to ask). The answer waits at most 2 s in all. A check
+still running then reads `unknown`, and the next probe waits on that same check, so
+a hung dependency holds one thread however often the probe polls. Every reason is
+named by the exception's type, never its message.
+
+Every dependency `ok` answers 200 with `status: "ok"`. Anything else answers 503,
+in the evidence-read shape above (`status: "unknown"`, `dependency` naming the first
+one that is not `ok`). Both list `dependencies` and `not_probed`: connectors are per
+deployment, and asking the receipt signer would sign something. The route is not a
+stop and gates nothing: no stop, gate or control reads it. Like liveness, it needs
+no sign-in, is not throttled, and is not sent through the gateway.
+
+```powershell
+curl.exe -s http://localhost:8000/api/health/ready/
+```
 
 ## Verifying a receipt
 
@@ -1777,6 +1813,15 @@ python manage.py check --deploy --fail-level WARNING
 
 CI runs this and it must stay clean. `DJANGO_SECRET_KEY` is required outside
 development, and the process refuses to start without it.
+
+Run with `DJANGO_DEBUG` off. With `DEBUG=True`, Django shows its technical error page
+for an uncaught failure, and the root URLconf's `handler500` (`safety.degraded.server_error`,
+"Every operation says how it degrades", above) does not run. Every failure then
+answers that HTML page, never the JSON reason and status word. The deploy check above
+refuses `DEBUG=True`.
+
+Point the load balancer's readiness check at `/api/health/ready/`, and its liveness
+check at `/api/health/` ("Liveness and readiness", above).
 
 Run at least three workers, and set `WEB_CONCURRENCY` to the worker count (gunicorn
 reads it as its `--workers` default), or `ATHENA_ECONOMICS_RUN_CAP` explicitly: the
