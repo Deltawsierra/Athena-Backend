@@ -50,6 +50,7 @@ from . import consequential as _consequential
 from . import coverage as _coverage
 from . import decision as _decision
 from . import graph_refs as _graph_refs
+from . import identity_evidence as _identity_evidence
 from . import models as _models
 from . import served_route as _served_route
 from . import workflow_chains as _workflow_chains
@@ -212,6 +213,14 @@ def _policy_document() -> dict:
             # Which signer's outcomes are which kind of evidence, and what an
             # unsigned basis counts as (assurance.composition.evidence_kind).
             "signer_evidence": _table(composition.SIGNER_EVIDENCE),
+            # Whether an identity signer's record proves a hop
+            # (assurance.identity_evidence): the witness each signer is, the signers
+            # whose key must be bound to the issuers it speaks for, how a bound key's
+            # record names a subject, and the longest token a session may stand on.
+            "identity_signer_witness": _table(_identity_evidence.SIGNER_WITNESS),
+            "issuer_bound_signers": sorted(_identity_evidence.ISSUER_BOUND_SIGNERS),
+            "identity_subject_scheme": _identity_evidence.SUBJECT_SCHEME,
+            "identity_max_token_lifetime_seconds": _identity_evidence.MAX_TOKEN_LIFETIME_SECONDS,
             "unsigned_evidence": _table(composition._UNSIGNED_EVIDENCE),
             # How the workflow chains cap it (assurance.workflow_chains
             # .composition_decision_signal): a held resting on a permit check or an
