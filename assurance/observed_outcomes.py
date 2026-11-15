@@ -52,10 +52,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
+from types import MappingProxyType
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -64,6 +67,8 @@ from mythos_core import outcome as oc
 from . import composition
 from .models import WorkflowChainOutcome
 from .served_route import routes_for_outcomes
+
+logger = logging.getLogger(__name__)
 
 #: Where the keyring lives: a JSON file listing the engines this deployment
 #: trusts, ``[{"engine": "achilles", "public_key": "<base64 raw Ed25519>"}, ...]``.
@@ -103,6 +108,61 @@ class Refusal:
     reason: str
 
 
+#: The most issuers one key may be bound to, and the longest issuer a binding may
+#: name: a ``oidc:<issuer>#<subject>`` ref is at most 200 characters, so an issuer
+#: longer than this leaves no room for a subject.
+MAX_BOUND_ISSUERS = 20
+MAX_ISSUER_LENGTH = 190
+#: What may never appear in a bound issuer: ``#`` ends the issuer in a subject ref
+#: (an OIDC issuer has no fragment), and whitespace or a control character is no
+#: issuer anyone signed.
+_ISSUER_FORBIDDEN = re.compile(r"[#\s\x00-\x1f\x7f]")
+
+
+class Keyring(dict):
+    """The trusted keys, by key id -- a ``dict``, as every reader of a keyring takes
+    one -- and beside them :attr:`issuers`: the identity providers each key is bound
+    to speak for, by key id, for the keys whose entry names them.
+
+    Both come from the same bytes (:func:`_parse_keyring`), so a binding is never read
+    from a second read of a file that may have changed in between. A key with no
+    binding is absent from :attr:`issuers`; what that means is the identity intake's
+    to say (:mod:`assurance.identity_evidence`): today's reading for a Mythos-run
+    signer, nothing at all for an issuer-bound one. A plain ``dict`` keyring binds
+    no key."""
+
+    def __init__(self, keys=(), issuers: Mapping[str, frozenset[str]] | None = None):
+        super().__init__(keys)
+        self.issuers: Mapping[str, frozenset[str]] = MappingProxyType(dict(issuers or {}))
+
+
+def issuers_of(keyring: Any, key_id: str | None) -> frozenset[str] | None:
+    """The issuers ``key_id`` is bound to in ``keyring``, or ``None`` when its entry
+    names none (or ``keyring`` is a plain mapping, which binds nothing)."""
+    if not isinstance(keyring, Keyring) or key_id is None:
+        return None
+    return keyring.issuers.get(key_id)
+
+
+def _binding(value: Any) -> frozenset[str]:
+    """A keyring entry's ``issuers``: a non-empty list of distinct issuers, each one
+    text a subject ref can be built on. Raises ``ValueError`` naming what is wrong."""
+    if not isinstance(value, list) or not value:
+        raise ValueError("issuers is a non-empty list of issuer identifiers")
+    if len(value) > MAX_BOUND_ISSUERS:
+        raise ValueError(f"issuers names at most {MAX_BOUND_ISSUERS} issuers")
+    for issuer in value:
+        if not isinstance(issuer, str) or not issuer:
+            raise ValueError("each issuer is non-empty text")
+        if len(issuer) > MAX_ISSUER_LENGTH:
+            raise ValueError(f"each issuer is at most {MAX_ISSUER_LENGTH} characters")
+        if _ISSUER_FORBIDDEN.search(issuer):
+            raise ValueError("an issuer holds no '#', whitespace or control character")
+    if len(set(value)) != len(value):
+        raise ValueError("each issuer is named once")
+    return frozenset(value)
+
+
 def load_keyring(path: str | None = None) -> dict[str, oc.TrustedKey]:
     """The trusted keys, by key id. Every key passes through
     :class:`mythos_core.outcome.TrustedKey`, which refuses a key that
@@ -135,7 +195,10 @@ def _parse_keyring(content: bytes) -> dict[str, oc.TrustedKey]:
         raise KeyringUnavailable(f"the outcome keyring could not be read: {exc}") from exc
     if not isinstance(entries, list) or not entries:
         raise KeyringUnavailable("the outcome keyring is not a non-empty list of keys")
-    keyring: dict[str, oc.TrustedKey] = {}
+    keys: dict[str, oc.TrustedKey] = {}
+    engines: dict[str, str] = {}
+    bindings: dict[str, frozenset[str] | None] = {}
+    unusable: set[str] = set()
     for position, entry in enumerate(entries):
         try:
             engine = entry["engine"]
@@ -144,12 +207,56 @@ def _parse_keyring(content: bytes) -> dict[str, oc.TrustedKey]:
         except (KeyError, TypeError, ValueError, oc.OutcomeError) as exc:
             raise KeyringUnavailable(f"keyring entry {position} is not a usable key: {exc}") from exc
         key_id = oc.key_id_for(raw)
-        if key_id in keyring and keyring[key_id].engine != engine:
+        if key_id in engines and engines[key_id] != engine:
             raise KeyringUnavailable(
                 f"keyring entry {position} binds a key already bound to "
-                f"{keyring[key_id].engine!r} to {engine!r}; one key has one engine"
+                f"{engines[key_id]!r} to {engine!r}; one key has one engine"
             )
-        keyring[key_id] = key
+        engines[key_id] = engine
+        # The issuer binding. A malformed one makes THIS key vouch for nothing -- it
+        # is left out of the keyring, logged -- and never the whole keyring
+        # unavailable: a typo in one identity provider's binding must not refuse every
+        # other engine's evidence with a 503, nor read every recorded outcome attested.
+        binding: frozenset[str] | None = None
+        if "issuers" in entry:
+            try:
+                binding = _binding(entry["issuers"])
+            except ValueError as exc:
+                logger.error(
+                    "keyring entry %s (%r): %s; this key vouches for nothing until its binding is fixed",
+                    position, engine, exc,
+                )
+                unusable.add(key_id)
+                continue
+        if key_id in bindings and bindings[key_id] != binding:
+            logger.error(
+                "keyring entry %s (%r) lists a key already listed with another issuer binding; this key "
+                "vouches for nothing until it is listed once",
+                position, engine,
+            )
+            unusable.add(key_id)
+            continue
+        bindings[key_id] = binding
+        keys[key_id] = key
+    for key_id in unusable:
+        keys.pop(key_id, None)
+        bindings.pop(key_id, None)
+    keyring = Keyring(keys, {key_id: b for key_id, b in bindings.items() if b is not None})
+    unbound = sorted(
+        {
+            key.engine
+            for key_id, key in keyring.items()
+            if key_id not in keyring.issuers
+            and composition.signer_evidence(key.engine) in composition.IDENTITY_EVIDENCE_KINDS
+        }
+    )
+    if unbound:
+        logger.warning(
+            "identity signer keys with no issuer binding: %s. A Mythos-run signer's records are read as "
+            "before (they may name any identity provider's subjects); an issuer-bound signer's key vouches "
+            "for nothing until it is bound",
+            ", ".join(unbound),
+        )
     return keyring
 
 
@@ -278,7 +385,15 @@ def keyring_fingerprint(keyring: Any = READ_KEYRING) -> str:
     keyring = trusted_keyring() if keyring is READ_KEYRING else keyring
     if not keyring:
         return ""
-    pairs = sorted((key_id, key.engine) for key_id, key in keyring.items())
+    # A key's issuer binding decides which identity records it proves
+    # (assurance.identity_evidence), so a binding withdrawn or widened reads as a
+    # rotation. A key with no binding is the pair it always was, so a keyring that
+    # binds nothing keeps the fingerprint it had.
+    pairs = sorted(
+        (key_id, key.engine) if issuers_of(keyring, key_id) is None
+        else (key_id, key.engine, sorted(issuers_of(keyring, key_id)))
+        for key_id, key in keyring.items()
+    )
     return hashlib.sha256(json.dumps(pairs).encode()).hexdigest()
 
 
@@ -573,10 +688,12 @@ __all__ = [
     "MAX_AGE",
     "MAX_BODY_BYTES",
     "MAX_CLOCK_SKEW",
+    "Keyring",
     "KeyringUnavailable",
     "Refusal",
     "basis_in_force",
     "ingest",
+    "issuers_of",
     "keyring_fingerprint",
     "load_keyring",
 ]
