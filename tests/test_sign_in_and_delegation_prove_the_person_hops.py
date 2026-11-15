@@ -229,13 +229,18 @@ def test_each_identity_signer_is_mapped_to_its_own_kind_and_nothing_else():
     from assurance import identity_evidence
 
     by_kind = {k: sorted(s for s, v in comp.SIGNER_EVIDENCE.items() if v == k) for k in comp.IDENTITY_EVIDENCE_KINDS}
-    assert by_kind == {"authentication": ["mythos-signin-collector"], "delegation": ["mythos-grant-collector"]}
+    assert by_kind == {
+        "authentication": ["customer-signin-collector", "mythos-signin-collector"],
+        "delegation": ["customer-grant-collector", "mythos-grant-collector"],
+    }
     assert comp.IDENTITY_EVIDENCE_KINDS.isdisjoint(comp.EVIDENCE_KINDS)
     # On a chain outcome an identity signer is no evidence about the chain.
     for signer in by_kind["authentication"] + by_kind["delegation"]:
         assert comp.evidence_kind(comp.BASIS_DEMONSTRATED, signer) == comp.EVIDENCE_UNCLASSIFIED
     assert set(identity_evidence.SIGNER_WITNESS) == {*by_kind["authentication"], *by_kind["delegation"]}
-    for near in ("mythos_signin_collector", "Mythos-signin-collector", "mythos-signin-collectors"):
+    for near in (
+        "mythos_signin_collector", "Mythos-signin-collector", "mythos-signin-collectors", "customer_signin_collector",
+    ):
         assert comp.signer_evidence(near) == comp.EVIDENCE_UNCLASSIFIED
     from assurance import authority_chain as ac
 
