@@ -198,6 +198,11 @@ PLANTED = {
     "in the endpoint's login": {"base_url": f"https://operator:{KEY}@client.example/v1/chat/completions"},
     "in the endpoint's query": {"base_url": f"{ENDPOINT}?api_key={KEY}&api-version=1"},
     "in the endpoint's parameters and fragment": {"base_url": f"{ENDPOINT};session={KEY}#{KEY}"},
+    # A parameter on a segment that is not the path's last: urlparse splits off only the
+    # last segment's, so a path kept as parsed still carries this one.
+    "in a parameter of a middle segment": {
+        "base_url": f"https://client.example/v1;session={KEY}/chat/completions;v={KEY}"
+    },
 }
 
 
