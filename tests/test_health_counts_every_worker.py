@@ -38,6 +38,7 @@ import sys
 import threading
 import time
 import types
+import uuid
 
 import pytest
 from django.core.management import call_command
@@ -172,6 +173,35 @@ def reports(tmp_path, monkeypatch):
         thread.join(10)
     for worker in workers:
         worker.end()
+
+
+def test_a_worker_has_one_id_whichever_thread_asks_first(monkeypatch):
+    """Two threads that ask for this worker's id at the same moment, before it has one
+    (at start-up: the publisher's first write and the first request), are given the
+    same id. Each is held after it has made its candidate until the other has made
+    one too, so neither has kept an id when both have one in hand. Before, each kept
+    its own: a report written under one id by a worker that named itself another."""
+    monkeypatch.setattr(worker_reports, "_ID", {})
+    both_made_one = threading.Barrier(2, timeout=10)
+    made = []
+
+    def candidate():
+        made.append(uuid.uuid4().hex[:16])
+        mine = made[-1]
+        both_made_one.wait()
+        return mine
+
+    monkeypatch.setattr(worker_reports, "_new_id", candidate)
+    given = []
+    askers = [threading.Thread(target=lambda: given.append(worker_reports.worker_id())) for _ in range(2)]
+    for asker in askers:
+        asker.start()
+    for asker in askers:
+        asker.join(15)
+    assert len(made) == 2 and made[0] != made[1], made
+    assert len(given) == 2 and given[0] == given[1], given
+    assert worker_reports.worker_id() == given[0]
+    assert given[0] in made
 
 
 def _health():
