@@ -51,9 +51,32 @@ held back that way names each gap among its ``gaps``, and its release is
 release is ``PASS`` only for ``recovery_accepted`` (``status.release_may_pass``) and
 ``FAIL`` for every other state.
 
+**Scope (SPINE SP-3).** Each step names the revision of the incident's scope it was
+derived under (``scope_revision``; :mod:`assurance.incident_scope`), and a recovered state
+holds only for that revision:
+
+- *No declared scope is unknown, never ok.* With no revision on record a step cannot reach
+  a recovered state: it is held back as a coverage gap holds it, names
+  ``scope:not_declared`` among its gaps and reads ``AUDIT_INCOMPLETE``.
+- *A wider scope.* When a later revision adds an item, a recovered step taken before it
+  no longer stands. Its row is history and is not rewritten; every read
+  (:func:`served`) shows it as the last state before it that was not a recovered one,
+  with the revision and each added item among its gaps
+  (``scope:revision:<n>:added:<kind>:<ref>``) and release ``AUDIT_INCOMPLETE``, and keeps
+  what the row recorded beside it. A row from before SP-3 names no revision and reads the
+  same way, as ``scope:not_declared``.
+- *Until steps are recorded under the new revision.* The next step after a recovered one
+  that no longer stands returns to ``under_investigation`` under the current revision.
+  After ``restored_with_restrictions`` that is S1's reopen and names the step. S1 lets
+  nothing follow ``recovery_accepted``, not even a reopen, so after one the step follows
+  nothing: it is derived as a recovery's first step is, and S1's step check runs from it.
+- *A narrower scope.* A revision that only removes items holds nothing back and lifts
+  nothing: it never advances a state by itself.
+
 **Residual uncertainty** is a list of statements, each with its sources: every open
-``Unknown`` of the finding, every coverage gap, every receipt that cannot say whether its
-effect took, and any posted statement, whose sources must be this step's own links.
+``Unknown`` of the finding, every coverage gap, a scope that is not declared, every
+receipt that cannot say whether its effect took, and any posted statement, whose sources
+must be this step's own links.
 
 Reads and writes only this record; nothing a stop or the decision reads.
 """
@@ -68,7 +91,7 @@ from django.utils import timezone
 from mythos_core import coverage as cov
 from mythos_core import status as st
 
-from . import composition, effect_reconciliation, observed_outcomes, retest_closure
+from . import composition, effect_reconciliation, incident_scope, observed_outcomes, retest_closure
 
 INCIDENT_RECORDED = "incident_recorded"
 EVIDENCE_LINKED = "evidence_linked"
@@ -92,7 +115,8 @@ _NEEDS = {
 }
 #: How far along each state is. ``recovery_incomplete`` has no rank: its blockers come first.
 _RANK = {state: rank for rank, state in enumerate(st.RECOVERY_STATES[:6])}
-#: The recovered states: neither is ever reached on incomplete coverage.
+#: The recovered states: neither is ever reached on incomplete coverage or with no declared
+#: scope, and each holds only for the scope revision its step was derived under.
 RECOVERED = frozenset({st.RESTORED_WITH_RESTRICTIONS, st.RECOVERY_ACCEPTED})
 
 POSTED = ("evidence", "permits", "receipts", "coverage", "gaps", "restrictions", "residual_uncertainty")
@@ -372,16 +396,28 @@ def _condition_texts(conditions: list[dict]) -> list[str]:
     return [f"{c['condition']}:{c['witness']['kind']}:{c['witness']['ref']}" for c in conditions]
 
 
-def derive(*, ref: str, links: dict, manifest: cov.Manifest, accepted: str, previous) -> dict | None:
+def lapsed(row, revisions) -> list[str]:
+    """Each thing about the incident's scope that takes ``row``'s recovered state away,
+    named (:func:`assurance.incident_scope.holds`): empty when ``row`` is not a recovered
+    state, or the scope revision it was derived under still stands. Pure."""
+    return incident_scope.holds(row.scope_revision, revisions) if row.state in RECOVERED else []
+
+
+def derive(
+    *, ref: str, links: dict, manifest: cov.Manifest, accepted: str, previous, scope_revision=None, revisions=()
+) -> dict | None:
     """What a step resting on ``links``, ``manifest`` and ``accepted`` (the owner's
-    acceptance in force, or blank) says after ``previous``: its state, reopens,
-    conditions, gaps, restrictions, release and residual uncertainty -- or None, when
-    nothing may follow ``previous`` that the witnesses support. Pure."""
+    acceptance in force, or blank) says after ``previous``, derived under revision
+    ``scope_revision`` of the incident's scope (None: none is declared) with every
+    revision in ``revisions``, oldest first: its state, reopens, conditions, gaps,
+    restrictions, release and residual uncertainty -- or None, when nothing may follow
+    ``previous`` that the witnesses support. Pure."""
     facts = _facts(links, accepted)
     holds, complete = _coverage_holds(manifest)
+    scope_holds = incident_scope.holds(scope_revision, revisions)
     blocked = bool(facts[EFFECT_NOT_APPLIED])
 
-    def supported(state, *, coverage_counts=True):
+    def supported(state, *, holds_count=True):
         if state == st.RECOVERY_INCOMPLETE:
             return blocked
         if blocked and state != st.UNDER_INVESTIGATION:
@@ -392,34 +428,41 @@ def derive(*, ref: str, links: dict, manifest: cov.Manifest, accepted: str, prev
             state == st.RESTORED_WITH_RESTRICTIONS and not links["restrictions"]
         ):
             return False
-        return complete or state not in RECOVERED or not coverage_counts
+        return (complete and not scope_holds) or state not in RECOVERED or not holds_count
 
-    state = _step(None if previous is None else previous.state, supported)
+    # A recovered step whose scope no longer stands is followed by a return to the
+    # investigation. S1 lets nothing follow an accepted recovery, so after one the step
+    # follows nothing: it is the first of the recovery under the current revision.
+    rescoped = previous is not None and bool(lapsed(previous, revisions))
+    follows = None if rescoped and previous.state in st.RECOVERY_TERMINAL else previous
+    state = st.UNDER_INVESTIGATION if rescoped else _step(None if previous is None else previous.state, supported)
     if state is None:
         return None
-    held = not complete and any(supported(one, coverage_counts=False) for one in RECOVERED)
+    held = (not complete or bool(scope_holds)) and any(supported(one, holds_count=False) for one in RECOVERED)
     conditions = [
         {"condition": name, "witness": {"kind": kind, "ref": witness}}
         for name in dict.fromkeys((*_BASE, *_NEEDS[state]))
         for kind, witness in facts[name]
     ]
     gaps = [*links["gaps"], *(f"{EFFECT_NOT_APPLIED}:receipt:{r}" for _, r in facts[EFFECT_NOT_APPLIED])]
-    gaps += holds if held else []
-    reopens = str(previous.uuid) if previous is not None and state == st.UNDER_INVESTIGATION else ""
+    gaps += [*holds, *scope_holds] if held else []
+    reopens = str(follows.uuid) if follows is not None and state == st.UNDER_INVESTIGATION else ""
     try:
         recovery = st.Recovery(
             ref=ref, state=state, conditions=tuple(_condition_texts(conditions)), gaps=tuple(gaps),
             restrictions=tuple(links["restrictions"]),
             owner_acceptance=accepted if state == st.RECOVERY_ACCEPTED else "", reopens=reopens,
         )
-        if previous is not None:
-            st.check_recovery_step(_as_recovery(previous), recovery)
+        if follows is not None:
+            st.check_recovery_step(_as_recovery(follows), recovery)
     except st.RecoveryError as exc:
         raise RecoveryRefused(exc.code, str(exc)) from None
     gate = st.PASS if st.release_may_pass([recovery]) or held else st.FAIL
+    release = cov.release_given_coverage(manifest, gate)
     residual = [
         *({"statement": u["question"], "sources": [{"kind": "unknown", "ref": u["uuid"]}]} for u in links["unknowns"]),
         *({"statement": hold, "sources": [{"kind": "coverage", "ref": manifest.scope}]} for hold in holds),
+        *({"statement": hold, "sources": [{"kind": "scope", "ref": manifest.scope}]} for hold in scope_holds),
         *(
             {"statement": "effect_unknown", "sources": [{"kind": "receipt", "ref": r["receipt_id"]}]}
             for r in links["receipts"] if r["conclusion"] == st.UNKNOWN
@@ -432,16 +475,18 @@ def derive(*, ref: str, links: dict, manifest: cov.Manifest, accepted: str, prev
         "conditions": conditions,
         "gaps": gaps,
         "restrictions": list(links["restrictions"]),
-        "release": cov.release_given_coverage(manifest, gate),
+        # A pass never rests on a scope that holds anything back, complete coverage or not.
+        "release": st.AUDIT_INCOMPLETE if scope_holds and release == st.PASS else release,
         "residual_uncertainty": residual,
     }
 
 
-def _derived(row, previous) -> dict | None:
+def _derived(row, previous, revisions) -> dict | None:
     in_force = row.accepted_by_id is not None and row.accepted_until is not None and row.accepted_until > row.recorded_at
     return derive(
         ref=str(row.uuid), links=row.links, manifest=manifest_of(row.finding, row.coverage),
         accepted=f"user:{row.accepted_by_id}" if in_force else "", previous=previous,
+        scope_revision=row.scope_revision, revisions=revisions,
     )
 
 
@@ -453,34 +498,41 @@ def _stored(row) -> dict:
 
 
 def check_derived(row) -> None:
-    """Refuse ``row`` (unsaved) unless every derived field is what :func:`derive` says of
-    its own links, coverage and acceptance after the step before it."""
+    """Refuse ``row`` (unsaved) unless it names the incident's current scope revision
+    (none when none is declared) and every derived field is what :func:`derive` says of
+    its own links, coverage and acceptance after the step before it, under that revision."""
     from .models import RecoveryRecord
 
     previous = RecoveryRecord.objects.filter(finding_id=row.finding_id, version__lt=row.version).order_by("-version").first()
+    revisions = incident_scope.revisions_of([row.finding_id]).get(row.finding_id, [])
     try:
-        derived = _derived(row, previous) if row.links.get("incident") == str(row.finding.uuid) else None
+        current = row.links.get("incident") == str(row.finding.uuid) and row.scope_revision == incident_scope.current_of(revisions)
+        derived = _derived(row, previous, revisions) if current else None
     except (KeyError, TypeError, AttributeError):
         derived = None
     if derived != _stored(row):
         raise RecoveryRefused(
             "not_derived",
             "a recovery step's state, conditions, gaps, restrictions, release and residual uncertainty are derived "
-            "from what it rests on and the step before it; this one says otherwise",
+            "from what it rests on, the step before it and the incident's current scope revision; this one says "
+            "otherwise",
         )
 
 
 def draft(finding, *, version, links, coverage=None, accepted_by=None, accepted_until=None, recorded_by=None,
-          recorded_at=None, previous=None):
-    """The next step of ``finding``'s recovery after ``previous``, unsaved, with every
-    derived field derived -- or None, when nothing may follow ``previous``."""
+          recorded_at=None, previous=None, revisions=()):
+    """The next step of ``finding``'s recovery after ``previous``, unsaved, derived under
+    the current one of ``revisions`` (the incident's scope revisions, oldest first; none
+    given is no declared scope), with every derived field derived -- or None, when
+    nothing may follow ``previous``."""
     from .models import RecoveryRecord
 
     row = RecoveryRecord(
         finding=finding, version=version, links=links, coverage=coverage or {}, accepted_by=accepted_by,
         accepted_until=accepted_until, recorded_by=recorded_by, recorded_at=recorded_at or timezone.now(),
+        scope_revision=incident_scope.current_of(revisions),
     )
-    derived = _derived(row, previous)
+    derived = _derived(row, previous, revisions)
     if derived is None:
         return None
     row.state, row.reopens, row.conditions = derived["state"], derived["reopens"], derived["conditions"]
@@ -498,7 +550,10 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
 
     now = timezone.now()
     previous = RecoveryRecord.objects.filter(finding_id=finding.pk).order_by("-version").first()
-    if previous is not None and previous.state in st.RECOVERY_TERMINAL:
+    revisions = incident_scope.revisions_of([finding.pk]).get(finding.pk, [])
+    # An accepted recovery is final for the scope revision it was accepted under, and
+    # only for that one: once that scope no longer stands, steps are recorded again.
+    if previous is not None and previous.state in st.RECOVERY_TERMINAL and not lapsed(previous, revisions):
         raise RecoveryRefused("terminal", f"the recovery was accepted (step {previous.version}); nothing follows")
     if accept_until is not None:
         if finding.deployment.owner_id is None:
@@ -515,7 +570,7 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
                 row = draft(
                     finding, version=1 if previous is None else previous.version + 1, links=links, coverage=coverage,
                     accepted_by=by if accept_until is not None else None, accepted_until=accept_until,
-                    recorded_by=by, recorded_at=now, previous=previous,
+                    recorded_by=by, recorded_at=now, previous=previous, revisions=revisions,
                 )
                 if row is None:
                     break
@@ -535,21 +590,34 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
 # ------------------------------------------------------------------ the reads
 
 
-def served(row) -> dict:
-    """One step as its reads serve it: every derived field as recorded, what it rests
-    on, its coverage manifest with what ``coverage.coverage_ratio`` measures of it, and
-    who accepted and recorded it (``None`` when nobody is on record). No summary badge:
-    the state is one of S1's words, beside its conditions and gaps."""
+def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION) -> dict:
+    """One step as its reads serve it: every derived field, what it rests on, its
+    coverage manifest with what ``coverage.coverage_ratio`` measures of it, and who
+    accepted and recorded it (``None`` when nobody is on record). No summary badge: the
+    state is one of S1's words, beside its conditions and gaps.
+
+    ``scope_gaps`` is what about the incident's scope holds a recovered state back for
+    this step now (:func:`assurance.incident_scope.holds`), and it is served with the
+    step's ``scope_revision`` whatever the step's state. Where the step is a recovered
+    state and any stands, the step is not served as recovered: its ``state`` is
+    ``held_at`` (the last state before it that was not a recovered one), its ``gaps``
+    name each, and its ``release`` is ``AUDIT_INCOMPLETE``. ``recorded`` is what the
+    row holds, always: the row is history and is not rewritten."""
     measured = cov.coverage_ratio(manifest_of(row.finding, row.coverage))
+    scope_gaps = list(scope_gaps)
+    stands = row.state not in RECOVERED or not scope_gaps
     return {
         "ref": str(row.uuid),
         "version": row.version,
-        "state": row.state,
+        "state": row.state if stands else held_at,
         "reopens": row.reopens or None,
         "conditions": row.conditions,
-        "gaps": row.gaps,
+        "gaps": row.gaps if stands else [*row.gaps, *scope_gaps],
         "restrictions": row.restrictions,
-        "release": row.release,
+        "release": row.release if stands else st.AUDIT_INCOMPLETE,
+        "scope_revision": row.scope_revision,
+        "scope_gaps": scope_gaps,
+        "recorded": {"state": row.state, "gaps": row.gaps, "release": row.release},
         "residual_uncertainty": row.residual_uncertainty,
         "links": row.links,
         "coverage": {
@@ -583,26 +651,52 @@ def _steps_of(finding_ids) -> dict:
     return steps
 
 
-def _incident(finding, steps: list) -> dict:
-    last = steps[-1] if steps else None
+def served_steps(steps: list, revisions: list) -> list[dict]:
+    """Every step of one incident, oldest first, as its reads serve it under the
+    incident's scope ``revisions`` (oldest first): each with the scope revision it was
+    derived under and what holds it back now (:func:`served`)."""
+    held_at, out = st.UNDER_INVESTIGATION, []
+    for step in steps:
+        out.append(served(step, incident_scope.holds(step.scope_revision, revisions), held_at))
+        if step.state not in RECOVERED:
+            held_at = step.state
+    return out
+
+
+def _incident(finding, steps: list, revisions: list) -> dict:
+    read = served_steps(steps, revisions)
+    last = read[-1] if read else None
     return {
         "finding": str(finding.uuid),
         "title": finding.title,
         "severity": finding.severity,
-        "current": None if last is None else {"version": last.version, "state": last.state, "release": last.release},
-        "steps": [served(step) for step in steps],
+        # The incident's current scope revision; None when no scope is declared.
+        "scope_revision": incident_scope.current_of(revisions),
+        # As the last step reads now, never as a recovered state its scope has left behind.
+        "current": None if last is None else {"version": last["version"], "state": last["state"], "release": last["release"]},
+        "steps": read,
     }
 
 
 def finding_record(finding) -> dict:
-    """One incident's recovery record: every step, oldest first. Two queries."""
-    return {"deployment": str(finding.deployment.uuid), **_incident(finding, _steps_of([finding.pk]).get(finding.pk, []))}
+    """One incident's recovery record: every step, oldest first, each with the scope
+    revision it was derived under, and the incident's current one. Three queries."""
+    steps = _steps_of([finding.pk]).get(finding.pk, [])
+    revisions = incident_scope.revisions_of([finding.pk]).get(finding.pk, [])
+    return {"deployment": str(finding.deployment.uuid), **_incident(finding, steps, revisions)}
+
+
+def recorded_steps(finding, steps: list) -> list[dict]:
+    """The ``steps`` just recorded for ``finding``, as its read serves them."""
+    versions = {step.version for step in steps}
+    return [step for step in finding_record(finding)["steps"] if step["version"] in versions]
 
 
 def deployment_records(deployment, *, offset: int, page_size: int) -> dict:
     """The deployment's incidents -- its findings that have a recovery record -- one page
-    of them, each with every step oldest first, and how many there are: the count and
-    the page are of this deployment's incidents only. Three queries."""
+    of them, each with every step oldest first and its current scope revision, and how
+    many there are: the count and the page are of this deployment's incidents only. Four
+    queries."""
     from django.db.models import Exists, OuterRef
 
     from .history_reads import _envelope, _page
@@ -613,4 +707,6 @@ def deployment_records(deployment, *, offset: int, page_size: int) -> dict:
     ).order_by("id")
     page, total = _page(incidents, offset, page_size)
     steps = _steps_of([finding.pk for finding in page])
-    return _envelope(deployment, "incidents", [_incident(f, steps.get(f.pk, [])) for f in page], total, offset, page_size)
+    revisions = incident_scope.revisions_of([finding.pk for finding in page])
+    read = [_incident(f, steps.get(f.pk, []), revisions.get(f.pk, [])) for f in page]
+    return _envelope(deployment, "incidents", read, total, offset, page_size)

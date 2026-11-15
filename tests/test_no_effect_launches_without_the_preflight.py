@@ -121,6 +121,7 @@ EFFECTS = {
     ("finding-retest-checks-collect", "POST"): _ENGINE_READ,
     ("finding-repair-contracts", "POST"): _RECORD,
     ("finding-recovery-record", "POST"): _RECORD,
+    ("finding-scope-revisions", "POST"): _RECORD,
     ("provider-list", "POST"): _RECORD,
     ("provider-detail", "PUT"): _RECORD,
     ("provider-detail", "PATCH"): _RECORD,

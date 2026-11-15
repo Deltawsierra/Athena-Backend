@@ -974,6 +974,52 @@ signed-in person's acceptance, refused (403) unless they are the deployment's ow
 names no one. A refused link or field is a 400; a step that changes links and no state,
 or may not follow the last, is a 409 with the reason.
 
+## An incident's scope, versioned (SPINE SP-3)
+
+What an incident is believed to have affected changes during an investigation: a backup
+route is found late, a workflow turns out never to have been called. The scope of an
+incident -- a finding -- is kept as numbered revisions (`IncidentScopeRevision`, migration
+`assurance.0087`, `assurance/incident_scope.py`), one per change. Each holds the items in
+scope, why, the evidence it rests on and who declared it. An item is `{"kind", "ref"}`,
+resolved in the finding's own deployment and refused otherwise: an `asset` (by uuid; its
+`Asset.Kind` is kept beside it) or an approved `workflow` (by slug). A route has no record
+of its own here, so a route is in scope as the assets on it. Every revision after the
+first names the one it `supersedes`, and the earlier one stays exactly as recorded.
+Append-only, as every history is (`assurance/append_only.py`); on no stop path, and read
+by no decision.
+
+**No recovery outlives the scope it was taken under.** Each recovery step names the
+revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered state
+(`restored_with_restrictions`, `recovery_accepted`) holds only for that revision:
+
+- **No declared scope is unknown, never ok.** With none declared, no step reaches a
+  recovered state: it names `scope:not_declared` among its gaps and reads
+  `AUDIT_INCOMPLETE`.
+- **A wider scope.** When a later revision adds an item, the next read no longer shows the
+  step as recovered. It shows the last state before it that was not a recovered one, names
+  the revision and each added item among the gaps
+  (`scope:revision:<n>:added:<kind>:<ref>`) and reads `AUDIT_INCOMPLETE`, never `PASS`.
+  What the row recorded is served beside it (`recorded`); the row is not rewritten.
+- **Until steps are recorded under the new revision.** The next step returns to
+  `under_investigation`. After `restored_with_restrictions` that is S1's reopen, and it
+  names the step it reopens. S1 lets nothing follow `recovery_accepted`, so after one the
+  step follows nothing, and S1's step check runs from it on.
+- **A narrower scope.** A revision that only removes items holds nothing back and lifts
+  nothing: it never advances a state by itself.
+- **Rows from before this change** name no revision and are not rewritten. They read
+  `scope:not_declared`: one that recorded a recovered state reads `AUDIT_INCOMPLETE` until
+  a scope is declared and steps are recorded under it.
+
+`GET /api/assurance/findings/<uuid>/scope-revisions/` serves every revision, oldest first,
+with what each added and removed, and the number of the current one (null when none is
+declared). `POST` on it records the next revision (admin only, attributed to the caller):
+`{"items": [{"kind", "ref"}], "reason", "evidence": [<uuid>]}`. An item or a piece of
+evidence that is not this deployment's is a 400, exactly as one that does not exist; a
+revision that changes nothing is a 409. Both recovery-record reads carry each step's
+`scope_revision` and `scope_gaps` and the incident's current `scope_revision`. All of them
+read through the per-user queryset: a finding the person cannot read is a 404. The `GET`
+is an evidence read and the `POST` an effect (`safety/degraded.py`); neither is a stop.
+
 ## Economic Exposure: the customer parameter set
 
 Economic Exposure estimates what a finding could cost, as a range with its sources

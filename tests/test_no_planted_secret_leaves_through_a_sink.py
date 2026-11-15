@@ -1834,6 +1834,9 @@ ROUTES: dict[str, str] = {
     # A finding's recovery record (SPINE SP-1): its steps, as recorded; the write answers
     # the steps it recorded, as the read serves them.
     "finding-recovery-record": _READ,
+    # A finding's scope revisions (SPINE SP-3): every revision, as recorded; the write
+    # answers the revision it recorded, as the read serves it.
+    "finding-scope-revisions": _READ,
     # A retest check (assurance.retest_checks): the collect answers the check it recorded
     # -- the engine's detail, the target's login withheld -- and the finding's unchanged
     # closure standing; the list answers every check of the finding.

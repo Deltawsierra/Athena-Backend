@@ -35,6 +35,7 @@ from assurance.models import (
     Unknown,
 )
 from assurance.retest_closure import INCOMPLETE_REPAIR, INCOMPLETE_REPAIR_PATTERNS, record_closure_evidence
+from tests.incident_scopes import declare as declare_scope
 from tests.repair_contracts import agree, replay
 from tests.signed_chains import record_reconciliation, record_signed
 
@@ -110,6 +111,7 @@ def test_a_recovery_starts_under_investigation_on_the_incident_alone():
 
 def test_each_step_follows_the_last_as_s1_allows_and_names_its_witnesses():
     finding = _incident()
+    declare_scope(finding)  # SP-3: a recovered state is reached only under a declared scope
     closure = _repaired_and_tested(finding)
     owner = finding.deployment.owner
 
@@ -134,6 +136,7 @@ def test_each_step_follows_the_last_as_s1_allows_and_names_its_witnesses():
 
 def test_a_declared_coverage_gap_never_yields_a_recovered_state_and_reads_audit_incomplete():
     finding = _incident()
+    declare_scope(finding)  # SP-3: so that the coverage gap is the one thing holding the acceptance back
     _repaired_and_tested(finding)
     owner = finding.deployment.owner
 
@@ -151,6 +154,7 @@ def test_a_declared_coverage_gap_never_yields_a_recovered_state_and_reads_audit_
 
 def test_a_gap_also_holds_back_restored_with_restrictions():
     finding = _incident()
+    declare_scope(finding)  # SP-3: so that the coverage gap is the one thing holding the restore back
     _repaired_and_tested(finding)
     dep = finding.deployment
     permit = _permit(dep)
