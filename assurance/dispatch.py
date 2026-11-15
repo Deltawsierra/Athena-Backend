@@ -62,6 +62,7 @@ from .models import (
     Finding,
 )
 from . import oplog as _oplog
+from . import worker_reports as _worker_reports
 from .oplog import emit_now, log_later
 
 __all__ = ["emit_now", "log_later"]
@@ -902,6 +903,37 @@ _ERROR_LIMIT = 2000
 UNRECORDED_BOUND_FACTOR = 2
 _UNRECORDED_REFUSED = [0]
 
+#: What :func:`degraded_counts` read at the last sweep that reported it.
+_DEGRADED_REPORTED: list = [{}]
+
+
+def degraded_counts() -> dict:
+    """What this process lost or refused since it started, by name: lines meant for
+    stderr that never reached it, log records dropped from the full log queue, and
+    dispatches its stops could not record that were refused past the hard bound.
+    Any non-zero count is a degraded process. Plain reads of counters -- no lock,
+    no query -- so a view may call it, and no stop's path does."""
+    return {
+        "stderr_lines_lost": _oplog.STDERR_LOST[0],
+        "log_records_dropped": _oplog.LOG_DROPPED[0],
+        "unrecorded_dispatches_refused": _UNRECORDED_REFUSED[0],
+    }
+
+
+def _report_degraded() -> None:
+    """The sweep's warning for :func:`degraded_counts`: once whenever a count has
+    changed since the last sweep, with every non-zero total."""
+    counts = degraded_counts()
+    if counts == _DEGRADED_REPORTED[0] or not any(counts.values()):
+        _DEGRADED_REPORTED[0] = counts
+        return
+    _DEGRADED_REPORTED[0] = counts
+    logger.warning(
+        "this process is degraded since it started: %s",
+        ", ".join(f"{name}={count}" for name, count in counts.items() if count),
+    )
+
+
 #: The sweeper's start, retried after a failure: ``{"pid", "failures", "next"}``.
 _SWEEPER_RETRY: dict = {}
 SWEEPER_RETRY_MAX_SECONDS = 300.0
@@ -924,6 +956,7 @@ def _after_fork_in_child() -> None:
     _SWEEPER_STARTING = threading.Lock()
     _NOT_STARTED[0] = 0
     _UNRECORDED_REFUSED[0] = 0
+    _DEGRADED_REPORTED[0] = {}
 
 
 if hasattr(os, "register_at_fork"):
@@ -1582,6 +1615,7 @@ def sweep_owed_blocking_dispatches() -> list:
             _max_concurrent_runs() + _max_waiting_runs(),
             not_started,
         )
+    _report_degraded()
     return started
 
 
@@ -1596,6 +1630,9 @@ def _sweeper(interval: float, stop) -> None:
             # Records queued while no thread could start (a stop's ERROR among
             # them): the log thread is started again to write them.
             _oplog.start_pump()
+        # Lines for stderr that waited while no thread could start -- a dispatch past
+        # its bound named among them -- and any count of lost ones: written now.
+        _oplog.start_stderr_writer()
         try:
             sweep_owed_blocking_dispatches()
         except Exception:  # noqa: BLE001 - it never raises; if it did, sweep again next time
@@ -1673,7 +1710,13 @@ def ensure_owed_sweeper() -> None:
     by the WSGI and ASGI entry points, so it starts in the process that serves -- a
     pre-forking server's worker, never its master -- on that process's first
     request. One that died, or could not start, is started again (after a backoff,
-    for a start that failed). Costs a comparison and a liveness check after that."""
+    for a start that failed). Costs a comparison and a liveness check after that.
+
+    The same for this worker's report publisher (:mod:`assurance.worker_reports`),
+    which publishes :func:`degraded_counts` where every worker and ``/api/health/``
+    read them: a comparison and a liveness check, and on the first request a thread
+    started -- never a write, never a wait."""
+    _worker_reports.ensure_publisher(degraded_counts)
     if _oplog._BUF:
         # Records a shortage of threads left queued: the log thread is started
         # again (a check, when it is running).

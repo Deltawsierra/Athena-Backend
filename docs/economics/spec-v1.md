@@ -122,6 +122,10 @@ Industry packs beyond banking (E7), on steps 4, 5 and 6:
 
 37. [Industry packs beyond banking (Economic Exposure E7)](#37-industry-packs-beyond-banking-economic-exposure-e7)
 
+The owner's decision 12 (1 Nov 2026), on step 6's report and section 30's read routes:
+
+38. [The deployment's economic-exposure report](#38-the-deployments-economic-exposure-report)
+
 ## 1. Status and scope
 
 | | |
@@ -4288,6 +4292,7 @@ routes, unserved and nothing else.
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3); never a residual run under a remediation option, which the ROI route serves (section 28.7) |
 | `GET deployments/<uuid>/economics/scenarios/` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time (section 30) |
 | `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed bytes, as stored (section 30) |
+| `GET deployments/<uuid>/economics/exposure-report/?output=html\|pdf` | `deployment-economics-exposure-report` | the deployment's economic-exposure report, a document a customer can be handed (section 38) |
 
 Access is the parameter-set routes' (section 19.3): a signed-in account (401
 otherwise); a deployment the caller cannot see, a scenario of another deployment,
@@ -5832,7 +5837,7 @@ could fill every worker with long runs, and a scan's Stop then waited for a free
 | | |
 |---|---|
 | Code | `assurance/economics/capacity.py`; `@capacity.capped` on `report_api.ScenarioSimulateView.post`, `remediation_api.MitigationSimulateView.post` and (E5, section 33.9) `portfolio_api.PortfolioSimulateView.post` |
-| Tests | `tests/test_economics_run_cap.py`; the canary harness's records path (a simulate at capacity) |
+| Tests | `tests/test_economics_run_cap.py`; `tests/test_economics_run_cap_on_every_platform.py` (POSIX and Windows); `tests/test_economics_run_cap_without_fcntl.py` (a host with no lock); the canary harness's records path (a simulate at capacity) |
 
 ### 32.1 What takes a slot
 
@@ -5863,26 +5868,44 @@ while every slot is held.
 
 ### 32.2 The slots
 
-A slot is an exclusive `flock` (`LOCK_EX | LOCK_NB`) on one small file in the slot
-directory, which every worker on the host shares: `run-<i>.lock` for the host's
-slots, `tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's.
+A slot is an exclusive lock on one small file in the slot directory, which every
+worker on the host shares: `run-<i>.lock` for the host's slots,
+`tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's. The lock is the
+platform's own (`capacity.lock_kind()`), behind one interface, so the routes do not
+change:
 
-- **No slot leaks.** The kernel releases a flock when the last descriptor of its open
-  file closes, so a worker that dies by any means (SIGKILL, the OOM killer, gunicorn's
-  timeout) gives its slots back at once. A database lease with an expiry was the
+| Platform | Lock | Taken without waiting | Released |
+|---|---|---|---|
+| POSIX | `flock` | `LOCK_EX \| LOCK_NB` | `LOCK_UN`, then close; the kernel, when the last descriptor closes or the process dies |
+| Windows | `msvcrt.locking` on byte 0 (`LockFile`) | `LK_NBLCK`, one attempt; never `LK_LOCK`, which retries for 10 s | `LK_UNLCK`, then close; the system, when the handle closes or the process ends (`TerminateProcess` included) |
+
+On Windows the lock is per handle, so a second handle on the same file, in another
+worker or in the same one, is refused, as a second open file is under flock. Only
+"held elsewhere" (`EACCES`) means a slot is busy; any other lock error refuses the run
+(`unreadable`). A byte past the end of a file may be locked, so the slot files stay
+empty on both platforms.
+
+- **No slot leaks.** The operating system releases the lock when the last descriptor of
+  its open file closes, so a worker that dies by any means (SIGKILL or
+  `TerminateProcess`, the OOM killer, gunicorn's timeout) gives its slots back. A
+  database lease with an expiry was the
   alternative: it leaks a dead worker's slot until it expires, and it would put a
   database read in front of the cap. The cap reads no database.
 - **Every exit gives the slot back**: the handler's answer, a refusal, an exception,
   and `SystemExit` (gunicorn's abort of a timed-out worker) release it in a `finally`;
   a client that disconnects is the same (the handler runs to its end, bounded by its
-  deadline). The descriptors are close-on-exec, and released with `LOCK_UN`, so a child
-  process never keeps one.
+  deadline). The descriptors are close-on-exec (not inherited, on Windows), and
+  unlocked before they are closed, so a child process never keeps one.
 - **Per host.** The cap protects the host's worker pool, so it is per host; a deployment
   of several machines has a cap on each. The directory must be local to the host.
 - **Fails closed.** Slot files that cannot be opened refuse the run, 503
-  `economics_capacity` ("cannot be read"); a run is never made uncapped. Where there is
-  no `fcntl` (Windows) no slot can be locked, so every run is refused this way, and the
-  refusal itself cannot raise (`tests/test_economics_run_cap_without_fcntl.py`).
+  `economics_capacity` ("cannot be read"); a run is never made uncapped. A host with
+  neither `fcntl` nor `msvcrt` can lock nothing, so every run is refused this way, and
+  the refusal itself cannot raise (`tests/test_economics_run_cap_without_fcntl.py`).
+  Before #215 every Windows host was such a host; Windows now locks its slots
+  with `msvcrt` and runs a simulation under the same caps
+  (`tests/test_economics_run_cap_on_every_platform.py`, run by CI on Linux and on
+  windows-latest).
 
 ### 32.3 The caps
 
@@ -5918,7 +5941,8 @@ routes that cannot move the decision; at capacity they write nothing at all.
 
 ### 32.5 Decisions this step takes, which the owner may change
 
-1. **flock slots, per host**, over database leases. Recommendation: keep.
+1. **OS lock slots, per host** (`flock` on POSIX, `msvcrt.locking` on Windows), over
+   database leases. Recommendation: keep.
 2. **The per-tenant cap is per deployment**, the tenant boundary (`assurance.models`).
    An analyst sees every deployment, so one analyst can still hold every host slot
    through several deployments; the host cap is what keeps the stop's workers free.
@@ -9047,3 +9071,58 @@ and each is reversible.
 11. **A safety system compromised is priced by its response, the production it stops and
     its recertification**, never by the harm it allowed; equipment damaged on the safety
     systems is that template's (precedence 1), not the equipment template's (interim: kept as built).
+
+## 38. The deployment's economic-exposure report
+
+The owner's decision 12 (1 Nov 2026): "Economic-exposure report: build it. Per
+deployment, read-only, in Athena-Backend, off the stop path." An earlier attempt put
+the exposure into the pentest scan PDF (#187) and was closed, because economics on the
+pentest import path is economics on a stop path
+(`test_nothing_but_the_models_registration_imports_economics`). The report lives in
+the economics package, behind a route of `report_api`, and that guard is unchanged.
+
+| | |
+|---|---|
+| Code | `assurance/economics/exposure_report.py` (the selection, the document, the HTML and PDF), `ExposureReportView` in `report_api.py` |
+| Route | `GET deployments/<uuid>/economics/exposure-report/?output=html\|pdf` (`deployment-economics-exposure-report`), HTML by default |
+| Tests | `tests/test_economics_exposure_report.py`; the route tables of section 27 and the fault plugin |
+
+**The selection rule** (the owner's choice of 22 Oct): the most recent approved
+scenario version with a completed run whose integrity checks verify; a draft or
+unverified figure is never shown. Approved means the version's latest review is an
+approval that counts now (`approval_standing`: by someone who authored neither the
+version nor the parameter-set versions it rests on, on an account still an active
+admin or analyst), whatever the receipt gate's switch says. The version's latest
+completed exposure run is read through `report.build_report`; where its stored rows
+fail a check, the version is passed over (never an older run of it shown) and the
+failed checks are named. With no such version the report says so and shows no figure.
+
+**What it shows**, each from the report of that run: the deployment's scenario
+versions with their latest review; the gross (before insurance) and net (retained
+after insurance) lines' expected annual loss, P10, P50, P90 and severe-but-plausible
+figure, and the market-value line apart; the residual after the version's remediation
+option, where its residual run completed and verifies (modelled, never a measurement
+of a control in place); the run, its integrity status and its receipt; every
+assumption with its source type and evidence; the as-of (valuation) date; and the
+report's limitations.
+
+**Integrity in honest words.** The run's `integrity` status is stated as "integrity
+checks verified", with the checks. A receipt is "on record", and its binding to the
+stored rows is among those checks; its signature is never re-verified by the report,
+which names the receipt route a reader verifies it from.
+
+**Unmeasured is never green.** Every gap is named under "What is not measured": a
+newer version passed over and why, the banner and its reason, each unknown, each line
+or figure not reported, a residual, a receipt or an as-of date not recorded, a figure
+withheld. A report with any gap reads `AUDIT_INCOMPLETE` (`mythos_core.status`); the
+report's own words meet the persona lexicon lint (`mythos_core.persona.lint`).
+
+**Read-only, off the stop path.** It records, recomputes, signs and verifies nothing
+and asks no engine: no `get_or_create`, no receipt service. Every text is escaped, in
+the HTML and in the PDF (a scenario's title is the customer's own). Access is section
+19.3's (a deployment the caller cannot see is 404); the answer is `no-store` and
+`nosniff`, the HTML carries a `default-src 'none'` content security policy, and the
+PDF is a download, byte-identical for the same rows. The route is in
+`safety.stops.NOT_STOPS`, and a fault in `report_api` leaves it unserved and nothing
+else. Its operation class under G14 (#211, not yet merged) is to be declared when that
+lands.
