@@ -153,7 +153,8 @@ jobs:
   # failsafe plane load at start), and runs the tests that must pass there: the wiring
   # of the shared pin guard (Mythos-Core's pinguard, which starts every pytest run here
   # and judges this Windows install by Windows path rules; its own tests run on
-  # windows-latest in Mythos-Core), the stop paths, and the Windows-equivalent tests for the
+  # windows-latest in Mythos-Core), the stop paths, the economic-exposure report (HTML and
+  # PDF, spec section 38), and the Windows-equivalent tests for the
   # two places this service used POSIX-only calls (economics/capacity.py, which locks its
   # run slots with msvcrt where there is no fcntl; oplog.py without select on stderr). The
   # run cap runs here as on Linux: tests/test_economics_run_cap_on_every_platform.py (the
@@ -224,6 +225,7 @@ jobs:
             tests/test_economics_run_cap_on_every_platform.py \
             tests/test_oplog_without_select.py \
             tests/test_failsafe_control_plane.py \
+            tests/test_no_in_flight_failsafe_command_is_left_off_a_list.py \
             tests/test_no_control_holds_back_a_stop.py \
             tests/test_no_dispatch_holds_back_a_stop.py \
             tests/test_no_stop_waits_on_an_engine_answer.py \
@@ -244,6 +246,7 @@ jobs:
             tests/test_economics_run_cap.py::test_no_slot_is_disclosed_to_one_who_cannot_see_the_deployment_or_may_not_run \
             tests/test_economics_run_cap.py::test_a_slot_is_given_back_when_the_run_raises \
             tests/test_economics_run_cap.py::test_a_slot_file_carries_nothing \
+            tests/test_economics_exposure_report.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \

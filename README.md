@@ -241,11 +241,27 @@ command history, as every stop adds to the audit trail. The command list and the
 state view list the stop commands awaiting a signature first -- those already
 signed once, then each account's drafts in turn, so a flood from one account lies
 behind every other operator's newest -- at most 500, never cut by the other row
-caps. Every stop-lane read does work bounded by its row limits, whatever the
-number of commands, returns at most `FAILSAFE_STOP_LANE_READ_BYTES` (default
-1,000,000) of commands in that order, says in its `X-Failsafe-More` header (and
-the state view in `more`) whether it left any out, and marks at most 200
-commands expired per read, in one write. Identical stop-lane reads by one
+caps. After them, both reads list what is in flight (awaiting a signature, or
+ready) before any history, the stops first: the list, the ready stops, then the
+resumes and releases in flight, then consumed, expired, canceled and superseded
+commands, 50 a page under an operator's session (500 ready stops under the
+service token, which reads no history); the state, the starts awaiting a
+signature and the ready stops then the ready starts, 20 a page each. So no
+command in flight is left off a list behind history. Every stop-lane read does
+work bounded by its row limits, whatever the number of commands, returns at most
+`FAILSAFE_STOP_LANE_READ_BYTES` (default 1,000,000) of commands in that order,
+says in its `X-Failsafe-More` header (and the state view in `more`) whether it
+left any out, and marks at most 200 commands expired per read, in one write.
+When it says more, `X-Failsafe-Next` (and the state view's `next`) carries an
+opaque cursor: pass it back as `?cursor=` with the same other parameters for the
+next page. It is a keyset, not an offset, so commands drafted while a reader
+pages never make it skip or repeat one; when the first page's awaiting stops
+were cut, the pages after it list every awaiting stop once, signed first, the
+first page's among them. A cursor that is not one the read gave is answered
+400. A command larger alone than a whole page is named in
+`X-Failsafe-Too-Large` and passed over; open it by its uuid. A command in flight
+past its window is not listed as in flight; it is listed as expired once a read
+has marked it. No stop waits on any page. Identical stop-lane reads by one
 account at once -- identical in the parameters the view reads, whatever else the
 query string carries -- share one computation; reads of different engines do
 not. The state view waits for the engine's live state
@@ -1183,7 +1199,16 @@ dashboard needs (section 30):
 - `GET .../economics/receipts/<receipt id>/`: a Financial Exposure Receipt's signed
   DSSE envelope as stored, as a download (`attachment`, `nosniff`) with the SHA-256
   of its bytes in `X-Content-SHA256`; the receipt id is the report's, dashed; another
-  deployment's receipt is 404, and nothing is signed or verified on the way.
+  deployment's receipt is 404, and nothing is signed or verified on the way;
+- `GET .../economics/exposure-report/?output=html|pdf` (spec, section 38; owner
+  decision 12): the deployment's economic-exposure report, a document a customer can
+  be handed, read-only. It shows the most recent approved scenario version with a
+  completed run whose integrity checks verify -- its gross and net EAL, P10 to P90 and
+  severe figure, its residual after a remediation option, its receipt ("on record";
+  the signature is not re-verified), its assumptions with their sources, its as-of
+  date and limitations -- and names every gap under "What is not measured"; a report
+  with a gap reads `AUDIT_INCOMPLETE`. With no such version it says so and shows no
+  figure. Every text is escaped; it is answered `no-store`, and it writes nothing.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
@@ -1557,12 +1582,48 @@ but as JSON: `detail` says why, `status` is the class's word (`unknown`, `HOLD`,
 `AUDIT_INCOMPLETE`), and `dependency` names what failed by its type, never by its
 message. A stop keeps Django's own 500.
 
-The scan launch and the reconcile's resend ask the preflight gate first. They are
-now held (409) in every mode when the engine cannot be asked, hangs past its timeout
-or answers in a shape nothing can read. They used to proceed under the default
-`observe`. Observe still lets a `blocked` verdict proceed and records it. A defender
+Every launch asks the preflight gate first: the scan launch, the reconcile's resend,
+and the LLM scan (`POST /api/pentest/llm-scan/`), which used to ask nothing. Each is
+held (409) in every mode when the engine cannot be asked, hangs past its timeout or
+answers in a shape nothing can read. They used to proceed under the default
+`observe`. Observe still lets a `blocked` verdict proceed and records it on the scan;
+`enforce` refuses it. `tests/test_no_effect_launches_without_the_preflight.py` says,
+for every effect route, whether it launches, and fails on a launch call the
+preflight does not come before. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
+
+### Liveness and readiness
+
+`GET /api/health/` is liveness. It answers `{"status": "ok"}` at once from this
+process, whatever is down, so a load balancer does not restart a backend for an
+outage that is not its own.
+
+`GET /api/health/ready/` is readiness. It asks each dependency on a bounded check of
+its own and names each one, with the reason:
+
+- **the database**: `SELECT 1`, and the row read back must be the one asked for;
+- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`;
+- **Mythos-Core**: the modules this backend loads import, and its word for unknown
+  is still `unknown`.
+
+Each reads `ok` (it answered as asked), `degraded` (it answered, and the answer was a
+failure: refused, raised, or not the answer) or `unknown` (no answer within the
+bound, or nothing configured to ask). The answer waits at most 2 s in all. A check
+still running then reads `unknown`, and the next probe waits on that same check, so
+a hung dependency holds one thread however often the probe polls. Every reason is
+named by the exception's type, never its message.
+
+Every dependency `ok` answers 200 with `status: "ok"`. Anything else answers 503,
+in the evidence-read shape above (`status: "unknown"`, `dependency` naming the first
+one that is not `ok`). Both list `dependencies` and `not_probed`: connectors are per
+deployment, and asking the receipt signer would sign something. The route is not a
+stop and gates nothing: no stop, gate or control reads it. Like liveness, it needs
+no sign-in, is not throttled, and is not sent through the gateway.
+
+```powershell
+curl.exe -s http://localhost:8000/api/health/ready/
+```
 
 ## Verifying a receipt
 
@@ -1781,6 +1842,15 @@ python manage.py check --deploy --fail-level WARNING
 
 CI runs this and it must stay clean. `DJANGO_SECRET_KEY` is required outside
 development, and the process refuses to start without it.
+
+Run with `DJANGO_DEBUG` off. With `DEBUG=True`, Django shows its technical error page
+for an uncaught failure, and the root URLconf's `handler500` (`safety.degraded.server_error`,
+"Every operation says how it degrades", above) does not run. Every failure then
+answers that HTML page, never the JSON reason and status word. The deploy check above
+refuses `DEBUG=True`.
+
+Point the load balancer's readiness check at `/api/health/ready/`, and its liveness
+check at `/api/health/` ("Liveness and readiness", above).
 
 Run at least three workers, and set `WEB_CONCURRENCY` to the worker count (gunicorn
 reads it as its `--workers` default), or `ATHENA_ECONOMICS_RUN_CAP` explicitly: the
