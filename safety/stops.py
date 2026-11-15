@@ -438,6 +438,12 @@ def _get(reason=_READ):
 #: "ANY" is a plain Django view, which serves every method.
 NOT_STOPS = {
     "health": {"GET": "the liveness probe: it answers at once and is already unthrottled"},
+    "readiness": {
+        "GET": (
+            "the readiness probe (config.readiness): a read of whether each dependency answers, "
+            "bounded; it starts, stops and changes nothing, and nothing reads what it answers"
+        )
+    },
     "token_obtain_pair": {
         "POST": (
             "signs in with a password: it issues a token and stops nothing; no stop needs it "
