@@ -241,11 +241,27 @@ command history, as every stop adds to the audit trail. The command list and the
 state view list the stop commands awaiting a signature first -- those already
 signed once, then each account's drafts in turn, so a flood from one account lies
 behind every other operator's newest -- at most 500, never cut by the other row
-caps. Every stop-lane read does work bounded by its row limits, whatever the
-number of commands, returns at most `FAILSAFE_STOP_LANE_READ_BYTES` (default
-1,000,000) of commands in that order, says in its `X-Failsafe-More` header (and
-the state view in `more`) whether it left any out, and marks at most 200
-commands expired per read, in one write. Identical stop-lane reads by one
+caps. After them, both reads list what is in flight (awaiting a signature, or
+ready) before any history, the stops first: the list, the ready stops, then the
+resumes and releases in flight, then consumed, expired, canceled and superseded
+commands, 50 a page under an operator's session (500 ready stops under the
+service token, which reads no history); the state, the starts awaiting a
+signature and the ready stops then the ready starts, 20 a page each. So no
+command in flight is left off a list behind history. Every stop-lane read does
+work bounded by its row limits, whatever the number of commands, returns at most
+`FAILSAFE_STOP_LANE_READ_BYTES` (default 1,000,000) of commands in that order,
+says in its `X-Failsafe-More` header (and the state view in `more`) whether it
+left any out, and marks at most 200 commands expired per read, in one write.
+When it says more, `X-Failsafe-Next` (and the state view's `next`) carries an
+opaque cursor: pass it back as `?cursor=` with the same other parameters for the
+next page. It is a keyset, not an offset, so commands drafted while a reader
+pages never make it skip or repeat one; when the first page's awaiting stops
+were cut, the pages after it list every awaiting stop once, signed first, the
+first page's among them. A cursor that is not one the read gave is answered
+400. A command larger alone than a whole page is named in
+`X-Failsafe-Too-Large` and passed over; open it by its uuid. A command in flight
+past its window is not listed as in flight; it is listed as expired once a read
+has marked it. No stop waits on any page. Identical stop-lane reads by one
 account at once -- identical in the parameters the view reads, whatever else the
 query string carries -- share one computation; reads of different engines do
 not. The state view waits for the engine's live state
