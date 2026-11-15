@@ -1316,10 +1316,11 @@ these routes unserved.
 A simulate request runs its Monte Carlo in the worker that serves it, for up to 120 s,
 so the two simulate routes (and any later Monte Carlo route, which registers with one
 line, `@capacity.capped`) run only in a free slot (`assurance/economics/capacity.py`;
-spec, section 32). A slot is an exclusive `flock` on a small file every worker on the
-host shares, taken WITHOUT WAITING: when none is free the request is answered at once,
-503 with `Retry-After` and code `economics_capacity`, and nothing runs or is recorded.
-The kernel releases a dead worker's flock, so a slot never leaks; every other exit
+spec, section 32). A slot is an exclusive lock on a small file every worker on the
+host shares (`flock` on POSIX, `msvcrt.locking` on byte 0 on Windows), taken WITHOUT
+WAITING: when none is free the request is answered at once, 503 with `Retry-After` and
+code `economics_capacity`, and nothing runs or is recorded. The operating system
+releases a dead worker's lock, so a slot never leaks; every other exit
 (an answer, a refusal, an exception, gunicorn's abort) releases it in a `finally`. The
 caps, each read from the environment by name:
 
@@ -1336,10 +1337,13 @@ caps, each read from the environment by name:
 No stop takes a slot: a scan's Stop and every operator stop are answered within their
 bound while every slot is held (`tests/test_economics_run_cap.py`).
 
-On Windows there is no `fcntl`, so no slot can be locked and none is ever granted: a
-simulate is refused with the same 503 (`economics_capacity`, "the economics run slots
-cannot be read on this server") and is never run uncapped. Nothing else is affected, and
-no stop route is (`tests/test_economics_run_cap_without_fcntl.py`).
+On Windows the slots are locked with `msvcrt` (one attempt, `LK_NBLCK`, never the
+waiting `LK_LOCK`), so a simulation runs there under the same caps, with the same 503
+when they are full, and a worker ended by `TerminateProcess` gives its slots back
+(`tests/test_economics_run_cap_on_every_platform.py`, which CI runs on Linux and on
+windows-latest). A host with no lock at all (neither `fcntl` nor `msvcrt`) is refused
+with the same 503 (`economics_capacity`, "the economics run slots cannot be read on this
+server") and never run uncapped (`tests/test_economics_run_cap_without_fcntl.py`).
 
 ### Continuous financial assurance (E6)
 
@@ -1619,7 +1623,18 @@ answers in a shape nothing can read. They used to proceed under the default
 `observe`. Observe still lets a `blocked` verdict proceed and records it on the scan;
 `enforce` refuses it. `tests/test_no_effect_launches_without_the_preflight.py` says,
 for every effect route, whether it launches, and fails on a launch call the
-preflight does not come before. A defender
+preflight does not come before. `tests/test_no_launch_path_skips_the_preflight.py`
+reads all of this backend's code, routed or not, and fails on any place that can
+start a scan (a launch call, held or named in a string, or the engine's launch route)
+unless the preflight is asked first in the same function, or the place is a private
+helper reached only from code that asks it. An unrouted LLM scan view that asked
+nothing (`pentest/views_llm.py`) was deleted for that reason. The routed LLM scan
+keeps what it tested on the scan (`target_config`): the adapter, the model, the
+target's name and the endpoint (scheme, host, port and path; no login, query or
+fragment). Nothing else the caller sent is kept, so no key reaches the record. It is
+written only once the preflight lets the launch go, and the scan's ingest registers
+the model as a Provider and Asset, so the asset inventory names the model each LLM
+scan tested. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
 
@@ -1633,7 +1648,13 @@ outage that is not its own.
 its own and names each one, with the reason:
 
 - **the database**: `SELECT 1`, and the row read back must be the one asked for;
-- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`;
+- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`. It is
+  asked under its own short timeout (0.5 s to connect, 1 s to read), never the long
+  one a scan is given, and answered within 1.5 s in all. A hung engine, or one that
+  sends a byte inside every read timeout, reads `unknown` inside the bound. The ask
+  runs on a thread of its own, one at a time: a dripped body is cut off at 1.5 s, and
+  while a dripped status line or headers hold that thread, the check answers at once
+  without asking again;
 - **Mythos-Core**: the modules this backend loads import, and its word for unknown
   is still `unknown`.
 
@@ -1643,6 +1664,11 @@ bound, or nothing configured to ask). The answer waits at most 2 s in all. A che
 still running then reads `unknown`, and the next probe waits on that same check, so
 a hung dependency holds one thread however often the probe polls. Every reason is
 named by the exception's type, never its message.
+
+A finished check's reading is served again for 1 s, counted from when the check was
+asked, so a flood of probes costs at most one check per dependency per second. The
+cache never serves an `ok` older than that: a reading that ages out while the answer
+waits on another check is asked again. Each reading carries `age_seconds`.
 
 Every dependency `ok` answers 200 with `status: "ok"`. Anything else answers 503,
 in the evidence-read shape above (`status: "unknown"`, `dependency` naming the first
@@ -1992,9 +2018,18 @@ Logging. A stop's thread never writes to a log handler. A dispatch that is neith
 recorded nor started is named at ERROR, with the `retry_blocking_dispatches
 --deployment N` command to run: at once, in the stop's own thread, as one line to
 stderr -- only if stderr can take it without waiting -- and, for the log handlers,
-through the background log thread. When no thread can start, the record waits in
-that queue (bounded, counted) until the next request, sweep or exit starts or runs
-the writer. Everything else on a stop's path goes the same way, through a queue of
+through the background log thread. A line stderr cannot take at once (a full pipe;
+on Windows, where a thread writes each line, the line before it still being written)
+is never dropped silently: it waits, queued, for the one stderr writer thread, which
+writes it as soon as stderr takes it, and the stop never waits for it. Past 100
+waiting lines, or when stderr fails to take one, the line is counted and the count
+is logged; each line is in the log as well. When no thread can start, the record and
+the line wait in their queues (bounded, counted) until the next request, sweep or
+exit starts or runs the writers. What a process lost or refused since it started --
+lines meant for stderr, log records dropped, unrecorded dispatches refused past the
+hard bound -- is counted, and any non-zero count makes `GET /api/health/` answer
+`"status": "degraded"` (still 200: the process is alive) with each count, and the
+sweep log it at WARNING whenever a count moves. The counts are per process. Everything else on a stop's path goes the same way, through a queue of
 at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
 
