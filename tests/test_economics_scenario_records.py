@@ -678,6 +678,8 @@ def test_no_economics_route_is_a_stop():
         # The read routes the dashboard needs (spec, section 30).
         "deployment-economics-scenarios",
         "deployment-economics-receipt",
+        # The deployment's economic-exposure report (spec, section 38).
+        "deployment-economics-exposure-report",
         # The review and override routes a signed receipt needs (spec, section 35).
         "deployment-economics-scenario-reviews",
         "deployment-economics-scenario-overrides",
@@ -722,6 +724,7 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-groups"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenarios"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-receipt"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-exposure-report"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-scenario-freshness"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-assurance"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenario-refresh"]) == {"POST"}

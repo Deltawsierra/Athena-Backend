@@ -153,7 +153,8 @@ jobs:
   # failsafe plane load at start), and runs the tests that must pass there: the wiring
   # of the shared pin guard (Mythos-Core's pinguard, which starts every pytest run here
   # and judges this Windows install by Windows path rules; its own tests run on
-  # windows-latest in Mythos-Core), the stop paths, and the Windows-equivalent tests for the
+  # windows-latest in Mythos-Core), the stop paths, the economic-exposure report (HTML and
+  # PDF, spec section 38), and the Windows-equivalent tests for the
   # two places this service used POSIX-only calls (economics/capacity.py without fcntl,
   # oplog.py without select on stderr). It does not run tests/test_economics_run_cap.py
   # as a file: that file asserts the flock slots themselves, which Windows has no fcntl
@@ -163,7 +164,9 @@ jobs:
   # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it,
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
   # statement (a subquery over every deployment) costs no statement, so only that test,
-  # reading the plans and the rows each statement visits, sees it.
+  # reading the plans and the rows each statement visits, sees it. And it walks a scan's
+  # target through every place it is shown (no key in its login, query, ;params or
+  # fragment is shown anywhere; the engine is still sent the URL whole).
   # It runs the outbound transport's own tests too (safety/outbound.py: every stop's
   # transport), and the scan target's login test beside them: Windows does not refuse
   # a closed loopback port at once, it times the connect out, and urllib3's timed-out
@@ -216,11 +219,13 @@ jobs:
         run: |
           pytest \
             tests/test_pin_guard.py \
+            tests/test_an_idp_collectors_records_prove_only_their_own_issuer.py \
             tests/test_spine_statement_budget.py \
             tests/test_spine_queries_follow_their_own_deployment.py \
             tests/test_economics_run_cap_without_fcntl.py \
             tests/test_oplog_without_select.py \
             tests/test_failsafe_control_plane.py \
+            tests/test_no_in_flight_failsafe_command_is_left_off_a_list.py \
             tests/test_no_control_holds_back_a_stop.py \
             tests/test_no_dispatch_holds_back_a_stop.py \
             tests/test_no_stop_waits_on_an_engine_answer.py \
@@ -230,10 +235,12 @@ jobs:
             tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py \
             tests/test_a_proxy_password_that_cannot_be_encoded_owes_the_stop.py \
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
+            tests/test_no_target_credential_is_ever_shown.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
             tests/test_the_outbound_transport_shows_no_target_detail.py \
             tests/test_a_scan_target_s_login_is_said_nowhere.py \
+            tests/test_economics_exposure_report.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \
