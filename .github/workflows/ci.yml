@@ -153,7 +153,8 @@ jobs:
   # failsafe plane load at start), and runs the tests that must pass there: the wiring
   # of the shared pin guard (Mythos-Core's pinguard, which starts every pytest run here
   # and judges this Windows install by Windows path rules; its own tests run on
-  # windows-latest in Mythos-Core), the stop paths, and the Windows-equivalent tests for the
+  # windows-latest in Mythos-Core), the stop paths, the economic-exposure report (HTML and
+  # PDF, spec section 38), and the Windows-equivalent tests for the
   # two places this service used POSIX-only calls (economics/capacity.py without fcntl,
   # oplog.py without select on stderr). It does not run tests/test_economics_run_cap.py
   # as a file: that file asserts the flock slots themselves, which Windows has no fcntl
@@ -227,6 +228,7 @@ jobs:
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
+            tests/test_economics_exposure_report.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \

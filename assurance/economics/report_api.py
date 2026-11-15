@@ -69,6 +69,15 @@ Continuous financial assurance (E6, section 34), on the same conventions:
   Carlo route: capped (:mod:`.capacity`), one deadline, as the simulate route. A
   version with nothing stale is 409 ``exposure_current`` and runs nothing.
 
+The deployment's economic-exposure report (owner decision 12; section 38), on the same
+conventions, READ-ONLY (it records, recomputes, signs and verifies nothing):
+
+- ``GET deployments/<uuid>/economics/exposure-report/?output=html|pdf``: the most
+  recent approved scenario version's exposure, from one run whose stored rows verify,
+  as a document a customer can be handed (:mod:`.exposure_report`); with none, it says
+  so and shows no figure. Every gap is named, and a report with one reads
+  ``AUDIT_INCOMPLETE``.
+
 The receipt route says whether the receipt's run is current, in headers beside the
 bytes it serves unchanged (``X-Exposure-Freshness``, ``X-Exposure-Stale-Reasons``,
 ``X-Exposure-Superseded-By-Run``, ``X-Exposure-Superseded-By-Receipt``); the report,
@@ -558,6 +567,38 @@ class ReceiptView(APIView):
 
         for name, value in continuous_service.receipt_headers(row).items():
             response[name] = value
+        return response
+
+
+class ExposureReportView(APIView):
+    """The deployment's economic-exposure report, as HTML or PDF (section 38)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    #: The document is chosen by ``?output=``, never by the Accept header.
+    OUTPUTS = ("html", "pdf")
+
+    def perform_content_negotiation(self, request, force=False):
+        return super().perform_content_negotiation(request, force=True)
+
+    def get(self, request, uuid):
+        deployment = _deployment(request, uuid)
+        output = _strict_query(request, ("output",)).get("output", "html")
+        if output not in self.OUTPUTS:
+            raise _refused("field_malformed", f"output is one of {list(self.OUTPUTS)}")
+        from . import exposure_report
+
+        try:
+            served = exposure_report.document(deployment)
+        except _currency.CurrencyTableInvalid:
+            return _table_unavailable()
+        if output == "pdf":
+            response = HttpResponse(exposure_report.render_pdf(served), content_type="application/pdf")
+            response["Content-Disposition"] = f'attachment; filename="economic-exposure-{deployment.uuid}.pdf"'
+        else:
+            response = HttpResponse(exposure_report.render_html(served), content_type="text/html; charset=utf-8")
+            response["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Cache-Control"] = NO_STORE
         return response
 
 
@@ -1096,6 +1137,11 @@ urlpatterns = [
         "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/results/",
         ScenarioResultsView.as_view(),
         name="deployment-economics-scenario-results",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/exposure-report/",
+        ExposureReportView.as_view(),
+        name="deployment-economics-exposure-report",
     ),
     # Continuous financial assurance (E6, section 34).
     path(

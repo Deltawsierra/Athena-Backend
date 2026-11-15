@@ -1183,7 +1183,16 @@ dashboard needs (section 30):
 - `GET .../economics/receipts/<receipt id>/`: a Financial Exposure Receipt's signed
   DSSE envelope as stored, as a download (`attachment`, `nosniff`) with the SHA-256
   of its bytes in `X-Content-SHA256`; the receipt id is the report's, dashed; another
-  deployment's receipt is 404, and nothing is signed or verified on the way.
+  deployment's receipt is 404, and nothing is signed or verified on the way;
+- `GET .../economics/exposure-report/?output=html|pdf` (spec, section 38; owner
+  decision 12): the deployment's economic-exposure report, a document a customer can
+  be handed, read-only. It shows the most recent approved scenario version with a
+  completed run whose integrity checks verify -- its gross and net EAL, P10 to P90 and
+  severe figure, its residual after a remediation option, its receipt ("on record";
+  the signature is not re-verified), its assumptions with their sources, its as-of
+  date and limitations -- and names every gap under "What is not measured"; a report
+  with a gap reads `AUDIT_INCOMPLETE`. With no such version it says so and shows no
+  figure. Every text is escaped; it is answered `no-store`, and it writes nothing.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
