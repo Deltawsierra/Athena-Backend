@@ -155,20 +155,38 @@ jobs:
   # and judges this Windows install by Windows path rules; its own tests run on
   # windows-latest in Mythos-Core), the stop paths, the economic-exposure report (HTML and
   # PDF, spec section 38), and the Windows-equivalent tests for the
-  # two places this service used POSIX-only calls (economics/capacity.py without fcntl,
-  # oplog.py without select on stderr). It does not run tests/test_economics_run_cap.py
-  # as a file: that file asserts the flock slots themselves, which Windows has no fcntl
-  # to take; tests/test_economics_run_cap_without_fcntl.py is its Windows form, and the
-  # three tests of that file that read the code, not the lock, are named below. It also
+  # two places this service used POSIX-only calls (economics/capacity.py, which locks its
+  # run slots with msvcrt where there is no fcntl; oplog.py without select on stderr). The
+  # run cap runs here as on Linux: tests/test_economics_run_cap_on_every_platform.py (the
+  # cap across processes, a holder killed with TerminateProcess, every stop answered with
+  # every slot held, a simulate and a receipt through the route), the no-lock refusal
+  # (tests/test_economics_run_cap_without_fcntl.py), and every test of
+  # tests/test_economics_run_cap.py, named below, but two: the one that sends SIGKILL, which
+  # Windows does not have, and the per-tenant route test, whose refused request first asks
+  # the Defender gateway's engine (absent in CI) for up to its 0.5 s deadline -- a refused
+  # local connection is immediate on Linux and is not on Windows, so it measures the
+  # gateway there, not the cap. The every-platform file holds the form of each that runs
+  # on Windows (TerminateProcess; the engine answering at once). It also
   # holds SPINE's statement budget here, so a count that moves with the platform -- or
   # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it,
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
   # statement (a subquery over every deployment) costs no statement, so only that test,
   # reading the plans and the rows each statement visits, sees it. And it walks a scan's
   # target through every place it is shown (no key in its login, query, ;params or
-  # fragment is shown anywhere; the engine is still sent the URL whole). And the identity
-  # emitter's own tests: a demoted operator's role grant stops proving, its revocation is
-  # signed only once the stop is answered, and the reconcile never extends a lease.
+  # fragment is shown anywhere; the engine is still sent the URL whole).
+  # It also runs the launch-path tripwire (no place in this backend's code, routed or not,
+  # starts a scan without the preflight first) and readiness's hung-engine and cache
+  # tests, whose sockets and timeouts are the platform's own, with the engine health
+  # check's total deadline against a dripping engine, and the LLM scan's registering
+  # of the model it tested (no secret kept, nothing on a held launch).
+  # It runs the outbound transport's own tests too (safety/outbound.py: every stop's
+  # transport), and the scan target's login test beside them: Windows does not refuse
+  # a closed loopback port at once, it times the connect out, and urllib3's timed-out
+  # connect carries the connection object, whose repr names the host and port. Only
+  # Windows meets that shape for real, so only this job proves no error says it.
+  # And the identity emitter's own tests: a demoted operator's role grant stops proving,
+  # its revocation is signed only once the stop is answered, and the reconcile never
+  # extends a lease.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -211,7 +229,7 @@ jobs:
           python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.economics.capacity"
           python manage.py makemigrations --check --dry-run
 
-      - name: Test (pin guard, stop paths, Windows-equivalent tests, SPINE's statement budget and scope)
+      - name: Test (pin guard, stop paths, the economics run cap, Windows-equivalent tests, SPINE's statement budget and scope)
         shell: bash
         run: |
           pytest \
@@ -220,6 +238,7 @@ jobs:
             tests/test_spine_statement_budget.py \
             tests/test_spine_queries_follow_their_own_deployment.py \
             tests/test_economics_run_cap_without_fcntl.py \
+            tests/test_economics_run_cap_on_every_platform.py \
             tests/test_oplog_without_select.py \
             tests/test_an_unrecorded_dispatch_is_always_named.py \
             tests/test_failsafe_control_plane.py \
@@ -236,6 +255,21 @@ jobs:
             tests/test_no_target_credential_is_ever_shown.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
+            tests/test_the_outbound_transport_shows_no_target_detail.py \
+            tests/test_a_scan_target_s_login_is_said_nowhere.py \
+            tests/test_economics_run_cap.py::test_the_default_cap_leaves_two_workers_free \
+            tests/test_economics_run_cap.py::test_the_per_tenant_cap_is_one_by_default \
+            tests/test_economics_run_cap.py::test_a_slot_is_taken_without_waiting \
+            tests/test_economics_run_cap.py::test_one_tenant_never_takes_every_slot \
+            tests/test_economics_run_cap.py::test_slot_files_that_cannot_be_opened_refuse_the_run_never_run_it_uncapped \
+            tests/test_economics_run_cap.py::test_with_every_slot_held_a_run_is_refused_at_once_and_every_stop_is_answered_in_its_bound \
+            tests/test_economics_run_cap.py::test_no_slot_is_disclosed_to_one_who_cannot_see_the_deployment_or_may_not_run \
+            tests/test_economics_run_cap.py::test_a_slot_is_given_back_when_the_run_raises \
+            tests/test_economics_run_cap.py::test_a_slot_file_carries_nothing \
+            tests/test_no_launch_path_skips_the_preflight.py \
+            tests/test_readiness_never_waits_on_a_slow_engine.py \
+            tests/test_the_engine_health_check_holds_a_total_deadline.py \
+            tests/test_every_llm_scan_registers_its_model.py \
             tests/test_economics_exposure_report.py \
             tests/test_a_demoted_operators_grant_stops_proving.py \
             tests/test_the_backend_sign_in_emits_signed_identity_records.py \

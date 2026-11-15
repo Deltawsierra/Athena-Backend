@@ -1,18 +1,19 @@
-"""The economics run cap on a host with no ``fcntl`` (Windows).
+"""The economics run cap on a host with no lock to take a slot with.
 
-``capacity.py`` takes a slot with ``fcntl.flock``, and Windows has no ``fcntl``. The
-design for that case is already in the module: slot files that cannot be locked
-refuse the run with the 503 ``economics_capacity`` ("cannot be read"), never run it
-uncapped. But ``import fcntl`` sat inside ``Slots.release`` and ``_take_one``, and
-``acquire``'s ``except ImportError`` handler called ``Slots(held).release()``, which
-imported ``fcntl`` again and raised again, from inside the handler: the economics
-simulate routes answered 500, not the designed 503.
+``capacity.py`` takes a slot with ``fcntl.flock`` on POSIX and ``msvcrt.locking`` on
+Windows. A host with neither can lock nothing, and the design for that case is in the
+module: slot files that cannot be locked refuse the run with the 503
+``economics_capacity`` ("cannot be read"), never run it uncapped. Before Windows had
+its own lock, this was every Windows host, and ``import fcntl`` sat inside
+``Slots.release`` and ``_take_one``: ``acquire``'s ``except ImportError`` handler called
+``Slots(held).release()``, which imported ``fcntl`` again and raised again, from inside
+the handler, so the economics simulate routes answered 500, not the designed 503.
 
-These tests run the Windows case on any host. They make ``import fcntl`` fail the way
-it does on Windows (``sys.modules["fcntl"] = None``), and, for the module as it is left
-when it was imported on such a host, they load a copy of ``capacity.py`` under that
-condition. The flock-dependent tests in ``test_economics_run_cap.py`` assert the POSIX
-behaviour and stay there; they cannot pass where no slot can be locked.
+These tests run the no-lock case on any host, Windows included. They make ``import
+fcntl`` and ``import msvcrt`` fail (``sys.modules[name] = None``), and, for the module as
+it is left when it was imported on such a host, they load a copy of ``capacity.py``
+under that condition. The lock itself, on both platforms, is tested in
+``test_economics_run_cap.py`` and ``test_economics_run_cap_on_every_platform.py``.
 """
 
 from __future__ import annotations
@@ -36,10 +37,12 @@ User = get_user_model()
 
 @pytest.fixture
 def no_fcntl(monkeypatch):
-    """This process as it is on Windows: ``import fcntl`` raises ``ImportError``, and
-    ``capacity`` holds no ``fcntl`` (the value its guarded import leaves there)."""
-    monkeypatch.setitem(sys.modules, "fcntl", None)
-    monkeypatch.setattr(capacity, "fcntl", None, raising=False)
+    """This process on a host with no lock: ``import fcntl`` and ``import msvcrt`` raise
+    ``ImportError``, and ``capacity`` holds neither (the value its guarded imports leave
+    there)."""
+    for name in ("fcntl", "msvcrt"):
+        monkeypatch.setitem(sys.modules, name, None)
+        monkeypatch.setattr(capacity, name, None, raising=False)
 
 
 def test_without_fcntl_every_run_is_refused_as_unreadable_and_nothing_raises(no_fcntl):
@@ -57,12 +60,14 @@ def test_without_fcntl_releasing_slots_only_closes_them_and_never_raises(no_fcnt
 
 
 def test_the_module_imported_on_a_host_without_fcntl_loads_and_refuses(monkeypatch):
-    """The import itself: ``capacity.py`` executed with no ``fcntl`` to import."""
+    """The import itself: ``capacity.py`` executed with no ``fcntl`` and no ``msvcrt``
+    to import."""
     monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", None)
     spec = importlib.util.spec_from_file_location("economics_capacity_without_fcntl", inspect.getsourcefile(capacity))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.fcntl is None
+    assert module.fcntl is None and module.msvcrt is None
     assert module.acquire("tenant-a") == (None, "unreadable")
     module.Slots([]).release()
 
