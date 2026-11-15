@@ -122,6 +122,10 @@ Industry packs beyond banking (E7), on steps 4, 5 and 6:
 
 37. [Industry packs beyond banking (Economic Exposure E7)](#37-industry-packs-beyond-banking-economic-exposure-e7)
 
+The owner's decision 12 (1 Nov 2026), on step 6's report and section 30's read routes:
+
+38. [The deployment's economic-exposure report](#38-the-deployments-economic-exposure-report)
+
 ## 1. Status and scope
 
 | | |
@@ -4288,6 +4292,7 @@ routes, unserved and nothing else.
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3); never a residual run under a remediation option, which the ROI route serves (section 28.7) |
 | `GET deployments/<uuid>/economics/scenarios/` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time (section 30) |
 | `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed bytes, as stored (section 30) |
+| `GET deployments/<uuid>/economics/exposure-report/?output=html\|pdf` | `deployment-economics-exposure-report` | the deployment's economic-exposure report, a document a customer can be handed (section 38) |
 
 Access is the parameter-set routes' (section 19.3): a signed-in account (401
 otherwise); a deployment the caller cannot see, a scenario of another deployment,
@@ -9047,3 +9052,58 @@ and each is reversible.
 11. **A safety system compromised is priced by its response, the production it stops and
     its recertification**, never by the harm it allowed; equipment damaged on the safety
     systems is that template's (precedence 1), not the equipment template's (interim: kept as built).
+
+## 38. The deployment's economic-exposure report
+
+The owner's decision 12 (1 Nov 2026): "Economic-exposure report: build it. Per
+deployment, read-only, in Athena-Backend, off the stop path." An earlier attempt put
+the exposure into the pentest scan PDF (#187) and was closed, because economics on the
+pentest import path is economics on a stop path
+(`test_nothing_but_the_models_registration_imports_economics`). The report lives in
+the economics package, behind a route of `report_api`, and that guard is unchanged.
+
+| | |
+|---|---|
+| Code | `assurance/economics/exposure_report.py` (the selection, the document, the HTML and PDF), `ExposureReportView` in `report_api.py` |
+| Route | `GET deployments/<uuid>/economics/exposure-report/?output=html\|pdf` (`deployment-economics-exposure-report`), HTML by default |
+| Tests | `tests/test_economics_exposure_report.py`; the route tables of section 27 and the fault plugin |
+
+**The selection rule** (the owner's choice of 22 Oct): the most recent approved
+scenario version with a completed run whose integrity checks verify; a draft or
+unverified figure is never shown. Approved means the version's latest review is an
+approval that counts now (`approval_standing`: by someone who authored neither the
+version nor the parameter-set versions it rests on, on an account still an active
+admin or analyst), whatever the receipt gate's switch says. The version's latest
+completed exposure run is read through `report.build_report`; where its stored rows
+fail a check, the version is passed over (never an older run of it shown) and the
+failed checks are named. With no such version the report says so and shows no figure.
+
+**What it shows**, each from the report of that run: the deployment's scenario
+versions with their latest review; the gross (before insurance) and net (retained
+after insurance) lines' expected annual loss, P10, P50, P90 and severe-but-plausible
+figure, and the market-value line apart; the residual after the version's remediation
+option, where its residual run completed and verifies (modelled, never a measurement
+of a control in place); the run, its integrity status and its receipt; every
+assumption with its source type and evidence; the as-of (valuation) date; and the
+report's limitations.
+
+**Integrity in honest words.** The run's `integrity` status is stated as "integrity
+checks verified", with the checks. A receipt is "on record", and its binding to the
+stored rows is among those checks; its signature is never re-verified by the report,
+which names the receipt route a reader verifies it from.
+
+**Unmeasured is never green.** Every gap is named under "What is not measured": a
+newer version passed over and why, the banner and its reason, each unknown, each line
+or figure not reported, a residual, a receipt or an as-of date not recorded, a figure
+withheld. A report with any gap reads `AUDIT_INCOMPLETE` (`mythos_core.status`); the
+report's own words meet the persona lexicon lint (`mythos_core.persona.lint`).
+
+**Read-only, off the stop path.** It records, recomputes, signs and verifies nothing
+and asks no engine: no `get_or_create`, no receipt service. Every text is escaped, in
+the HTML and in the PDF (a scenario's title is the customer's own). Access is section
+19.3's (a deployment the caller cannot see is 404); the answer is `no-store` and
+`nosniff`, the HTML carries a `default-src 'none'` content security policy, and the
+PDF is a download, byte-identical for the same rows. The route is in
+`safety.stops.NOT_STOPS`, and a fault in `report_api` leaves it unserved and nothing
+else. Its operation class under G14 (#211, not yet merged) is to be declared when that
+lands.

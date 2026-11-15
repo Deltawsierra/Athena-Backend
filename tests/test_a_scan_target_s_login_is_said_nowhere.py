@@ -37,13 +37,15 @@ def _everything_said(exc: BaseException) -> str:
 
 # ---------------------------------------------------------------------------
 # target_shown and logins_in read the userinfo up to the authority's LAST @
+# (an @ in the query or fragment is not a userinfo; their values are shown as
+# ``•••`` -- tests/test_no_target_credential_is_ever_shown.py)
 # ---------------------------------------------------------------------------
 
 _SHOWN = [
     ("https://scanner:p@ss@host.example/path", "https://[withheld]@host.example/path"),
-    ("https://scanner:p@ss@host.example:8443/a?b=c@d#e@f", "https://[withheld]@host.example:8443/a?b=c@d#e@f"),
+    ("https://scanner:p@ss@host.example:8443/a?b=c@d#e@f", "https://[withheld]@host.example:8443/a?b=•••#•••"),
     ("https://a@b@c@host.example/", "https://[withheld]@host.example/"),
-    ("https://host.example/path?email=a@b.example", "https://host.example/path?email=a@b.example"),
+    ("https://host.example/path?email=a@b.example", "https://host.example/path?email=•••"),
     ("https://host.example/p@th", "https://host.example/p@th"),
     ("https://scanner:pw@host.example", "https://[withheld]@host.example"),  # pragma: allowlist secret
     ("https://host.example/", "https://host.example/"),
