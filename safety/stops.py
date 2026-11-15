@@ -438,6 +438,12 @@ def _get(reason=_READ):
 #: "ANY" is a plain Django view, which serves every method.
 NOT_STOPS = {
     "health": {"GET": "the liveness probe: it answers at once and is already unthrottled"},
+    "readiness": {
+        "GET": (
+            "the readiness probe (config.readiness): a read of whether each dependency answers, "
+            "bounded; it starts, stops and changes nothing, and nothing reads what it answers"
+        )
+    },
     "token_obtain_pair": {
         "POST": (
             "signs in with a password: it issues a token and stops nothing; no stop needs it "
@@ -600,6 +606,9 @@ NOT_STOPS = {
     # lock and no transaction; nothing a stop or the decision reads.
     "deployment-economics-scenarios": _get(),
     "deployment-economics-receipt": _get(),
+    # The deployment's economic-exposure report (spec section 38): a read of economics
+    # rows rendered as HTML or PDF; it records, signs and verifies nothing.
+    "deployment-economics-exposure-report": _get(),
     # Continuous financial assurance (assurance.economics.report_api, E6, spec section
     # 34): a run's freshness read, the deployment's stale exposure checked, and a stale
     # scenario refreshed. Economics records only; SPINE's rows are read, never written.

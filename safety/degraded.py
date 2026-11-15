@@ -99,6 +99,9 @@ _R, _E, _A = EVIDENCE_READ, EFFECT, ASSESSMENT
 #: plain Django view, which serves every method.
 ROUTES = {
     "health": {"GET": _R},
+    # Each dependency's state with its reason: a not-ready answer is itself this
+    # class's degraded answer (503, unknown, the dependency named).
+    "readiness": {"GET": _R},
     "token_obtain_pair": {"POST": _E},
     "api-root": {"GET": _R},
     "accounts:api-root": {"GET": _R},
@@ -168,6 +171,9 @@ ROUTES = {
     "deployment-economics-scenario-results": {"GET": _R},
     "deployment-economics-scenarios": {"GET": _R},
     "deployment-economics-receipt": {"GET": _R},
+    # The deployment's economic-exposure report (economics spec section 38): an
+    # assessment; over incomplete inputs it reads AUDIT_INCOMPLETE itself.
+    "deployment-economics-exposure-report": {"GET": _A},
     "deployment-economics-scenario-freshness": {"GET": _R},
     "deployment-economics-assurance": {"GET": _R, "POST": _E},
     "deployment-economics-scenario-refresh": {"POST": _E},
