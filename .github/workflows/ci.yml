@@ -171,7 +171,12 @@ jobs:
   # with the SQLite that Windows' Python ships -- is seen in the pull request that moves it,
   # and SPINE's deployment-scope test beside it: a read whose scope widens inside the same
   # statement (a subquery over every deployment) costs no statement, so only that test,
-  # reading the plans and the rows each statement visits, sees it.
+  # reading the plans and the rows each statement visits, sees it. And it walks a scan's
+  # target through every place it is shown (no key in its login, query, ;params or
+  # fragment is shown anywhere; the engine is still sent the URL whole).
+  # It also runs the launch-path tripwire (no place in this backend's code, routed or not,
+  # starts a scan without the preflight first) and readiness's hung-engine and cache
+  # tests, whose sockets and timeouts are the platform's own.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -219,11 +224,13 @@ jobs:
         run: |
           pytest \
             tests/test_pin_guard.py \
+            tests/test_an_idp_collectors_records_prove_only_their_own_issuer.py \
             tests/test_spine_statement_budget.py \
             tests/test_spine_queries_follow_their_own_deployment.py \
             tests/test_economics_run_cap_without_fcntl.py \
             tests/test_economics_run_cap_on_every_platform.py \
             tests/test_oplog_without_select.py \
+            tests/test_an_unrecorded_dispatch_is_always_named.py \
             tests/test_failsafe_control_plane.py \
             tests/test_no_in_flight_failsafe_command_is_left_off_a_list.py \
             tests/test_no_control_holds_back_a_stop.py \
@@ -235,6 +242,7 @@ jobs:
             tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py \
             tests/test_a_proxy_password_that_cannot_be_encoded_owes_the_stop.py \
             tests/test_a_pending_scan_is_collected_and_a_stopped_run_is_never_ingested.py \
+            tests/test_no_target_credential_is_ever_shown.py \
             tests/test_a_log_upload_is_bounded.py \
             tests/test_a_log_text_is_bounded.py \
             tests/test_economics_run_cap.py::test_the_default_cap_leaves_two_workers_free \
@@ -246,6 +254,8 @@ jobs:
             tests/test_economics_run_cap.py::test_no_slot_is_disclosed_to_one_who_cannot_see_the_deployment_or_may_not_run \
             tests/test_economics_run_cap.py::test_a_slot_is_given_back_when_the_run_raises \
             tests/test_economics_run_cap.py::test_a_slot_file_carries_nothing \
+            tests/test_no_launch_path_skips_the_preflight.py \
+            tests/test_readiness_never_waits_on_a_slow_engine.py \
             tests/test_economics_exposure_report.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \

@@ -9,8 +9,9 @@ stderr, on any Windows run.
 
 These tests run that case on any host: ``oplog`` is given a ``select`` that fails as
 Windows' does. The line must reach stderr; the caller must still never wait, even on
-a stderr that has stalled; and a stalled stderr must strand one thread, not one per
-line. The POSIX behaviour (``select`` answers; a full pipe is skipped and counted)
+a stderr that has stalled; a stalled stderr must strand one thread, not one per
+line; and a line that waits behind another, or for a thread to start, is still
+written once stderr takes it -- never dropped. The POSIX behaviour (``select`` answers; a full pipe is skipped and counted)
 stays covered by ``test_no_dispatch_holds_back_a_stop.py``.
 """
 
@@ -109,7 +110,8 @@ def test_a_stalled_stderr_never_holds_the_caller_and_strands_one_thread_not_one_
     finally:
         stalled.go.set()
         _settle()
-    assert len(stalled.written) == 1 and b"--deployment 1" in stalled.written[0], stalled.written
+    # The two that waited behind the first are written once stderr takes lines again.
+    assert [line.split(b"--deployment ")[1][:1] for line in stalled.written] == [b"1", b"2", b"3"], stalled.written
     # stderr is taking lines again: the next one is written
     monkeypatch.setattr(oplog, "os", os)
     oplog.emit_now(logging.ERROR, LINE, 4)
@@ -120,8 +122,9 @@ def test_a_stalled_stderr_never_holds_the_caller_and_strands_one_thread_not_one_
 
 def test_no_thread_to_write_it_is_counted_and_never_waited_for(windows_stderr, monkeypatch):
     """The process is out of threads: the line cannot be written without waiting, so it
-    is counted (the record still waits for the log thread), and the lock that keeps
-    one writer at a time is not left held."""
+    is counted, and it waits, queued, for a writer (the record waits for the log
+    thread too); the one-writer state is not left held, and once a thread can start
+    the line that waited is written, before the next."""
     skipped = oplog.STDERR_SKIPPED[0]
     real_start = threading.Thread.start
 
@@ -141,7 +144,8 @@ def test_no_thread_to_write_it_is_counted_and_never_waited_for(windows_stderr, m
     oplog.emit_now(logging.ERROR, LINE, 6)  # threads can start again
     _settle()
     text = windows_stderr.read_text(encoding="utf-8")
-    assert "--deployment 6" in text and "--deployment 5" not in text, text
+    assert "--deployment 5" in text and "--deployment 6" in text, text
+    assert text.index("--deployment 5") < text.index("--deployment 6"), text
     oplog.drain()
 
 

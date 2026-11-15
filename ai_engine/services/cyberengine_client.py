@@ -20,6 +20,15 @@ ENGINE_TIMEOUT = (
     float(getattr(django_settings, "CYBERENGINE_READ_TIMEOUT", 60)),
 )
 
+# (connect, read) for the engine's own GET /health, which this backend's readiness
+# route (config.readiness) asks within a 2 s bound. Its own pair, never
+# ENGINE_TIMEOUT: under that long default a hung engine held the readiness check
+# for the whole read timeout, and the check read "did not answer" from a thread
+# still waiting. A liveness answer is a few bytes; an engine that cannot send them
+# within this is not ready. Not read from settings, so no setting can stretch it
+# past the readiness bound (tests/test_readiness_never_waits_on_a_slow_engine.py).
+HEALTH_TIMEOUT = (0.5, 1.0)
+
 
 # How long to keep collecting a scan the engine is running for us, and how
 # often to ask. Polling does not hold a connection, so this can be far longer
@@ -507,14 +516,16 @@ class CyberEngineClient:
 
         return body
 
-    def _send_get(self, path: str) -> requests.Response:
-        """The engine's answer to a GET, whatever its status; raises only when there was none."""
+    def _send_get(self, path: str, *, timeout=None) -> requests.Response:
+        """The engine's answer to a GET, whatever its status; raises only when there was
+        none. ``timeout`` is ENGINE_TIMEOUT unless the caller names its own."""
         try:
             # The engine's lane (safety.outbound): a redirect followed only while it
             # stays on the engine's host, the environment's proxy and nothing else
             # from the environment (no .netrc), and no credential quoted if it fails.
             return outbound.get(
-                f"{self.base_url}{path}", headers=self.headers, timeout=ENGINE_TIMEOUT, engine=True
+                f"{self.base_url}{path}", headers=self.headers,
+                timeout=ENGINE_TIMEOUT if timeout is None else timeout, engine=True,
             )
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
@@ -685,8 +696,16 @@ class CyberEngineClient:
     def health(self) -> dict:
         """The engine's own liveness answer, ``{"status": "ok"}`` by its contract
         (tests/test_engine_contract.py). Read by this backend's readiness route
-        (config.readiness) alone: a read that starts, stops and changes nothing."""
-        return self._get("/health")
+        (config.readiness) alone: a read that starts, stops and changes nothing.
+
+        Asked under :data:`HEALTH_TIMEOUT`, never ENGINE_TIMEOUT: a hung engine is a
+        failed read (EngineError, unreachable, its cause a requests Timeout) inside
+        the readiness bound, not a thread held for a scan's read timeout."""
+        path = "/health"
+        resp = self._send_get(path, timeout=HEALTH_TIMEOUT)
+        if not (200 <= resp.status_code < 300):
+            raise self._refused(resp)
+        return self._read_json(resp, path)
 
     def assurance_keyring(self) -> dict:
         """The engine's published public keyring, for an auditor verifying offline.

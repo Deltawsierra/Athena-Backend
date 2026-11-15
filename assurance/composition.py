@@ -245,20 +245,24 @@ EVIDENCE_EFFECT_RECONCILIATION = "effect_reconciliation"
 #: filed under two), so the observed-effect key is ``observed_effect`` and nothing
 #: else, and Achilles' outcome key stays an authorization check.
 #:
-#: The two identity signers (part 4 of the 7 Oct decision) are named for what signs:
-#: the Mythos-run collectors that read the customer's identity provider -- its
-#: sign-in log, and its delegation grants and their revocations. Each key is one
-#: engine, so one kind: a sign-in collector's key never proves a delegation, nor the
-#: other way round. Per the owner's 5 Oct scope call their evidence is
-#: Mythos-witnessed (:data:`assurance.identity_evidence.SIGNER_WITNESS`); a
-#: customer-run or third-party collector is planned and is added here, under its own
-#: name, when one signs.
+#: The identity signers (part 4 of the 7 Oct decision) are named for who runs the
+#: collector and what it signs -- sign-ins, and delegation grants and their
+#: revocations. Each key is one engine, so one kind: a sign-in collector's key never
+#: proves a delegation, nor the other way round. The ``mythos-*`` signers are the
+#: Mythos-run sources, Mythos-witnessed per the owner's 5 Oct scope call; the
+#: ``customer-*`` signers are a collector the customer runs at its relying party,
+#: customer-witnessed (:data:`assurance.identity_evidence.SIGNER_WITNESS`), whose keys
+#: speak only for the identity providers their keyring entry binds them to
+#: (:data:`assurance.identity_evidence.ISSUER_BOUND_SIGNERS`). A third-party collector
+#: is added here, under its own name, when one signs.
 SIGNER_EVIDENCE: Mapping[str, str] = {
     "achilles": EVIDENCE_AUTHORIZATION_CHECK,
     "athena": EVIDENCE_SCAN,
     "achilles-effect": EVIDENCE_OBSERVED_EFFECT,
     "mythos-signin-collector": EVIDENCE_AUTHENTICATION,
     "mythos-grant-collector": EVIDENCE_DELEGATION,
+    "customer-signin-collector": EVIDENCE_AUTHENTICATION,
+    "customer-grant-collector": EVIDENCE_DELEGATION,
 }
 
 #: The kind an UNSIGNED basis names. A basis missing here raises rather than

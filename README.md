@@ -428,15 +428,19 @@ Two more signers sign records that are not chain outcomes, each on its own route
 with its own service credential (`assurance/identity_evidence.py`), and each proving
 one hop of an authority chain that starts at a person:
 
-- `authentication`: signed by the sign-in collector (observer
-  `mythos-signin-collector`) with a `mythos.authentication/v1` document -- a person
+- `authentication`: signed by a sign-in collector (observer
+  `mythos-signin-collector`, or `customer-signin-collector`) with a
+  `mythos.authentication/v1` document -- a person
   signed in as a principal, at an instant, through an identity provider. Posted to
   `POST /api/assurance/deployments/<uuid>/authentications/` with
   `X-Authentication-Evidence-Token` (`ASSURANCE_AUTHENTICATION_EVIDENCE_TOKEN` /
   `_USER`). It proves `authenticated_as` when the sign-in falls inside the chain's
-  window: at most a day before the effect, not after it, in a session still open.
-- `delegation`: signed by the grant collector (observer `mythos-grant-collector`)
-  with a `mythos.delegation/v1` document -- a principal delegated an agent a scope
+  window: at most a day before the effect, not after it, in a session still open. No
+  record may claim a session longer than two days (`expires_at - authenticated_at`:
+  the day of the window plus `MAX_TOKEN_LIFETIME_SECONDS`, a day, the longest token
+  any source issues); a longer one is refused.
+- `delegation`: signed by a grant collector (observer `mythos-grant-collector`, or
+  `customer-grant-collector`) with a `mythos.delegation/v1` document -- a principal delegated an agent a scope
   for a window, and whether the grant is revoked. Posted to
   `POST /api/assurance/deployments/<uuid>/delegations/` with
   `X-Delegation-Evidence-Token` (`ASSURANCE_DELEGATION_EVIDENCE_TOKEN` / `_USER`). It
@@ -444,8 +448,37 @@ one hop of an authority chain that starts at a person:
   the effect, and the grant was not revoked before the effect. A revocation is never
   refused for its age or order.
 
-Both collectors are Mythos-run today (`witness: mythos`, the owner's 5 Oct scope
-call); a customer-run or third-party collector is planned.
+Who witnessed a record is part of it, and fixed by who signed it
+(`SIGNER_WITNESS`): the `mythos-*` signers are the Mythos-run sources -- today this
+backend's own emitter, below -- and their records say `witness: mythos` (the owner's
+5 Oct scope call); the `customer-*` signers are a collector the customer runs at its
+own relying party, where the identity provider's signature on an ID token can be
+checked, and their records say `witness: customer` -- customer-witnessed (the owner's
+3 Nov call). Neither can sign a record claiming the other witnessed it. A
+third-party collector is planned.
+
+A keyring entry may bind its key to the identity providers it speaks for:
+
+```json
+[{"engine": "customer-signin-collector", "public_key": "<base64 raw Ed25519>",
+  "issuers": ["https://kc.example.com/realms/acme"]}]
+```
+
+A bound key's records name only `oidc:<issuer>#<subject>` refs of its own issuers
+(`person` and `principal`; a grant's principal and agent), a sign-in's being its own
+`identity_provider.issuer`, with protocol `oidc`. The `#` belongs to the prefix, so a
+key bound to `.../realms/a` never speaks for `.../realms/ab`. A `customer-*` key must
+be bound: with no `issuers`, or a malformed one (not a non-empty list of distinct
+issuers, or one holding `#`, whitespace or a control character), it vouches for
+nothing -- a malformed binding leaves that one key out of the keyring, logged at
+ERROR, and never makes the keyring unavailable to anything else. A `mythos-*` key
+with no binding reads exactly as before (the load logs a WARNING naming it); bound,
+it is held to its binding. The binding is checked when a record is taken in and on
+every read, so withdrawing an issuer from a key's binding unproves what the key
+signed for it, and the stored decision is recomputed at its next read (the binding
+is part of the keyring's fingerprint). The witness table, the issuer-bound signers,
+the subject scheme and the token lifetime are in the policy pin
+(`assurance/policy.py`).
 
 This backend emits both kinds itself (authority chain short 2, the owner's decision
 10; `assurance/identity_emitter.py`): until an identity provider is added as a second
@@ -897,8 +930,9 @@ first, paginated, scoped as the finding is; finding detail carries its latest te
 and the scan run it was listed under, the verdict as the engine sent it and whether it
 is one this backend knows, the engine's detail, the run's end (`completed`, or `aborted`
 after its check was filed), when the engine checked, and who collected it and when.
-The engine's detail and result are kept and served with the target's login withheld, as
-every scan answer is.
+The engine's detail and result are kept and served with every credential the target
+carries withheld (its login, its query, `;param` and fragment values), as every scan
+answer is.
 
 **Tenant precondition (decision 7).** The backend reads the run with its own operator
 key. A key bound to a tenant reads only that tenant's runs: a retest started under
@@ -1589,7 +1623,12 @@ answers in a shape nothing can read. They used to proceed under the default
 `observe`. Observe still lets a `blocked` verdict proceed and records it on the scan;
 `enforce` refuses it. `tests/test_no_effect_launches_without_the_preflight.py` says,
 for every effect route, whether it launches, and fails on a launch call the
-preflight does not come before. A defender
+preflight does not come before. `tests/test_no_launch_path_skips_the_preflight.py`
+reads all of this backend's code, routed or not, and fails on any place that can
+start a scan (a launch call, held or named in a string, or the engine's launch route)
+unless the preflight is asked first in the same function, or the place is a private
+helper reached only from code that asks it. An unrouted LLM scan view that asked
+nothing (`pentest/views_llm.py`) was deleted for that reason. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
 
@@ -1603,7 +1642,10 @@ outage that is not its own.
 its own and names each one, with the reason:
 
 - **the database**: `SELECT 1`, and the row read back must be the one asked for;
-- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`;
+- **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`. It is
+  asked under its own short timeout (0.5 s to connect, 1 s to read), never the long
+  one a scan is given, so a hung engine reads `unknown` well inside the bound and
+  holds no thread;
 - **Mythos-Core**: the modules this backend loads import, and its word for unknown
   is still `unknown`.
 
@@ -1613,6 +1655,11 @@ bound, or nothing configured to ask). The answer waits at most 2 s in all. A che
 still running then reads `unknown`, and the next probe waits on that same check, so
 a hung dependency holds one thread however often the probe polls. Every reason is
 named by the exception's type, never its message.
+
+A finished check's reading is served again for 1 s, counted from when the check was
+asked, so a flood of probes costs at most one check per dependency per second. The
+cache never serves an `ok` older than that: a reading that ages out while the answer
+waits on another check is asked again. Each reading carries `age_seconds`.
 
 Every dependency `ok` answers 200 with `status: "ok"`. Anything else answers 503,
 in the evidence-read shape above (`status: "unknown"`, `dependency` naming the first
@@ -1954,9 +2001,18 @@ Logging. A stop's thread never writes to a log handler. A dispatch that is neith
 recorded nor started is named at ERROR, with the `retry_blocking_dispatches
 --deployment N` command to run: at once, in the stop's own thread, as one line to
 stderr -- only if stderr can take it without waiting -- and, for the log handlers,
-through the background log thread. When no thread can start, the record waits in
-that queue (bounded, counted) until the next request, sweep or exit starts or runs
-the writer. Everything else on a stop's path goes the same way, through a queue of
+through the background log thread. A line stderr cannot take at once (a full pipe;
+on Windows, where a thread writes each line, the line before it still being written)
+is never dropped silently: it waits, queued, for the one stderr writer thread, which
+writes it as soon as stderr takes it, and the stop never waits for it. Past 100
+waiting lines, or when stderr fails to take one, the line is counted and the count
+is logged; each line is in the log as well. When no thread can start, the record and
+the line wait in their queues (bounded, counted) until the next request, sweep or
+exit starts or runs the writers. What a process lost or refused since it started --
+lines meant for stderr, log records dropped, unrecorded dispatches refused past the
+hard bound -- is counted, and any non-zero count makes `GET /api/health/` answer
+`"status": "degraded"` (still 200: the process is alive) with each count, and the
+sweep log it at WARNING whenever a count moves. The counts are per process. Everything else on a stop's path goes the same way, through a queue of
 at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
 
@@ -2173,7 +2229,7 @@ one line per scan, and exits non-zero while any scan stays pending for longer th
 a launch and never a Stop; a scan that names no run is listed and sent nothing.
 
 **Reads.** `GET /api/pentest/scans/<uuid>/` and the rows of `GET /api/pentest/scans/`
-serve the record: `uuid`, `target_url` (login withheld), `consent`, `status` (`pending`,
+serve the record: `uuid`, `target_url` (as shown: see below), `consent`, `status` (`pending`,
 `completed`, `failed`, `stopped`, `unknown`), `verdict`, `verdict_label`, `created_at`,
 `collected_at`, `engine_run_id`, `pdf_url`, `email_sent`, `error_message`, `stop` (the
 Stop's reading, as before) and `engagement` (`{id, name, client_name, status}`); the
@@ -2184,6 +2240,21 @@ raw route measurements of the deployment's serving assets. A finding
 (`GET /api/assurance/findings/`) serves `scan_uuid` and `engine_run_id`, the scan it
 was last observed in; a deployment serves `engagement_id`, the authorisation it is
 assessed under.
+
+**A scan's target, as shown.** A scan keeps the URL it was launched with: the engine is
+sent it whole, and a reconcile sends it again unchanged. Every place that shows it -- these
+reads, the launch's, LLM launch's and reconcile's answers, both report renderers, the
+e-mail, the admin, the log -- shows it with no credential it carries
+(`pentest.models.target_shown`): the userinfo as `[withheld]`, every query value and
+every `;param` value as `•••` with its name kept (every value, not those whose names look
+like keys), and the fragment as `#•••`; a target that cannot be read is shown as `•••`.
+What a scan says -- its errors, and the engine's answer kept for a reader -- says the
+target that way, each `name=value` as `name=•••`, and withholds its login and each value
+said on its own (`pentest.models.target_said`; a value said alone is withheld when it is
+at least 8 characters and not a plain word, so a tenant's `?level=critical` cannot
+rewrite the severity a verdict is read from).
+`tests/test_no_target_credential_is_ever_shown.py` plants a key in each of those four
+places of a standard scan and of an LLM scan and walks every shown site.
 
 **The hybrid (the athena-dashboard).** This backend is the record and the governance
 gate: the target's bounds, consent, the engagement's authority and window, the preflight
