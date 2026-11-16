@@ -20,18 +20,20 @@ stays readable.
                ``ApprovedWorkflow``, by slug). At least one.
 ``reason``     why the scope is this, in the declarer's words: one printable
                line (``mythos_core.scope.revision_reason``), at most 500 characters.
+               None, or a blank one, is ``reason_required``; any other that is
+               refused is ``malformed`` (the core's codes).
 ``evidence``   the ``Evidence`` of the deployment's findings it rests on. At least
                one (``evidence_record``'s ``evidence_required``).
 ``declared_by``  the signed-in person who declared it, never a posted field.
 =============  ==================================================================
 
 **The words are Mythos-Core's** (``mythos_core.scope``, Mythos-Core#80), read from the core
-(:func:`_core`) and spelled nowhere in this module's code: the kinds of scope item, the
-three scope holds and the rule for a revision's reason. Two rules here are stricter than
-the core's, and none is looser:
+(imported here as ``core``) and spelled nowhere in this module's code: the kinds of scope
+item, the three scope holds and the rule for a revision's reason, with its codes. Two
+rules here are stricter than the core's, and none is looser:
 
 - *The kinds a revision may declare* are the core's kinds this backend has a record for,
-  ``asset`` and ``workflow`` (:func:`kinds`). ``route`` and ``identity`` are the core's
+  ``asset`` and ``workflow`` (:data:`KINDS`). ``route`` and ``identity`` are the core's
   words too, and a posted one is refused here: a route has no record of its own in this
   backend, so a route is in scope as the assets on it.
 - *A reason* is at most 500 characters (:data:`_REASON_MOST`), where the core allows 1000.
@@ -73,6 +75,20 @@ import uuid
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+# The one spelling of the kinds of scope item (``ASSET``, ``WORKFLOW``,
+# ``SCOPE_ITEM_KINDS``), the scope holds (``NOT_DECLARED``, ``UNREADABLE``, ``gap``) and a
+# revision's reason (``revision_reason``). Every word and rule below is read from it and
+# none is spelled here. Data and predicates only: importing it reads no key and no
+# network, starts no thread and loads no module of a stop path.
+from mythos_core import scope as core
+
+#: The kinds a revision may DECLARE: the core's kinds (``core.SCOPE_ITEM_KINDS``) that
+#: resolve to a record of the finding's deployment, an ``asset`` or a ``workflow``.
+#: STRICTER than the core's set, built on it and never wider: the core also names
+#: ``route`` and ``identity``, which no record of this backend backs, so a posted one is
+#: refused. A stored item is read with the core's whole set (:func:`_keys`).
+KINDS = tuple(kind for kind in core.SCOPE_ITEM_KINDS if kind in (core.ASSET, core.WORKFLOW))
+
 POSTED = ("items", "reason", "evidence")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _SLUG = re.compile(r"[-a-zA-Z0-9_]{1,200}")
@@ -92,33 +108,6 @@ class ScopeRefused(ValueError):
         self.code = code
 
 
-# ------------------------------------------------------------- the core's words
-
-
-def _core():
-    """``mythos_core.scope``: the one spelling of the kinds of scope item (``ASSET``,
-    ``WORKFLOW``, ``SCOPE_ITEM_KINDS``), the scope holds (``NOT_DECLARED``, ``UNREADABLE``,
-    ``gap``) and a revision's reason (``revision_reason``). Every word and rule below is
-    read from it and none is spelled here.
-
-    Imported at first use, not with this module: this module loads with the URLconf and
-    brings in the standard library and Django only at import. The core's module is data
-    and predicates (no I/O, no clock, no network), and nothing on a stop path calls this."""
-    from mythos_core import scope
-
-    return scope
-
-
-def kinds() -> tuple[str, ...]:
-    """The kinds a revision may DECLARE: the core's kinds (``SCOPE_ITEM_KINDS``) that
-    resolve to a record of the finding's deployment, an ``asset`` or a ``workflow``.
-    STRICTER than the core's set, built on it and never wider: the core also names
-    ``route`` and ``identity``, which no record of this backend backs, so a posted one is
-    refused. A stored item is read with the core's whole set (:func:`_keys`)."""
-    core = _core()
-    return tuple(kind for kind in core.SCOPE_ITEM_KINDS if kind in (core.ASSET, core.WORKFLOW))
-
-
 # ------------------------------------------------------------- what a revision holds
 
 
@@ -129,19 +118,17 @@ def _reason(value) -> str:
     This backend is stricter in one thing, the length: at most :data:`_REASON_MOST`
     characters. Returned exactly as given. The refusal never repeats what it refused.
 
-    Every refusal here carries the code ``malformed``, as it did before the core had the
-    rule. The core tells a reason that is missing or blank (``reason_required``) from
-    every other refusal (``malformed``); this backend's code does not tell them apart,
-    and is unchanged."""
-    core = _core()
+    A refusal carries the core's code: ``reason_required`` for a reason that is missing
+    (``None``) or blank, ``malformed`` for every other, this backend's shorter limit
+    among them."""
+    why = f"a scope revision states why, in one printable line of at most {_REASON_MOST} characters"
     try:
         stated = core.revision_reason(value)
-    except core.ScopeError:
-        stated = None
-    if stated is None or len(stated) > _REASON_MOST:
-        raise ScopeRefused(
-            "malformed", f"a scope revision states why, in one printable line of at most {_REASON_MOST} characters"
-        )
+    except core.ScopeError as exc:
+        # The core's code, whichever it is, under this backend's own sentence.
+        raise ScopeRefused(exc.code, why) from None
+    if len(stated) > _REASON_MOST:
+        raise ScopeRefused("malformed", why)
     return stated
 
 
@@ -149,16 +136,15 @@ def _posted(value) -> list[tuple[str, str]]:
     """The ``(kind, ref)`` of each posted item, each named once."""
     if not isinstance(value, list) or len(value) > _MOST:
         raise ScopeRefused("malformed", f"items is a list of at most {_MOST}")
-    declared, asset = kinds(), _core().ASSET
     named = []
     for item in value:
         if not isinstance(item, dict) or set(item) != {"kind", "ref"}:
             raise ScopeRefused("malformed", "each item is {kind, ref} and nothing else")
         kind, ref = item["kind"], item["ref"]
-        if type(kind) is not str or kind not in declared:
-            raise ScopeRefused("malformed", f"an item's kind is one of {list(declared)}")
-        if type(ref) is not str or not (_UUID if kind == asset else _SLUG).fullmatch(ref):
-            raise ScopeRefused("malformed", f"a {kind}'s ref is its {'uuid' if kind == asset else 'slug'}")
+        if type(kind) is not str or kind not in KINDS:
+            raise ScopeRefused("malformed", f"an item's kind is one of {list(KINDS)}")
+        if type(ref) is not str or not (_UUID if kind == core.ASSET else _SLUG).fullmatch(ref):
+            raise ScopeRefused("malformed", f"a {kind}'s ref is its {'uuid' if kind == core.ASSET else 'slug'}")
         named.append((kind, ref))
     if len(set(named)) != len(named):
         raise ScopeRefused("malformed", "items names each one once")
@@ -174,7 +160,6 @@ def resolve_items(finding, value) -> list[dict]:
     if not named:
         raise ScopeRefused("items_required", "a scope revision names at least one item in scope")
     deployment_id = finding.deployment_id
-    core = _core()
     assets = {
         str(a.uuid): a.kind
         for a in Asset.objects.filter(
@@ -234,7 +219,6 @@ def _keys(items) -> list[tuple[str, str]] | None:
         keys = [(item["kind"], item["ref"]) for item in items]
     except (KeyError, TypeError):
         return None
-    core = _core()
     readable = all(core.read_scope_item_kind(kind) != core.UNKNOWN and type(ref) is str for kind, ref in keys)
     return keys if readable else None
 
@@ -316,7 +300,6 @@ def gap(revision: int, kind: str, ref: str) -> str:
     core cannot name (a ref outside its alphabet, a revision it does not count, a kind
     that is not one of its four) reads ``scope:unreadable``: a hold that cannot be read
     never reads as no hold (the core's ``read_hold``)."""
-    core = _core()
     try:
         return core.gap(revision, kind, ref)
     except core.ScopeError:
@@ -371,7 +354,6 @@ def holds(taken_under, revisions) -> list[str]:
     item a LATER revision added that is in scope now. A later revision that removes the
     item ends that hold, and a revision that only removes items holds nothing back.
     Empty when the scope the step was derived under still covers the current one. Pure."""
-    core = _core()
     if taken_under is None:
         return [core.NOT_DECLARED]
     standing = since(revisions)

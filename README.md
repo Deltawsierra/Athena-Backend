@@ -1040,8 +1040,9 @@ the rule that a scope revision reopens an accepted recovery
 (`tests/test_the_scope_words_and_rules_are_mythos_cores.py`). This backend is stricter in
 two things and looser in none: a revision declares only the two kinds it has a record for
 (the core also names `route` and `identity`), and a reason is at most 500 characters (the
-core allows 1000). A stored item whose kind is not one of the core's reads as the core
-reads it: the scope is unreadable, never smaller.
+core allows 1000). A refused reason carries the core's code: `reason_required` when it is
+missing or blank, `malformed` otherwise. A stored item whose kind is not one of the core's
+reads as the core reads it: the scope is unreadable, never smaller.
 Append-only, as every history is (`assurance/append_only.py`); on no stop path, and read
 by no decision.
 

@@ -9,20 +9,21 @@ repository.
 
 That file is not installed with the core, and no copy of it is kept here. Every expected
 value below is asked of the INSTALLED core while the test runs: the commit the pin guard
-holds this run to, whose own CI holds that code to the file. No answer is typed in this
-file. So a word or a rule that drifts here fails against the core this service runs on,
-and a core that moves a word fails here, in the pull request that moves the pin.
+holds this run to, whose own CI holds that code to the file. No word and no answer of
+this backend's is typed in this file; a refusal code of the core's is named only where a
+test shows that its cases reach each one. So a word or a rule that drifts here fails
+against the core this service runs on, and a core that moves a word fails here, in the
+pull request that moves the pin.
 
 What is held:
 
 1. each adopted word is the core's own object, and neither module spells one again;
 2. each adopted rule gives the core's answer on every case here (a stored kind, a hold's
-   name, a hold that ends with its item, the reopening of an accepted recovery);
+   name, a hold that ends with its item, a reason and the code of its refusal, the
+   reopening of an accepted recovery);
 3. where this backend is STRICTER it is stricter and never looser: the kinds a revision
    may declare (the two it has a record for, of the core's four) and a reason's length
    (500, of the core's 1000). Everything it accepts the core accepts, with the same answer.
-
-One difference is recorded and not settled here: :data:`CODE_OF_A_REFUSED_REASON`.
 
 Nothing here is on a stop path, and nothing on one reads the scope: the SP-3 suite holds
 that (``test_no_stop_reaches_the_scope_or_the_recovery_record``).
@@ -49,15 +50,6 @@ from tests.test_an_incidents_scope_is_versioned_and_no_recovery_outlives_it impo
 
 User = get_user_model()
 
-#: The code this backend answers when it refuses a reason, by the code the core answers
-#: for the same reason. The core tells a missing or blank reason (``reason_required``)
-#: from the rest; this backend answers ``malformed`` for both, as SP-3 (#229) does. The
-#: two differ in the word only, never in what is refused, so neither is the stricter:
-#: which word this backend answers is not decided in this pull request. Held here so
-#: that it changes only on purpose.
-CODE_OF_A_REFUSED_REASON = {"reason_required": "malformed", "malformed": "malformed"}
-
-
 def _code(call, *args, refusal):
     """The code ``call(*args)`` is refused with, or None when it is not refused."""
     try:
@@ -71,13 +63,12 @@ def _code(call, *args, refusal):
 
 
 def test_the_kinds_and_the_holds_are_the_cores_own_objects():
-    read = scope._core()
-    assert read is core, "the scope reads mythos_core.scope itself, not a copy of it"
+    assert scope.core is core, "the scope reads mythos_core.scope itself, not a copy of it"
     # The kinds a revision may declare are the core's two that this backend has a
     # record for, in the core's order, and each is one of the core's kinds.
-    assert scope.kinds() == (core.ASSET, core.WORKFLOW)
-    assert all(core.is_scope_item_kind(kind) for kind in scope.kinds())
-    assert set(scope.kinds()) < set(core.SCOPE_ITEM_KINDS), "stricter than the core's set, never wider"
+    assert scope.KINDS == (core.ASSET, core.WORKFLOW)
+    assert all(core.is_scope_item_kind(kind) for kind in scope.KINDS)
+    assert set(scope.KINDS) < set(core.SCOPE_ITEM_KINDS), "stricter than the core's set, never wider"
     # The two holds that name no item, as each function answers them.
     assert scope.holds(None, []) == [core.NOT_DECLARED]
     assert scope.holds(1, [_rev(1, "a"), _unread(2)]) == [core.UNREADABLE]
@@ -175,7 +166,7 @@ def test_a_revision_declares_only_a_kind_this_backend_has_a_record_for():
     """STRICTER than the core: of its four kinds a revision here declares two. Every
     other value, a core kind or not, is refused, and nothing is looked up for it."""
     a_ref = {core.ASSET: "394c1bd6-7b25-4909-b47e-3aa794c3fa5f", core.WORKFLOW: "refund_approval"}
-    assert set(a_ref) == set(scope.kinds())
+    assert set(a_ref) == set(scope.KINDS)
     for kind in KIND_PROBES:
         declared = type(kind) is str and kind in a_ref
         posted = [{"kind": kind, "ref": a_ref[kind] if declared else "refund_approval"}]
@@ -274,23 +265,29 @@ def test_a_reason_is_the_cores_one_printable_line_and_shorter_here(reason):
     in_core = _code(core.revision_reason, reason, refusal=core.ScopeError)
     here = _code(scope._reason, reason, refusal=scope.ScopeRefused)
     if in_core is not None:
-        # Never looser: what the core refuses is refused here, a blank reason included.
-        assert here == CODE_OF_A_REFUSED_REASON[in_core]
+        # Never looser: what the core refuses is refused here, a blank reason included,
+        # and with the core's own code for it.
+        assert here == in_core
     elif here is None:
         # What is accepted here the core accepts, and both return it exactly as given.
         assert scope._reason(reason) is reason and core.revision_reason(reason) is reason
         assert len(reason) <= scope._REASON_MOST
     else:
-        # Refused here and not by the core: only for this backend's shorter limit.
-        assert here == "malformed" and scope._REASON_MOST < len(reason) <= core_provenance.MAX_REASON_LENGTH
+        # Refused here and not by the core: only for this backend's shorter limit, under
+        # the code the core gives a reason that is too long for it.
+        too_long = "x" * (core_provenance.MAX_REASON_LENGTH + 1)
+        assert here == _code(core.revision_reason, too_long, refusal=core.ScopeError)
+        assert scope._REASON_MOST < len(reason) <= core_provenance.MAX_REASON_LENGTH
 
 
 def test_the_reason_cases_reach_every_answer_and_the_limit_is_never_above_the_cores():
     assert scope._REASON_MOST <= core_provenance.MAX_REASON_LENGTH
     in_core = {_code(core.revision_reason, reason, refusal=core.ScopeError) for reason in REASON_PROBES}
-    assert in_core == {None, "reason_required", "malformed"} == {None, *CODE_OF_A_REFUSED_REASON}
+    assert in_core == {None, "reason_required", "malformed"}
     here = [_code(scope._reason, reason, refusal=scope.ScopeRefused) for reason in REASON_PROBES]
     assert here.count(None) == 5 and scope._reason("x" * scope._REASON_MOST)
+    # Both of the core's codes are answered here, each for the reasons the core gives it for.
+    assert set(here) == in_core
     # The stricter limit bites: something the core takes is refused here.
     longer = "x" * (scope._REASON_MOST + 1)
     assert core.revision_reason(longer) == longer and _code(scope._reason, longer, refusal=scope.ScopeRefused)
@@ -305,12 +302,13 @@ def test_every_revision_states_its_reason_the_first_too():
     primary, backup = scopes.asset(finding.deployment), scopes.asset(finding.deployment, "backup-route")
     for records in ((primary,), (primary, backup)):
         for blank in (None, "", "   "):
-            assert _code(core.revision_reason, blank, refusal=core.ScopeError) == "reason_required"
+            in_core = _code(core.revision_reason, blank, refusal=core.ScopeError)
+            assert in_core == "reason_required"
             body = scopes.body(finding, *records, reason=blank)
             before = IncidentScopeRevision._base_manager.filter(finding=finding).count()
             with pytest.raises(scope.ScopeRefused) as refused:
                 scope.declare(finding, body=body)
-            assert refused.value.code == CODE_OF_A_REFUSED_REASON["reason_required"]
+            assert refused.value.code == in_core
             assert IncidentScopeRevision._base_manager.filter(finding=finding).count() == before
         declare_scope(finding, *records, by=finding.deployment.owner)
     assert IncidentScopeRevision._base_manager.filter(finding=finding).count() == 2
