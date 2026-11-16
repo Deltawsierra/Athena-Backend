@@ -9,6 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from accounts.models import announce_withdrawal
 from accounts.serializers import UserSerializer
 from accounts.permissions import IsAdmin
 
@@ -32,6 +33,8 @@ def _deactivate_and_revoke(user):
             BlacklistedToken.objects.get_or_create(token=token)
     except Exception:  # noqa: BLE001 - deactivation already revokes access; blacklisting is best effort
         logger.exception("could not blacklist outstanding tokens for deactivated user %s", user.pk)
+    # Its role is withdrawn with it: announced, and revoked once this is answered.
+    announce_withdrawal(user.pk)
 
 
 class UserViewSet(viewsets.ModelViewSet):

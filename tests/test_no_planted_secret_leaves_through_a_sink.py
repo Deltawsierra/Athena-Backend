@@ -2259,6 +2259,16 @@ COMMANDS: dict[str, str] = {
     # Review round 1 of #169 (spec, section 35.9): binds rows recorded before the row
     # key; prints counts only.
     "bind_economics_rows": "commands",
+    # AB-GRANT-LEASE: re-asserts each held role grant's signed record before its lease
+    # ends and revokes any no longer held; prints two counts, or why it could not run
+    # (a variable's name, an exception's class) -- never a key, a token or a record.
+    "reconcile_role_grants": "commands: re-asserts held role grants' records, revokes withdrawn ones; prints "
+    "counts, or the variable or exception class it could not run for",
+    # Lists the workers' reports, or acknowledges exited and stale ones: prints each
+    # report's random id, state, host, pid, publication age and whole-number counts,
+    # and who acknowledged it (the --by name and the account) and when.
+    "acknowledge_worker_reports": "commands: lists or acknowledges the workers' reports; prints ids, states, "
+    "host, pid, ages and whole-number counts, and who acknowledged which when",
 }
 
 
@@ -2294,6 +2304,12 @@ FILE_WRITERS: dict[str, str] = {
     "assurance/economics/capacity.py": "files: the economics run slots, empty lock files in "
     "ATHENA_ECONOMICS_SLOT_DIR (run-<i>.lock, tenant-<sha256 of a deployment uuid>-<i>.lock), never written to; "
     "they carry no byte of any request",
+    # Not under MEDIA_ROOT either. Each report holds a fixed set of fields, and its counts
+    # are whole numbers (tests/test_health_counts_every_worker.py,
+    # test_a_report_carries_its_workers_identity_and_whole_number_counts_only).
+    "assurance/worker_reports.py": "files: the workers' reports in ATHENA_WORKER_REPORT_DIR (<random id>.json: "
+    "host, pid, publication time, the exited flag and whole-number counts; acknowledged/<id>-<time>.json adds the "
+    "--by name, the account and the time); they carry no byte of any request",
 }
 
 

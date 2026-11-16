@@ -12,8 +12,10 @@ The dependencies, as safety.degraded names them:
   row read back must be the row asked for.
 * ``the engine`` -- the engine's own ``GET /health``, whose contract is a 200 and
   ``{"status": "ok"}`` (tests/test_engine_contract.py), asked under the client's
-  own short ``HEALTH_TIMEOUT``, never the long timeout a scan is given: a hung
-  engine ends its check inside the bound, ``unknown``, and holds no thread.
+  own short ``HEALTH_TIMEOUT``, never the long timeout a scan is given, and
+  answered by its total ``HEALTH_DEADLINE_SECONDS``: a hung engine, or one that
+  drips its answer a byte inside every read timeout, ends its check inside the
+  bound, ``unknown``.
 * ``Mythos-Core`` -- the modules this backend loads import, and its status
   vocabulary still spells ``unknown`` the way safety.degraded spells it.
 
@@ -132,7 +134,7 @@ def _database():
 def _engine():
     import requests
 
-    from ai_engine.services.cyberengine_client import HEALTH_TIMEOUT, CyberEngineClient, EngineError
+    from ai_engine.services.cyberengine_client import HEALTH_DEADLINE_SECONDS, CyberEngineClient, EngineError
 
     try:
         client = CyberEngineClient.from_settings()
@@ -143,7 +145,7 @@ def _engine():
     except EngineError as exc:
         if isinstance(exc.__cause__, requests.Timeout):
             raise _NoAnswer(
-                f"did not answer /health within its own {sum(HEALTH_TIMEOUT):g} s timeout; "
+                f"did not answer /health within its own {HEALTH_DEADLINE_SECONDS:g} s deadline; "
                 "nothing is established about it"
             ) from exc
         raise

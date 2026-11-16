@@ -5837,7 +5837,7 @@ could fill every worker with long runs, and a scan's Stop then waited for a free
 | | |
 |---|---|
 | Code | `assurance/economics/capacity.py`; `@capacity.capped` on `report_api.ScenarioSimulateView.post`, `remediation_api.MitigationSimulateView.post` and (E5, section 33.9) `portfolio_api.PortfolioSimulateView.post` |
-| Tests | `tests/test_economics_run_cap.py`; the canary harness's records path (a simulate at capacity) |
+| Tests | `tests/test_economics_run_cap.py`; `tests/test_economics_run_cap_on_every_platform.py` (POSIX and Windows); `tests/test_economics_run_cap_without_fcntl.py` (a host with no lock); the canary harness's records path (a simulate at capacity) |
 
 ### 32.1 What takes a slot
 
@@ -5868,26 +5868,44 @@ while every slot is held.
 
 ### 32.2 The slots
 
-A slot is an exclusive `flock` (`LOCK_EX | LOCK_NB`) on one small file in the slot
-directory, which every worker on the host shares: `run-<i>.lock` for the host's
-slots, `tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's.
+A slot is an exclusive lock on one small file in the slot directory, which every
+worker on the host shares: `run-<i>.lock` for the host's slots,
+`tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's. The lock is the
+platform's own (`capacity.lock_kind()`), behind one interface, so the routes do not
+change:
 
-- **No slot leaks.** The kernel releases a flock when the last descriptor of its open
-  file closes, so a worker that dies by any means (SIGKILL, the OOM killer, gunicorn's
-  timeout) gives its slots back at once. A database lease with an expiry was the
+| Platform | Lock | Taken without waiting | Released |
+|---|---|---|---|
+| POSIX | `flock` | `LOCK_EX \| LOCK_NB` | `LOCK_UN`, then close; the kernel, when the last descriptor closes or the process dies |
+| Windows | `msvcrt.locking` on byte 0 (`LockFile`) | `LK_NBLCK`, one attempt; never `LK_LOCK`, which retries for 10 s | `LK_UNLCK`, then close; the system, when the handle closes or the process ends (`TerminateProcess` included) |
+
+On Windows the lock is per handle, so a second handle on the same file, in another
+worker or in the same one, is refused, as a second open file is under flock. Only
+"held elsewhere" (`EACCES`) means a slot is busy; any other lock error refuses the run
+(`unreadable`). A byte past the end of a file may be locked, so the slot files stay
+empty on both platforms.
+
+- **No slot leaks.** The operating system releases the lock when the last descriptor of
+  its open file closes, so a worker that dies by any means (SIGKILL or
+  `TerminateProcess`, the OOM killer, gunicorn's timeout) gives its slots back. A
+  database lease with an expiry was the
   alternative: it leaks a dead worker's slot until it expires, and it would put a
   database read in front of the cap. The cap reads no database.
 - **Every exit gives the slot back**: the handler's answer, a refusal, an exception,
   and `SystemExit` (gunicorn's abort of a timed-out worker) release it in a `finally`;
   a client that disconnects is the same (the handler runs to its end, bounded by its
-  deadline). The descriptors are close-on-exec, and released with `LOCK_UN`, so a child
-  process never keeps one.
+  deadline). The descriptors are close-on-exec (not inherited, on Windows), and
+  unlocked before they are closed, so a child process never keeps one.
 - **Per host.** The cap protects the host's worker pool, so it is per host; a deployment
   of several machines has a cap on each. The directory must be local to the host.
 - **Fails closed.** Slot files that cannot be opened refuse the run, 503
-  `economics_capacity` ("cannot be read"); a run is never made uncapped. Where there is
-  no `fcntl` (Windows) no slot can be locked, so every run is refused this way, and the
-  refusal itself cannot raise (`tests/test_economics_run_cap_without_fcntl.py`).
+  `economics_capacity` ("cannot be read"); a run is never made uncapped. A host with
+  neither `fcntl` nor `msvcrt` can lock nothing, so every run is refused this way, and
+  the refusal itself cannot raise (`tests/test_economics_run_cap_without_fcntl.py`).
+  Before #215 every Windows host was such a host; Windows now locks its slots
+  with `msvcrt` and runs a simulation under the same caps
+  (`tests/test_economics_run_cap_on_every_platform.py`, run by CI on Linux and on
+  windows-latest).
 
 ### 32.3 The caps
 
@@ -5923,7 +5941,8 @@ routes that cannot move the decision; at capacity they write nothing at all.
 
 ### 32.5 Decisions this step takes, which the owner may change
 
-1. **flock slots, per host**, over database leases. Recommendation: keep.
+1. **OS lock slots, per host** (`flock` on POSIX, `msvcrt.locking` on Windows), over
+   database leases. Recommendation: keep.
 2. **The per-tenant cap is per deployment**, the tenant boundary (`assurance.models`).
    An analyst sees every deployment, so one analyst can still hold every host slot
    through several deployments; the host cap is what keeps the stop's workers free.
@@ -9095,8 +9114,18 @@ which names the receipt route a reader verifies it from.
 **Unmeasured is never green.** Every gap is named under "What is not measured": a
 newer version passed over and why, the banner and its reason, each unknown, each line
 or figure not reported, a residual, a receipt or an as-of date not recorded, a figure
-withheld. A report with any gap reads `AUDIT_INCOMPLETE` (`mythos_core.status`); the
-report's own words meet the persona lexicon lint (`mythos_core.persona.lint`).
+withheld. A report with any gap reads `AUDIT_INCOMPLETE` (`mythos_core.status`).
+
+**Every case meets the persona lexicon lint** (`mythos_core.persona.lint`), not only a
+clean report: a figure shown or none, a gap, a refusal, a total withheld. A reason the
+report quotes from another part of economics (a run report's banner, an unknown, a
+review's standing, a portfolio's exclusion or re-check) is reworded where it uses a
+word the lint forbids -- the portfolio's and the run report's "fail" is said "do not
+verify under", its meaning kept -- and one the report cannot reword is not quoted (it
+says the economics routes serve it). A portfolio's exclusion is said in the report's
+own words for its code (`exposure_report.NOT_TOTALLED`), the scenario named. The
+customer's own text (a scenario's title, the deployment's name, an evidence
+reference) is printed as written, escaped.
 
 **Read-only, off the stop path.** It records, recomputes, signs and verifies nothing
 and asks no engine: no `get_or_create`, no receipt service. Every text is escaped, in
@@ -9105,5 +9134,44 @@ the HTML and in the PDF (a scenario's title is the customer's own). Access is se
 `nosniff`, the HTML carries a `default-src 'none'` content security policy, and the
 PDF is a download, byte-identical for the same rows. The route is in
 `safety.stops.NOT_STOPS`, and a fault in `report_api` leaves it unserved and nothing
-else. Its operation class under G14 (#211, not yet merged) is to be declared when that
-lands.
+else. Its operation class under G14 (#211) is an assessment, as `roi/`'s is
+(`safety/degraded.py`).
+
+### 38.1 The deployment total
+
+The report carries one total across the deployment's scenarios, under "Deployment
+total". It never makes one: a total across scenarios is the portfolio's (section 33),
+which draws them together with their correlation groups and shared loss events, and
+never sums their P90s (the owner's specification, section 24). The rule, as the report
+states it: the deployment's latest portfolio (section 33), as GET .../economics/portfolio/ serves it: its own figures, never recomputed here; shown only where the portfolio may be totalled, its stored rows verify, and every scenario version it totals is this deployment's and approved.
+
+- **The portfolio's own figures.** The total is `portfolio.build_document` of the
+  deployment's latest `PortfolioResult` (`portfolio.latest`), the document
+  `GET .../economics/portfolio/` serves: for the gross and the net line, its expected
+  annual loss, P10, P50, P90, severe-but-plausible figure and expected shortfall, as
+  served. Market value is not totalled. The report adds, subtracts and rounds nothing;
+  `tests/test_economics_exposure_report.py` holds it equal to the route's answer.
+- **Only what the portfolio may total.** The figures are shown only where the
+  portfolio's stored rows verify (`integrity.verified`), it completed, it is not
+  `excluded_from_totals` (no Unknown or stale banner), and every version it totals is
+  one of this deployment's and approved now (section 38's approval rule). A portfolio
+  totals current versions whether or not they are approved: one that totals a version
+  that is not approved is withheld and that version named, never shown and never
+  re-summed without it.
+- **Every version not totalled is named.** Each version the portfolio excludes is
+  listed by title with its code and the portfolio's reason (`portfolio.EXCLUSIONS`),
+  and a version recorded after the portfolio was totalled is named as such. None is
+  silently summed or dropped.
+- **Integrity.** Each total carries the portfolio's integrity line: its stored rows'
+  checks (`portfolio.INTEGRITY_CHECKS`), the runs its re-check vouches for, and the
+  runs it does not (`integrity.scenarios_failed`, and a version excluded as
+  `unverified`). One run not vouched for makes the total read `AUDIT_INCOMPLETE`, and
+  where it is a run the portfolio totals, no figure is shown.
+- **Unmeasured is never green.** No portfolio, a portfolio that cannot be read, an
+  excluded version, a banner, a version not approved or not in the portfolio: each is
+  a gap, named under "What is not measured" with the prefix "Deployment total", and
+  the total and the report read `AUDIT_INCOMPLETE`.
+- **Same access, read-only.** The total is part of the same document, behind the same
+  route, access rules, escaping and headers; reading it writes no row, runs no engine
+  and signs nothing. A portfolio that will not import leaves the total unmeasured and
+  the rest of the report served.

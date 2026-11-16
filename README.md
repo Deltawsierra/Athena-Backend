@@ -270,6 +270,29 @@ the engine's answer; a longer answer reads as not reported. Two operators signin
 one command at once both count: each signature is added to the command as it is at
 that moment, under the write lock.
 
+The engines' poll (`GET /api/failsafe/pending/?engine_id=<id>`, with
+`X-Failsafe-Poll-Token`) answers the same JSON list of signed command documents
+as before, but its work no longer grows with the number of ready commands. Every
+ready stop comes first, the strongest first (terminate, then stand-down, then
+pause), at most 500; then at most 50 ready resumes and releases, newest first;
+in at most 4,000,000 bytes, under the 5 MiB an engine reads of an answer (an
+answer past that is cut, and the engine decodes none of it, its stops included).
+No start is on a page that left a stop for the next page. A resume or release
+drafted at or before the newest stop ever signed into force for its engine is
+never delivered: the engine applies an answer in its order, so it would undo the
+newer stop. That stop is the engine's stop mark (one row per engine, moved
+forward in the transaction that signs a stop into force, kept after the stop's
+window, and backfilled by migration 0005), so the poll reads one row per engine
+whatever the history. An engine with no mark, or whose mark cannot be read, gets
+no start from the poll (stops always go). The poll writes nothing for it; the
+state view marks such a start `superseded`, with an audit event naming the stop.
+Draft a new one after the stop. `X-Failsafe-More` says whether anything was left out and
+`X-Failsafe-Next` carries the cursor for the rest (`?cursor=`, same
+`engine_id`); the engine's client reads only the first page, which always starts
+with the stops. Commands past their window are passed over and marked expired,
+at most 200 per poll in one write that never waits for the database's write
+lock, and a write that fails never fails the poll.
+
 Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
 engagements they created are kept, with the creator unlinked; such an engagement
 is visible to admins only. A contradiction they made on an assurance claim stays
@@ -502,13 +525,35 @@ backend.
 - Each role promotion that names who granted it (`RoleGrant.record`) emits a
   `delegation` record of the grant on every deployment: the granter delegated the
   account (both named `athena-backend:<username>`) the scope
-  `athena-backend:role:<role>`, from the instant it was granted, with no end. A role
-  of this backend's, so named, is not an action a customer's tool performs: a
-  `delegates_to` hop over an effect's action is not proven by it
-  (`delegation_out_of_scope`). A promotion that names nobody emits none; a
-  demotion, a deactivation and a removal emit nothing (they are revokes), and the
-  token refresh emits nothing (it is how an operator keeps the session they press
-  stop from).
+  `athena-backend:role:<role>`, from the instant it was granted, for ONE LEASE of 24 h
+  (`assurance/role_grant_lease.py`, in the policy pin). A role of this backend's, so
+  named, is not an action a customer's tool performs: a `delegates_to` hop over an
+  effect's action is not proven by it (`delegation_out_of_scope`). A promotion that
+  names nobody emits none, and the token refresh emits nothing (it is how an
+  operator keeps the session they press stop from).
+- A role grant's record proves only within its lease and before its revocation
+  (AB-GRANT-LEASE). A withdrawal -- a demotion, the superuser flag taken away, a
+  deactivation, a removal -- emits a `revoked` record of every lease still running
+  of each grant the account no longer holds, `revoked_at` the instant of the
+  withdrawal, so a later effect reads `delegation_revoked` (an effect before it stays
+  proven). It is signed only after the stop is answered (once the response is sent),
+  never before: the accounts app imports none of the identity code. A held role is
+  kept proven by `manage.py reconcile_role_grants`, which re-asserts each grant still
+  held (a new record, a new 24 h window) once it has less than 12 h left, and revokes
+  any lease of a grant no longer held (a role changed by a path that announced
+  nothing). If it does not run -- no key, no keyring, the database down, never
+  scheduled -- nothing is extended: each lease ends and the hop reads
+  `delegation_expired`. The open-ended records signed before leases are read to one
+  lease from when they opened; the first reconcile re-asserts the roles still held.
+  Schedule it hourly, from the backend's folder, in PowerShell:
+
+  ```powershell
+  schtasks /Create /SC HOURLY /TN "Athena role-grant reconcile" /TR "C:\path\to\venv\Scripts\python.exe C:\path\to\Athena-Backend\manage.py reconcile_role_grants"
+  ```
+
+  It prints what it re-asserted and revoked, exits 0 when the grant key is not set
+  (the emitter is off), and exits non-zero when it could not run, so the scheduler
+  reports it.
 - Each record is signed with a key of this backend's, a PEM (PKCS#8) Ed25519 private
   key named by `ATHENA_SIGNIN_RECORD_KEY_FILE` (signed as `mythos-signin-collector`)
   or `ATHENA_GRANT_RECORD_KEY_FILE` (as `mythos-grant-collector`), and is taken in
@@ -1301,6 +1346,12 @@ dashboard needs (section 30):
   date and limitations -- and names every gap under "What is not measured"; a report
   with a gap reads `AUDIT_INCOMPLETE`. With no such version it says so and shows no
   figure. Every text is escaped; it is answered `no-store`, and it writes nothing.
+  Its "Deployment total" section is the deployment total: the latest portfolio's own
+  figures, exactly as `GET .../economics/portfolio/` serves them (never recomputed),
+  shown only where the portfolio may be totalled, its stored rows verify and every
+  version it totals is this deployment's and approved; each version it does not total
+  is named with its reason, each total carries the portfolio's integrity line (which
+  runs it vouches for and which not), and one gap makes it read `AUDIT_INCOMPLETE`.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
@@ -1374,10 +1425,11 @@ these routes unserved.
 A simulate request runs its Monte Carlo in the worker that serves it, for up to 120 s,
 so the two simulate routes (and any later Monte Carlo route, which registers with one
 line, `@capacity.capped`) run only in a free slot (`assurance/economics/capacity.py`;
-spec, section 32). A slot is an exclusive `flock` on a small file every worker on the
-host shares, taken WITHOUT WAITING: when none is free the request is answered at once,
-503 with `Retry-After` and code `economics_capacity`, and nothing runs or is recorded.
-The kernel releases a dead worker's flock, so a slot never leaks; every other exit
+spec, section 32). A slot is an exclusive lock on a small file every worker on the
+host shares (`flock` on POSIX, `msvcrt.locking` on byte 0 on Windows), taken WITHOUT
+WAITING: when none is free the request is answered at once, 503 with `Retry-After` and
+code `economics_capacity`, and nothing runs or is recorded. The operating system
+releases a dead worker's lock, so a slot never leaks; every other exit
 (an answer, a refusal, an exception, gunicorn's abort) releases it in a `finally`. The
 caps, each read from the environment by name:
 
@@ -1394,10 +1446,13 @@ caps, each read from the environment by name:
 No stop takes a slot: a scan's Stop and every operator stop are answered within their
 bound while every slot is held (`tests/test_economics_run_cap.py`).
 
-On Windows there is no `fcntl`, so no slot can be locked and none is ever granted: a
-simulate is refused with the same 503 (`economics_capacity`, "the economics run slots
-cannot be read on this server") and is never run uncapped. Nothing else is affected, and
-no stop route is (`tests/test_economics_run_cap_without_fcntl.py`).
+On Windows the slots are locked with `msvcrt` (one attempt, `LK_NBLCK`, never the
+waiting `LK_LOCK`), so a simulation runs there under the same caps, with the same 503
+when they are full, and a worker ended by `TerminateProcess` gives its slots back
+(`tests/test_economics_run_cap_on_every_platform.py`, which CI runs on Linux and on
+windows-latest). A host with no lock at all (neither `fcntl` nor `msvcrt`) is refused
+with the same 503 (`economics_capacity`, "the economics run slots cannot be read on this
+server") and never run uncapped (`tests/test_economics_run_cap_without_fcntl.py`).
 
 ### Continuous financial assurance (E6)
 
@@ -1682,7 +1737,13 @@ reads all of this backend's code, routed or not, and fails on any place that can
 start a scan (a launch call, held or named in a string, or the engine's launch route)
 unless the preflight is asked first in the same function, or the place is a private
 helper reached only from code that asks it. An unrouted LLM scan view that asked
-nothing (`pentest/views_llm.py`) was deleted for that reason. A defender
+nothing (`pentest/views_llm.py`) was deleted for that reason. The routed LLM scan
+keeps what it tested on the scan (`target_config`): the adapter, the model, the
+target's name and the endpoint (scheme, host, port and path; no login, query or
+fragment). Nothing else the caller sent is kept, so no key reaches the record. It is
+written only once the preflight lets the launch go, and the scan's ingest registers
+the model as a Provider and Asset, so the asset inventory names the model each LLM
+scan tested. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
 
@@ -1698,8 +1759,11 @@ its own and names each one, with the reason:
 - **the database**: `SELECT 1`, and the row read back must be the one asked for;
 - **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`. It is
   asked under its own short timeout (0.5 s to connect, 1 s to read), never the long
-  one a scan is given, so a hung engine reads `unknown` well inside the bound and
-  holds no thread;
+  one a scan is given, and answered within 1.5 s in all. A hung engine, or one that
+  sends a byte inside every read timeout, reads `unknown` inside the bound. The ask
+  runs on a thread of its own, one at a time: a dripped body is cut off at 1.5 s, and
+  while a dripped status line or headers hold that thread, the check answers at once
+  without asking again;
 - **Mythos-Core**: the modules this backend loads import, and its word for unknown
   is still `unknown`.
 
@@ -1905,9 +1969,17 @@ sends is the record itself in most of those places; where it is found is printed
 Every request this service sends with `requests` itself -- to the engine, from the
 defender gateway, to a customer's connector or posture source, and the closure
 forward to Minotaur -- goes through `safety/outbound.py`: no `.netrc` login is
-read, an error is cut to the scheme, host and port of any URL in it with every
-header value withheld, and an answer is read with every credential the request
-carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
+read, an error it raises (and every exception that error carries) says one fixed
+message, its class and an opaque reference (`the outbound request failed
+(ConnectTimeoutError; ref ob-1a2b3c-7)`) and never the target's host, port, path,
+query, login or fragment, and an answer is read with every credential the request
+carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`,
+`tests/test_the_outbound_transport_shows_no_target_detail.py`). A call may ask for
+a total deadline (`total=`, seconds): a timer shuts its sockets down when it passes,
+however slowly the far end drips its status line, headers or body, and the call
+raises `TotalDeadlineExceeded`, leaving no thread or socket behind. It is opt-in: a
+call that does not pass it, every stop's included, is sent exactly as before, with
+no timer, thread, lock or wait added.
 
 - **The engine** (the engine client: a scan's launch, its status, its Stop, file
   uploads and every other engine call; and the defender gateway's `/defend`, which
@@ -2066,9 +2138,47 @@ exit starts or runs the writers. What a process lost or refused since it started
 lines meant for stderr, log records dropped, unrecorded dispatches refused past the
 hard bound -- is counted, and any non-zero count makes `GET /api/health/` answer
 `"status": "degraded"` (still 200: the process is alive) with each count, and the
-sweep log it at WARNING whenever a count moves. The counts are per process. Everything else on a stop's path goes the same way, through a queue of
+sweep log it at WARNING whenever a count moves. Everything else on a stop's path goes the same way, through a queue of
 at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
+
+Health counts every worker, not only the one that answers. The counts are kept per
+process, and a probe reaches one worker, so each serving worker publishes its counts
+as a small JSON file in one directory (`assurance/worker_reports.py`), and
+`GET /api/health/` sums its own counts, read live, with every other worker's file:
+
+- **Where.** `ATHENA_WORKER_REPORT_DIR`, else a directory in the system's temporary
+  directory named for the checkout. Every worker of a host must name the same one.
+  A file, not a database row, so publishing never takes the database's one writer
+  a stop's own write needs; the economics run slots keep their per-host state the
+  same way. With several hosts, each host's health covers that host's workers --
+  the ones a load balancer's probe of that host is about -- unless the variable
+  names a directory every host shares (files never collide; keep the clocks in step,
+  since staleness is judged by each file's publication time).
+- **Off every stop.** A request costs a comparison and a liveness check; the first
+  one starts the publisher thread, which reads the counts every second and writes
+  when one moves, and every 10 s regardless. A slow or failing directory delays only
+  that thread. A failed publish is counted and shown as
+  `worker_reports_unpublished`, which reads degraded like the other counts. On
+  Windows, a replace refused because a reader has the file open is tried 5 times.
+- **Unknown, never ok.** A report that cannot be read, a directory that cannot be
+  listed, or a live worker's report not rewritten within 60 s (a worker killed
+  outright: SIGKILL, the OOM killer, `taskkill /F`) reads `"status": "unknown"`
+  with the reason under `"unknown"`, keyed by the worker's random id. Counts
+  anywhere read `"degraded"`, with the sums under `"degraded"` and each counting
+  worker under `"workers"`.
+- **What `"ok"` carries.** `"status": "ok"` and the message, as before, and every
+  count it read under `"counts"`, each 0 (`stderr_lines_lost`, `log_records_dropped`,
+  `unrecorded_dispatches_refused`, `worker_reports_unpublished`), with `"workers"`
+  empty. A reader can tell an `"ok"` that read its counts from one that reports none
+  (a backend from before #217), and need not read a missing count as zero.
+- **Exited workers.** A worker that exits normally writes its last counts, marked
+  exited; they stay in health's sums until an operator acknowledges them. One that
+  exits with nothing counted removes its file. List and acknowledge with
+  `python manage.py acknowledge_worker_reports` (`REPORT_ID ... --by NAME`, or
+  `--all --by NAME`): each acknowledged report is kept under `acknowledged/` in the
+  directory with who acknowledged it (the name given and the account that ran it)
+  and when, and the line is logged at WARNING. A live worker's report is refused.
 
 **Migration `assurance.0043`** adds `marker` as a nullable column with no default: a
 plain `ADD COLUMN`, so it copies no table and holds the write lock for no time
@@ -2309,6 +2419,21 @@ at least 8 characters and not a plain word, so a tenant's `?level=critical` cann
 rewrite the severity a verdict is read from).
 `tests/test_no_target_credential_is_ever_shown.py` plants a key in each of those four
 places of a standard scan and of an LLM scan and walks every shown site.
+
+The defender gateway (`audit/middleware.py`) is sent a launch's target the same way.
+It asks the engine's `/defend` about every request that is not a stop, with the
+request's path, method, user agent, query string and body. The body was redacted by
+key alone, and `url` names no secret, so a launch's target went to the engine as it was
+typed. On `POST /api/pentest/scan/` (`url`) and `POST /api/pentest/llm-scan/`
+(`base_url`), the target's field now reaches the engine as `target_shown` shows it, in
+the query string too, in JSON, a form or multipart, at any depth and in every
+duplicate. The target the view reads is also withheld wherever else the launch says it
+(`target_said`). A launch body the gateway cannot read as a form or JSON, or one longer
+than it reads, has every URL in it shown that way instead. The scheme, host, port and
+path stay as they were, so the engine scores the same structure; a target that carries
+no credential reaches it unchanged. The caller's `Authorization` and `Cookie` headers
+were never sent and still are not. `tests/test_the_defender_is_sent_no_target_credential.py`
+reads what a stub engine on loopback was sent off the wire, and checks that no stop is sent.
 
 **The hybrid (the athena-dashboard).** This backend is the record and the governance
 gate: the target's bounds, consent, the engagement's authority and window, the preflight
