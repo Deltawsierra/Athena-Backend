@@ -671,9 +671,9 @@ def test_removing_an_operator_nulls_every_history_column_naming_them_and_nothing
             if field.related_model is User and getattr(row, field.attname) == leaver.pk:
                 named.setdefault(model, []).append(field.attname)
     assert set(named) >= {
-        ApprovalVersion, AuthorityChain, RepairContract, RecoveryRecord, econ.FinancialSource, econ.ModelInventoryEntry,
-        econ.FinancialScenario, econ.ScenarioReview, econ.SensitiveOverride, econ.OverrideApproval,
-        econ.OverrideRevocation,
+        ApprovalVersion, AuthorityChain, RepairContract, RecoveryRecord, IncidentScopeRevision, econ.FinancialSource,
+        econ.ModelInventoryEntry, econ.FinancialScenario, econ.ScenarioReview, econ.SensitiveOverride,
+        econ.OverrideApproval, econ.OverrideRevocation,
     }, named
     before = {model: _stored(row) for model, row in world.rows.items()}
     counts = _counts()

@@ -4418,7 +4418,8 @@ class RecoveryRecord(models.Model):
     THE SCOPE IT WAS DERIVED UNDER (SPINE SP-3): ``scope_revision`` is the number of the
     incident's :class:`IncidentScopeRevision` current when the step was recorded, null
     when none was declared, and ``save`` refuses a row that names any other. A recovered
-    state holds only for that revision. A row from before SP-3 has none, and reads as
+    state holds only for that revision, and only while the step links evidence for every
+    item a revision added to the scope. A row from before SP-3 has none, and reads as
     one whose scope was not declared.
 
     APPEND-ONLY: the model refuses an update or a delete of a recorded step, or a fresh

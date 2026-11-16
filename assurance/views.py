@@ -3857,7 +3857,10 @@ class FindingViewSet(
         signed-in person, who must be the deployment's owner. It names no one: who
         accepts is the authenticated request user, never a field. The state, its
         conditions and its release are derived, and a body naming them is refused. A
-        step that moves nothing -- links changed and no state with them -- is a 409."""
+        step that moves nothing -- links changed and no state with them -- is a 409. So
+        is one that, after the incident's scope has widened, links evidence for none of
+        the items a revision added (SP-3): each stays an open gap until evidence of this
+        deployment names it."""
         finding = self.get_object()
         if request.method != "POST":
             return Response(recovery_record.finding_record(finding))

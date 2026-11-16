@@ -15,7 +15,11 @@ derived under:
   and reads ``AUDIT_INCOMPLETE``. No declared scope is unknown, never ok;
 - when a later revision adds an item, a recovered step taken before it is no longer read
   as recovered: the read names the revision and the item among the gaps and its release
-  is ``AUDIT_INCOMPLETE``, until steps are recorded under the new revision;
+  is ``AUDIT_INCOMPLETE``;
+- an added item stays an open gap until a step recorded under that revision links
+  evidence that names it (evidence of a finding of the same deployment attached to that
+  asset). An empty step, or one whose evidence names none of the added items, moves
+  nothing; one item's evidence covers no other; another deployment's covers none;
 - a revision that only removes items never advances a state by itself;
 - rows from before this change are not rewritten, and read ``scope:not_declared``.
 
@@ -50,6 +54,7 @@ from assurance import signals
 from assurance.models import (
     ApprovedWorkflow,
     Deployment,
+    Evidence,
     Finding,
     IncidentScopeRevision,
     IncidentScopeRewriteRefused,
@@ -337,6 +342,43 @@ def test_what_holds_a_recovered_state_back_is_each_item_a_later_revision_added(t
     assert scope.holds(taken_under, revisions) == expected
 
 
+A, B, C = ("asset", "a"), ("asset", "b"), ("asset", "c")
+_WIDENED = [_rev(1, "a"), _rev(2, "a", "b"), _rev(3, "a", "b", "c")]
+
+
+@pytest.mark.parametrize(
+    ("taken_under", "revisions", "named", "expected"),
+    [
+        # The first revision supersedes none: nothing was added to an earlier scope.
+        (1, [_rev(1, "a")], set(), []),
+        (1, _WIDENED, set(), []),
+        # An added item is open until evidence names it: that item, and no other.
+        (2, _WIDENED, set(), ["scope:revision:2:added:asset:b"]),
+        (3, _WIDENED, set(), ["scope:revision:2:added:asset:b", "scope:revision:3:added:asset:c"]),
+        (3, _WIDENED, {B}, ["scope:revision:3:added:asset:c"]),
+        (3, _WIDENED, {C}, ["scope:revision:2:added:asset:b"]),
+        (3, _WIDENED, {A}, ["scope:revision:2:added:asset:b", "scope:revision:3:added:asset:c"]),
+        (3, _WIDENED, {B, C}, []),
+        # Evidence that names a workflow of the same ref is not evidence for the asset.
+        (2, _WIDENED, {("workflow", "b")}, ["scope:revision:2:added:asset:b"]),
+        # Removed again, it stays open: a narrowing lifts nothing.
+        (3, [_rev(1, "a"), _rev(2, "a", "b"), _rev(3, "a")], set(), ["scope:revision:2:added:asset:b"]),
+        # holds() answers for a scope that is not declared or cannot be read.
+        (None, _WIDENED, set(), []),
+        (2, [_rev(1, "a"), SimpleNamespace(revision=2, items=[{"kind": "asset"}])], set(), []),
+    ],
+)
+def test_an_added_item_is_open_until_evidence_names_that_item(taken_under, revisions, named, expected):
+    assert scope.uncovered(taken_under, revisions, named) == expected
+
+
+def test_what_a_revision_added_is_what_the_one_it_supersedes_did_not_hold():
+    assert scope.added(_WIDENED) == [(2, "asset", "b"), (3, "asset", "c")]
+    assert scope.added([_rev(1, "a", "b"), _rev(2, "a"), _rev(3, "a", "b")]) == [(3, "asset", "b")]
+    assert scope.added([_rev(1, "a")]) == [] and scope.added([]) == []
+    assert scope.added([_rev(1, "a"), SimpleNamespace(revision=2, items="b")]) is None
+
+
 # ------------------------------------------- no declared scope is unknown, never ok
 
 
@@ -435,13 +477,33 @@ def test_an_accepted_recovery_does_not_outlive_a_wider_scope():
     # The revision recorded no step and rewrote none: the row is history.
     assert _history(finding) == before
 
-    # Until steps are recorded under the new revision. S1 lets nothing follow an accepted
-    # recovery, so the first of them follows nothing; S1's step check runs from it on.
+    # An empty step answers nothing and moves nothing: not an admin's, not the owner's
+    # with a new acceptance, and not one whose evidence names none of the added items.
     someone = User.objects.create_user(username="another-admin", password="x", role=User.Roles.ADMIN)
-    again = rr.record(finding, by=someone)
+    beside = [str(scopes.evidence_naming(primary).uuid), str(scopes.evidence_of(finding).uuid)]
+    for asked in ({"by": someone}, {"by": owner, "accept_until": _until()}, {"by": someone, "body": {"evidence": beside}}):
+        with pytest.raises(rr.RecoveryRefused) as refused:
+            rr.record(finding, **asked)
+        assert refused.value.code == "nothing_moved" and _added(2, backup) in str(refused.value), asked
+    assert _history(finding) == before
+
+    # Evidence that names the backup route: now the steps are recorded, under the new
+    # revision. The first names the accepted step it sets aside.
+    proof = scopes.evidence_naming(backup)
+    again = rr.record(finding, by=someone, body={"evidence": [str(proof.uuid)]})
     assert _states(again) == [st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED]
-    assert [(s.version, s.scope_revision, s.reopens) for s in again] == [(5, 2, ""), (6, 2, ""), (7, 2, "")]
+    assert [(s.version, s.scope_revision) for s in again] == [(5, 2), (6, 2), (7, 2)]
+    assert [s.reopens for s in again] == [str(steps[-1].uuid), "", ""]
+    assert again[0].links["evidence"] == [
+        {"uuid": str(proof.uuid), "classification": "technically_verified", "asset": str(backup.uuid)}
+    ]
+    # S1 lets nothing follow an accepted recovery, not even a reopen: asked about this
+    # step, it refuses. The rule belongs in mythos_core.status and is not there yet.
+    with pytest.raises(st.RecoveryError) as terminal:
+        st.check_recovery_step(rr._as_recovery(steps[-1]), rr._as_recovery(again[0]))
+    assert terminal.value.code == "terminal"
     assert _read(finding)["current"] == {"version": 7, "state": st.REPAIR_TESTED, "release": st.FAIL}
+    # The evidence is carried, as every link is: the owner's acceptance needs no more.
     (accepted,) = rr.record(finding, by=owner, accept_until=_until())
     assert (accepted.state, accepted.release, accepted.scope_revision) == (st.RECOVERY_ACCEPTED, st.PASS, 2)
     for earlier, later in zip([*again, accepted], [*again[1:], accepted], strict=False):
@@ -456,10 +518,11 @@ def test_an_accepted_recovery_does_not_outlive_a_wider_scope():
     with pytest.raises(rr.RecoveryRefused) as refused:
         rr.record(finding, by=owner)
     assert refused.value.code == "terminal"
-    assert steps[-1].pk == before[-1]["id"]
 
 
-def test_a_restored_recovery_is_reopened_by_a_wider_scope_and_the_reopen_names_it():
+def test_an_empty_step_never_re_derives_a_recovered_state_under_a_wider_scope():
+    """The fail-first for the open gap: on ``4e0992d`` the empty step below recorded
+    ``restored_with_restrictions`` again, under revision 2, on the witnesses it had."""
     finding = _incident()
     dep = finding.deployment
     primary = scopes.asset(dep, "primary-route")
@@ -473,8 +536,16 @@ def test_a_restored_recovery_is_reopened_by_a_wider_scope_and_the_reopen_names_i
     assert read["steps"][-1]["gaps"] == [_added(2, backup)]
     assert read["steps"][-1]["recorded"]["state"] == st.RESTORED_WITH_RESTRICTIONS
 
-    # S1's reopen: new evidence reopened the scope, and the new record names the one it reopens.
-    again = rr.record(finding)
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding)
+    assert refused.value.code == "nothing_moved" and _added(2, backup) in str(refused.value)
+    assert _history(finding) == before
+    assert _read(finding)["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
+
+    # Evidence that names the added item. S1's reopen: new evidence reopened the scope,
+    # and the new record names the one it reopens.
+    proof = scopes.evidence_naming(backup)
+    again = rr.record(finding, body={"evidence": [str(proof.uuid)]})
     assert _states(again) == [
         st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED, st.RESTORED_WITH_RESTRICTIONS,
     ]
@@ -484,6 +555,148 @@ def test_a_restored_recovery_is_reopened_by_a_wider_scope_and_the_reopen_names_i
     read = _read(finding)
     assert read["current"] == {"version": 8, "state": st.RESTORED_WITH_RESTRICTIONS, "release": st.FAIL}
     assert read["steps"][-1]["scope_gaps"] == [] and _history(finding)[:4] == before
+
+    # The evidence taken away again, the restore loses its support: the next steps name
+    # the item among their gaps, and none is a recovered state.
+    without = rr.record(finding, body={"evidence": []})
+    assert _states(without) == [st.REPAIR_PROPOSED, st.REPAIR_TESTED]
+    assert without[-1].gaps == [_added(2, backup)] and without[-1].release == st.AUDIT_INCOMPLETE
+
+
+def test_evidence_for_one_added_item_covers_that_item_and_no_other():
+    finding = _incident()
+    dep = finding.deployment
+    primary = scopes.asset(dep, "primary-route")
+    _restored(finding, primary)
+    backup, modem = scopes.asset(dep, "backup-route"), scopes.asset(dep, "vendor-modem")
+    declare_scope(finding, primary, backup, modem)
+
+    one = scopes.evidence_naming(backup)
+    again = rr.record(finding, body={"evidence": [str(one.uuid)]})
+
+    # It answered for one item, so the steps are recorded; the other holds the restore back.
+    assert _states(again) == [st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED]
+    held = again[-1]
+    assert held.gaps == [_added(2, modem)] and held.release == st.AUDIT_INCOMPLETE
+    assert not RecoveryRecord.objects.filter(finding=finding, scope_revision=2, state__in=sorted(rr.RECOVERED)).exists()
+    read = _read(finding)
+    assert read["current"] == {"version": 7, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
+    assert read["steps"][-1]["scope_gaps"] == [_added(2, modem)]
+    # More evidence for the same item is not evidence for the other.
+    more = scopes.evidence_naming(backup)
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, body={"evidence": [str(one.uuid), str(more.uuid)]})
+    assert refused.value.code == "nothing_moved"
+
+    other = scopes.evidence_naming(modem)
+    (restored,) = rr.record(finding, body={"evidence": [str(one.uuid), str(other.uuid)]})
+    assert (restored.state, restored.scope_revision, restored.gaps) == (st.RESTORED_WITH_RESTRICTIONS, 2, [])
+
+
+def test_an_item_added_before_any_recovery_is_an_open_gap_until_evidence_names_it():
+    finding = _incident()
+    dep, owner = finding.deployment, finding.deployment.owner
+    primary = scopes.asset(dep, "primary-route")
+    declare_scope(finding, primary)
+    rr.record(finding)
+    backup = scopes.asset(dep, "backup-route")
+    declare_scope(finding, primary, backup)
+    _repaired_and_tested(finding)
+
+    # Every witness, complete coverage and the owner's acceptance: held back by the item.
+    steps = rr.record(finding, by=owner, body={"coverage": COVERED}, accept_until=_until())
+    assert _states(steps) == [st.REPAIR_PROPOSED, st.REPAIR_TESTED]
+    held = steps[-1]
+    assert (held.gaps, held.release, held.scope_revision) == ([_added(2, backup)], st.AUDIT_INCOMPLETE, 2)
+    assert {"statement": _added(2, backup), "sources": [{"kind": "scope", "ref": f"finding:{finding.uuid}"}]} in (
+        held.residual_uncertainty
+    )
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, by=owner, accept_until=_until())
+    assert refused.value.code == "nothing_moved"
+
+    proof = scopes.evidence_naming(backup)
+    (accepted,) = rr.record(finding, by=owner, body={"evidence": [str(proof.uuid)]}, accept_until=_until())
+    assert (accepted.state, accepted.release, accepted.gaps) == (st.RECOVERY_ACCEPTED, st.PASS, [])
+
+
+def test_another_deployments_evidence_never_covers_an_added_item():
+    finding = _incident()
+    dep = finding.deployment
+    primary = scopes.asset(dep, "primary-route")
+    restored = _restored(finding, primary)[-1]
+    backup = scopes.asset(dep, "backup-route")
+    declare_scope(finding, primary, backup)
+    before = _history(finding)
+    other = _incident("elsewhere")
+
+    # Evidence of ANOTHER deployment's finding, attached by a bad write to this
+    # deployment's backup route: not evidence of this deployment, refused as every link is.
+    theirs = Finding.objects.create(
+        deployment=other.deployment, asset=backup, fingerprint="fp-theirs", finding_type="exposed_route",
+        title="theirs", severity="high",
+    )
+    foreign = Evidence.objects.create(finding=theirs, classification="technically_verified")
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, body={"evidence": [str(foreign.uuid)]})
+    assert refused.value.code == "unknown_link" and "this deployment" in str(refused.value)
+
+    # Evidence of this deployment's finding attached to another deployment's asset of
+    # the same name names nothing of this scope.
+    their_route = scopes.asset(other.deployment, "backup-route")
+    stray_finding = Finding.objects.create(
+        deployment=dep, asset=their_route, fingerprint="fp-stray", finding_type="exposed_route", title="stray",
+        severity="high",
+    )
+    stray = Evidence.objects.create(finding=stray_finding, classification="technically_verified")
+    links, _coverage = rr.resolve(finding, {"evidence": [str(stray.uuid)]}, restored)
+    assert links["evidence"] == [{"uuid": str(stray.uuid), "classification": "technically_verified", "asset": None}]
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, body={"evidence": [str(stray.uuid)]})
+    assert refused.value.code == "nothing_moved"
+    assert _history(finding) == before
+
+
+def test_a_workflow_a_revision_adds_stays_open_because_evidence_names_no_workflow():
+    """What the models hold today: evidence is a finding's, and a finding is attached to
+    an asset, never to a workflow. So nothing a step links is evidence that names a
+    workflow, and one a revision adds stays an open gap. Not built around: the step
+    below already links a signed gate decision of that workflow and its read-back, and
+    neither is counted."""
+    finding = _incident()
+    dep = finding.deployment
+    primary = scopes.asset(dep, "primary-route")
+    restored = _restored(finding, primary)[-1]
+    assert [permit["workflow"] for permit in restored.links["permits"]] == [WF] and restored.links["receipts"]
+    refund = ApprovedWorkflow.objects.create(deployment=dep, slug=WF, name="Refund")
+    declare_scope(finding, primary, refund)
+    before = _history(finding)
+    open_gap = f"scope:revision:2:added:workflow:{WF}"
+
+    assert _read(finding)["steps"][-1]["gaps"] == [open_gap]
+    for body in ({}, {"evidence": [str(scopes.evidence_naming(primary).uuid)]}):
+        with pytest.raises(rr.RecoveryRefused) as refused:
+            rr.record(finding, body=body)
+        assert refused.value.code == "nothing_moved" and open_gap in str(refused.value)
+    assert _history(finding) == before
+    assert rr.named(restored.links) == set()
+
+
+def test_a_failed_read_back_is_recorded_whatever_the_scope():
+    """A blocker is never held back by an open gap in the scope."""
+    finding = _incident()
+    dep = finding.deployment
+    primary = scopes.asset(dep, "primary-route")
+    restored = _restored(finding, primary)[-1]
+    declare_scope(finding, primary, scopes.asset(dep, "backup-route"))
+    permit = restored.links["permits"][0]["outcome_id"]
+    failed = record_reconciliation(dep, WF, permit, "not_applied").receipt_id
+
+    steps = rr.record(finding, body={"receipts": [failed]})
+
+    assert _states(steps) == [st.UNDER_INVESTIGATION, st.RECOVERY_INCOMPLETE]
+    assert steps[0].reopens == str(restored.uuid)
+    assert steps[-1].gaps == [f"effect_not_applied:receipt:{failed}"] and steps[-1].release == st.FAIL
 
 
 def test_a_revision_that_only_removes_never_advances_a_state_by_itself():
@@ -504,8 +717,14 @@ def test_a_revision_that_only_removes_never_advances_a_state_by_itself():
     assert read["current"] == held["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
     assert read["steps"][-1]["gaps"] == [_added(2, backup)]
     assert _history(finding) == before, "a revision records no step"
-    # Only a step recorded under the current revision does.
-    assert rr.record(finding, by=owner, accept_until=_until())[-1].scope_revision == 3
+    # Nor does a step that answers nothing: the item revision 2 added stays an open gap
+    # whatever revision 3 removed. Only a step that links evidence for it moves.
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, by=owner, accept_until=_until())
+    assert refused.value.code == "nothing_moved" and _history(finding) == before
+    proof = scopes.evidence_naming(backup)
+    again = rr.record(finding, by=owner, body={"evidence": [str(proof.uuid)]}, accept_until=_until())
+    assert (again[-1].state, again[-1].scope_revision, again[-1].release) == (st.RECOVERY_ACCEPTED, 3, st.PASS)
 
     # Only ever narrowed: the accepted recovery still stands, and nothing was recorded for it.
     other = _incident("narrowed")
@@ -590,10 +809,21 @@ def test_a_scope_revision_that_cannot_be_read_is_caution_never_ok():
     read = _read(finding)
     assert read["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
     assert read["steps"][-1]["gaps"] == ["scope:unreadable"]
-    # And no step recorded under it reaches a recovered state.
-    again = rr.record(finding, by=owner, accept_until=_until())
-    assert _states(again) == [st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED]
-    assert again[-1].gaps == ["scope:unreadable"] and again[-1].release == st.AUDIT_INCOMPLETE
+    # And nothing a step can link answers it: no step is recorded, and none recovers.
+    before = _history(finding)
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, by=owner, accept_until=_until())
+    assert refused.value.code == "nothing_moved" and "scope:unreadable" in str(refused.value)
+    assert _history(finding) == before
+    # A step of an incident whose recovery is still open is held back by it all the same.
+    other = _incident("still-open")
+    declare_scope(other)
+    IncidentScopeRevision._base_manager.bulk_create(
+        [IncidentScopeRevision(finding=other, revision=2, supersedes=1, items=[{"kind": "asset"}], reason="x")]
+    )
+    _repaired_and_tested(other)
+    held = rr.record(other, by=other.deployment.owner, body={"coverage": COVERED}, accept_until=_until())[-1]
+    assert (held.state, held.gaps, held.release) == (st.REPAIR_TESTED, ["scope:unreadable"], st.AUDIT_INCOMPLETE)
 
 
 # ---------------------------------------------------------------------- the routes
@@ -748,8 +978,16 @@ def test_the_recovery_record_reads_carry_each_steps_scope_revision_and_the_curre
     (theirs,) = admin.get(f"/api/assurance/deployments/{world.b.uuid}/recovery-records/").json()["incidents"]
     assert theirs["scope_revision"] is None and theirs["steps"][0]["scope_gaps"] == [NOT_DECLARED]
 
-    # The next steps are recorded under the new revision, and answered as the read serves them.
-    again = owner.post(_step_url(world.incident), {"accept": _accept()}, format="json")
+    # An empty step, the owner's new acceptance with it, moves nothing: a 409 that names
+    # the item still open. With evidence that names the item the next steps are recorded
+    # under the new revision, and answered as the read serves them.
+    empty = owner.post(_step_url(world.incident), {"accept": _accept()}, format="json")
+    assert (empty.status_code, empty.json()["code"]) == (409, "nothing_moved"), empty.content
+    assert _added(2, world.backup) in empty.json()["detail"]
+    proof = scopes.evidence_naming(world.backup)
+    again = owner.post(
+        _step_url(world.incident), {"evidence": [str(proof.uuid)], "accept": _accept()}, format="json"
+    )
     assert again.status_code == 201, again.content
     assert [(s["state"], s["scope_revision"]) for s in again.json()["steps"]] == [
         (st.UNDER_INVESTIGATION, 2), (st.REPAIR_PROPOSED, 2), (st.REPAIR_TESTED, 2), (st.RECOVERY_ACCEPTED, 2),

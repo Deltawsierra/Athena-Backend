@@ -1000,10 +1000,22 @@ revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered
   the revision and each added item among the gaps
   (`scope:revision:<n>:added:<kind>:<ref>`) and reads `AUDIT_INCOMPLETE`, never `PASS`.
   What the row recorded is served beside it (`recorded`); the row is not rewritten.
-- **Until steps are recorded under the new revision.** The next step returns to
-  `under_investigation`. After `restored_with_restrictions` that is S1's reopen, and it
-  names the step it reopens. S1 lets nothing follow `recovery_accepted`, so after one the
-  step follows nothing, and S1's step check runs from it on.
+- **An added item stays an open gap until a step recorded under that revision links
+  evidence for it.** The evidence is `Evidence` of the finding's own deployment, linked as
+  every evidence link is. It names an item through the asset its finding is attached to
+  (`Finding.asset`); one item's evidence covers that item and no other. Until every added
+  item has such evidence, both recovered states are held back: the step names each
+  uncovered item among its gaps and reads `AUDIT_INCOMPLETE`. Evidence names no workflow,
+  so a workflow a revision adds stays open.
+- **An empty step moves nothing.** After a recovered step that no longer stands, a step is
+  recorded only when it answers something of what took the state away (a scope declared
+  where there was none, evidence for an added item) or a blocker stands. Any other is a
+  409 (`nothing_moved`) that names what is still open. The step that does move returns to
+  `under_investigation` under the current revision and names the step it sets aside
+  (`reopens`). After `restored_with_restrictions` that is S1's reopen. S1 lets nothing
+  follow `recovery_accepted`, not even a reopen: the rule "a scope revision reopens an
+  accepted recovery" belongs in `mythos_core.status` and is not there yet, so S1's step
+  check is not asked about the accepted step and runs from the new one on.
 - **A narrower scope.** A revision that only removes items holds nothing back and lifts
   nothing: it never advances a state by itself.
 - **Rows from before this change** name no revision and are not rewritten. They read

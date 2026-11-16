@@ -9,7 +9,8 @@ the coverage manifest and the rule that a declared gap holds a pass back are
 ``mythos_core.coverage``.
 
 **What a step rests on** (:func:`resolve`), each link resolved in the finding's own
-deployment and refused when it is another's or does not verify now:
+deployment and refused when it is another's or does not verify now (an evidence link also
+keeps the asset its finding is attached to, when that asset is the deployment's own):
 
 =====================  ===========================================  =====================
 Link                   Read from                                    Witness of
@@ -65,11 +66,24 @@ holds only for that revision:
   (``scope:revision:<n>:added:<kind>:<ref>``) and release ``AUDIT_INCOMPLETE``, and keeps
   what the row recorded beside it. A row from before SP-3 names no revision and reads the
   same way, as ``scope:not_declared``.
-- *Until steps are recorded under the new revision.* The next step after a recovered one
-  that no longer stands returns to ``under_investigation`` under the current revision.
-  After ``restored_with_restrictions`` that is S1's reopen and names the step. S1 lets
-  nothing follow ``recovery_accepted``, not even a reopen, so after one the step follows
-  nothing: it is derived as a recovery's first step is, and S1's step check runs from it.
+- *An added item stays an open gap until a step recorded under that revision links
+  evidence for it.* The evidence is ``Evidence`` of the finding's own deployment, linked
+  as every evidence link is, and it names an item through the asset its finding is
+  attached to (``Finding.asset``, kept on the link by :func:`resolve`). One item's
+  evidence covers that item and no other. Until every added item has such evidence, both
+  recovered states are held back: the step names each uncovered item among its gaps and
+  reads ``AUDIT_INCOMPLETE``. Evidence names no workflow (a finding is attached to an
+  asset, never to a workflow), so a workflow a revision adds stays open.
+- *After a recovered step that no longer stands*, a step is recorded only when it answers
+  something of what took the state away (a scope declared where there was none; evidence
+  for an added item) or a blocker stands. An empty step, or one whose evidence names none
+  of the added items, moves nothing (``nothing_moved``). The step that does move returns
+  to ``under_investigation`` under the current revision and names the step it sets aside
+  (``reopens``). After ``restored_with_restrictions`` that is S1's reopen, checked by
+  S1. S1 lets nothing follow ``recovery_accepted``, not even a reopen: the rule "a scope
+  revision reopens an accepted recovery" belongs in ``mythos_core.status`` and is not
+  there yet, so after an accepted step S1's step check is not asked about that step,
+  and runs from the new one on.
 - *A narrower scope.* A revision that only removes items holds nothing back and lifts
   nothing: it never advances a state by itself.
 
@@ -239,16 +253,21 @@ def resolve(finding, body=None, previous=None) -> tuple[dict, dict]:
 
     evidence_ids = [str(uuid.UUID(i)) for i in _list(given["evidence"], "evidence", _UUID)]
     found = {
-        str(e.uuid): e
-        for e in Evidence.objects.filter(uuid__in=evidence_ids, finding__deployment_id=deployment.pk).only(
-            "uuid", "classification"
+        str(e["uuid"]): e
+        for e in Evidence.objects.filter(uuid__in=evidence_ids, finding__deployment_id=deployment.pk).values(
+            "uuid", "classification", "finding__asset__uuid", "finding__asset__deployment_id"
         )
     }
     evidence = []
     for one in evidence_ids:
         if one not in found:
             raise RecoveryRefused("unknown_link", f"evidence {one} is not evidence of this deployment")
-        evidence.append({"uuid": one, "classification": found[one].classification})
+        # What the evidence names: the asset its finding is attached to, when that asset
+        # is this deployment's own. None when the finding is attached to none.
+        names = found[one]["finding__asset__uuid"] if found[one]["finding__asset__deployment_id"] == deployment.pk else None
+        evidence.append(
+            {"uuid": one, "classification": found[one]["classification"], "asset": None if names is None else str(names)}
+        )
 
     permit_ids = _list(given["permits"], "permits", _ID)
     outcomes = {
@@ -396,11 +415,29 @@ def _condition_texts(conditions: list[dict]) -> list[str]:
     return [f"{c['condition']}:{c['witness']['kind']}:{c['witness']['ref']}" for c in conditions]
 
 
+def named(links: dict) -> set[tuple[str, str]]:
+    """The scope items the evidence a step links names: the asset each piece of evidence's
+    finding is attached to (:func:`resolve`). Evidence names no workflow: a finding is
+    attached to an asset, never to a workflow. Pure."""
+    return {(incident_scope.ASSET, one["asset"]) for one in links.get("evidence", []) if one.get("asset")}
+
+
+def scope_holds_of(scope_revision, revisions, links: dict) -> list[str]:
+    """Each thing about the incident's scope that holds a recovered state back for a step
+    derived under ``scope_revision`` and resting on ``links``, named: no declared scope,
+    an unreadable one, each item a later revision added, and each item a revision up to
+    its own added that the step links no evidence for. Pure."""
+    return [
+        *incident_scope.holds(scope_revision, revisions),
+        *incident_scope.uncovered(scope_revision, revisions, named(links)),
+    ]
+
+
 def lapsed(row, revisions) -> list[str]:
     """Each thing about the incident's scope that takes ``row``'s recovered state away,
-    named (:func:`assurance.incident_scope.holds`): empty when ``row`` is not a recovered
-    state, or the scope revision it was derived under still stands. Pure."""
-    return incident_scope.holds(row.scope_revision, revisions) if row.state in RECOVERED else []
+    named (:func:`scope_holds_of`): empty when ``row`` is not a recovered state, or the
+    scope revision it was derived under still stands. Pure."""
+    return scope_holds_of(row.scope_revision, revisions, row.links) if row.state in RECOVERED else []
 
 
 def derive(
@@ -414,7 +451,7 @@ def derive(
     ``previous`` that the witnesses support. Pure."""
     facts = _facts(links, accepted)
     holds, complete = _coverage_holds(manifest)
-    scope_holds = incident_scope.holds(scope_revision, revisions)
+    scope_holds = scope_holds_of(scope_revision, revisions, links)
     blocked = bool(facts[EFFECT_NOT_APPLIED])
 
     def supported(state, *, holds_count=True):
@@ -431,11 +468,17 @@ def derive(
         return (complete and not scope_holds) or state not in RECOVERED or not holds_count
 
     # A recovered step whose scope no longer stands is followed by a return to the
-    # investigation. S1 lets nothing follow an accepted recovery, so after one the step
-    # follows nothing: it is the first of the recovery under the current revision.
-    rescoped = previous is not None and bool(lapsed(previous, revisions))
-    follows = None if rescoped and previous.state in st.RECOVERY_TERMINAL else previous
-    state = st.UNDER_INVESTIGATION if rescoped else _step(None if previous is None else previous.state, supported)
+    # investigation, and only by a step that answers something of what took it away: a
+    # scope declared where there was none, evidence for an item a revision added. An
+    # empty step answers nothing and moves nothing. A failed read-back is a blocker
+    # whatever the scope, and is always recorded.
+    lapse = [] if previous is None else lapsed(previous, revisions)
+    if lapse and not blocked and all(hold in scope_holds for hold in lapse):
+        return None
+    # S1 lets nothing follow an accepted recovery, not even a reopen: after one, S1's
+    # step check is not asked about the accepted step. The new step still names it.
+    follows = None if lapse and previous.state in st.RECOVERY_TERMINAL else previous
+    state = st.UNDER_INVESTIGATION if lapse else _step(None if previous is None else previous.state, supported)
     if state is None:
         return None
     held = (not complete or bool(scope_holds)) and any(supported(one, holds_count=False) for one in RECOVERED)
@@ -446,7 +489,7 @@ def derive(
     ]
     gaps = [*links["gaps"], *(f"{EFFECT_NOT_APPLIED}:receipt:{r}" for _, r in facts[EFFECT_NOT_APPLIED])]
     gaps += [*holds, *scope_holds] if held else []
-    reopens = str(follows.uuid) if follows is not None and state == st.UNDER_INVESTIGATION else ""
+    reopens = str(previous.uuid) if previous is not None and state == st.UNDER_INVESTIGATION else ""
     try:
         recovery = st.Recovery(
             ref=ref, state=state, conditions=tuple(_condition_texts(conditions)), gaps=tuple(gaps),
@@ -580,6 +623,14 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
     except IntegrityError:
         raise RecoveryRefused("raced", "another step of this recovery was recorded at the same time") from None
     if not steps:
+        lapse = lapsed(previous, revisions)
+        if lapse:
+            raise RecoveryRefused(
+                "nothing_moved",
+                f"nothing moved: step {previous.version} ({previous.state}) no longer stands under the incident's "
+                f"scope, and this step answers none of what took it away: {lapse}. An item a revision added stays "
+                "open until a step links evidence that names it",
+            )
         raise RecoveryRefused(
             "nothing_moved",
             f"nothing moved: what this step rests on supports no state that may follow {previous.state!r}",
@@ -597,7 +648,7 @@ def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION) -> dict:
     state is one of S1's words, beside its conditions and gaps.
 
     ``scope_gaps`` is what about the incident's scope holds a recovered state back for
-    this step now (:func:`assurance.incident_scope.holds`), and it is served with the
+    this step now (:func:`scope_holds_of`), and it is served with the
     step's ``scope_revision`` whatever the step's state. Where the step is a recovered
     state and any stands, the step is not served as recovered: its ``state`` is
     ``held_at`` (the last state before it that was not a recovered one), its ``gaps``
@@ -657,7 +708,7 @@ def served_steps(steps: list, revisions: list) -> list[dict]:
     derived under and what holds it back now (:func:`served`)."""
     held_at, out = st.UNDER_INVESTIGATION, []
     for step in steps:
-        out.append(served(step, incident_scope.holds(step.scope_revision, revisions), held_at))
+        out.append(served(step, scope_holds_of(step.scope_revision, revisions, step.links), held_at))
         if step.state not in RECOVERED:
             held_at = step.state
     return out

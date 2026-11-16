@@ -33,6 +33,18 @@ def evidence_of(finding):
     return Evidence.objects.create(finding=finding, classification="technically_verified")
 
 
+def evidence_naming(record):
+    """A piece of evidence that names the asset ``record``: evidence of a finding of the
+    asset's own deployment that is attached to it (``Finding.asset``), made here."""
+    from assurance.models import Evidence, Finding
+
+    found = Finding.objects.create(
+        deployment=record.deployment, asset=record, finding_type="exposed_route", title=f"reachable: {record.name}",
+        fingerprint=f"fp-on-{record.identifier}-{Finding.objects.count()}", severity="high",
+    )
+    return Evidence.objects.create(finding=found, classification="technically_verified")
+
+
 def body(finding, *records, reason="what the incident is known to have reached", evidence=None) -> dict:
     """What a revision holding ``records`` posts, resting on one piece of the finding's
     evidence (made here unless given)."""
