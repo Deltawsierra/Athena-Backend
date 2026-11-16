@@ -190,6 +190,22 @@ def _write(directory: str, report_id: str, data: bytes) -> None:
             os.remove(temporary)
 
 
+def _clock() -> tuple[float, datetime.datetime]:
+    """The clock, read ONCE: the seconds a report's age is reckoned from, and the instant
+    the report is stamped with.
+
+    The instant is the reading cut down to the microsecond, as ``datetime.now`` cuts it,
+    never rounded. ``datetime.fromtimestamp(time.time())`` rounds a float of seconds to
+    the NEAREST microsecond, which for half of all readings is one the clock has not
+    reached yet: a report stamped later than the next reading of a clock that stood
+    still (Windows' stands for up to 15.6 ms). A record never says a time ahead of the
+    clock it was read from."""
+    reading = time.time_ns()
+    whole, rest = divmod(reading, 1_000_000_000)
+    instant = datetime.datetime.fromtimestamp(whole, datetime.UTC).replace(microsecond=rest // 1000)
+    return reading / 1e9, instant
+
+
 def publish(counts, *, exited: bool = False, directory: str | None = None) -> bool:
     """Write this worker's report: ``counts`` (``None`` when they could not be read,
     which every reader takes as unknown). Never raises; a failure is counted in
@@ -197,14 +213,14 @@ def publish(counts, *, exited: bool = False, directory: str | None = None) -> bo
     exit -- never by a request."""
     directory = directory or report_directory()
     try:
-        now = time.time()
+        now, instant = _clock()
         data = json.dumps(
             {
                 "id": worker_id(),
                 "host": socket.gethostname(),
                 "pid": os.getpid(),
                 "published": now,
-                "published_at": datetime.datetime.fromtimestamp(now, datetime.UTC).isoformat(),
+                "published_at": instant.isoformat(),
                 "exited": bool(exited),
                 "counts": counts,
             },
@@ -455,7 +471,11 @@ def acknowledge(report_id: str, *, by: str, directory: str | None = None, now: f
     if not report_id or os.path.basename(report_id) != report_id or report_id.startswith("."):
         raise NotAcknowledged(f"{report_id!r} is not a report id")
     path = os.path.join(directory, report_id + SUFFIX)
-    now = time.time() if now is None else now
+    if now is None:
+        now, instant = _clock()
+    else:
+        # A time the caller gives is the caller's: it is recorded as given.
+        instant = datetime.datetime.fromtimestamp(now, datetime.UTC)
     try:
         data = _read(path)
     except FileNotFoundError:
@@ -483,11 +503,11 @@ def acknowledge(report_id: str, *, by: str, directory: str | None = None, now: f
         "acknowledged_by": by,
         "acknowledged_by_account": user,
         "acknowledged": now,
-        "acknowledged_at": datetime.datetime.fromtimestamp(now, datetime.UTC).isoformat(),
+        "acknowledged_at": instant.isoformat(),
     }
     kept = os.path.join(directory, ACKNOWLEDGED)
     os.makedirs(kept, exist_ok=True)
-    stamp = datetime.datetime.fromtimestamp(now, datetime.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = instant.strftime("%Y%m%dT%H%M%S%fZ")
     kept = os.path.join(kept, f"{report_id}-{stamp}{SUFFIX}")
     with open(kept, "x", encoding="utf-8") as handle:
         json.dump(record, handle, sort_keys=True, indent=2)

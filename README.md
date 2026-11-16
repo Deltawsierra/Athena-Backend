@@ -172,6 +172,11 @@ is judged a stop until its response is closed (or, never closed, dropped); the
 last stop to let go collects the young generations, and the collector runs
 again. A hold lasts at most `safety.collection.HOLD_LIMIT` (5 s) without a break,
 so overlapping stops or a response nobody closes cannot switch it off for good.
+The hold never waits, either: under Python 3.12 a collection can run inside the
+hold's own bookkeeping and let an earlier stop's hold go there, so its lock is only
+ever taken if it is free. A stop that finds it busy is served without a hold, and a
+hold let go while it is busy is counted by the next caller
+(`tests/test_no_stop_waits_on_its_own_collector_hold.py`).
 
 ### The failsafe service token
 
