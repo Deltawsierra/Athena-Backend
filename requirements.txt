@@ -386,4 +386,23 @@ zopfli==0.2.3.post1
 # action_assurance/record.py), and so are pinguard.py and templates/pin_bootstrap.py, so
 # tests/pin_bootstrap.py is unchanged. The pin guard stays ON (DEPENDENCY_PIN_GUARD is
 # set nowhere).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@320d68559b752e8365616d9f12585d2b46c814bc
+#
+# What the pin since 320d685 (Mythos-Core#83) adds:
+#
+# Mythos-Core#82 -- the 12c6433 pin, the core's main: the merge of #82, which carries #83
+# (320d685, the observed-effect record, above) unchanged. mythos_core.recovery_receipt
+# defines the recovery receipt, mythos.recovery-receipt/v1 (SPINE SP-4, part 1): one
+# signed statement of what an incident's recovery record said at one instant. This
+# service issues none yet (SP-4 part 2b). It reads three things of it now
+# (assurance/recovery_record.py, at first use and never with the URL conf): the release
+# rule, release_status, which replaces this service's own arithmetic so the record and a
+# receipt of it are computed by the same code; the standings and the reader's words
+# (voucher_words, support_sentence); and the refusal codes it shares (not_a_name,
+# acceptance_ended). tests/test_the_recovery_record_says_what_a_receipt_could.py holds the
+# record to it, with the core's vector file (tests/vectors/recovery-receipt-v1.json, byte
+# for byte the core's). The module is data and pure functions: no clock, file,
+# environment or key. Nothing else of the core changes: the diff of src/ between the two
+# pins is that one new file, and pinguard.py and templates/pin_bootstrap.py are byte for
+# byte what they were, so tests/pin_bootstrap.py is unchanged. On no stop path. The pin
+# guard stays ON (DEPENDENCY_PIN_GUARD is set nowhere).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@12c64334810f0101cb15c526b2af0c7bb6483ab0
