@@ -394,7 +394,10 @@ RECORDS = {
     AchillesScanResult: (_scan_result, "scan_status", "aborted"),
     AchillesScanRefusal: (_scan_refusal, "reason", "nothing was refused"),
     # Not `state`: every derived field is refused at save unless derived, before the key is.
-    RecoveryRecord: (_recovery_record, "recorded_at", NOW - timedelta(days=1)),
+    # Nor `recorded_at` (SPINE SP-4): it is the time a step's recorder vouches for what the
+    # step links at, which the derivation reads. The derivation reads no acceptance end
+    # without an acceptance.
+    RecoveryRecord: (_recovery_record, "accepted_until", NOW + timedelta(days=1)),
     IncidentScopeRevision: (_scope_revision, "reason", "nothing else was in scope"),
 }
 

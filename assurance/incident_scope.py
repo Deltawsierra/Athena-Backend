@@ -24,7 +24,9 @@ stays readable.
                that is refused is ``malformed`` (the core's codes).
 ``evidence``   the ``Evidence`` of the deployment's findings it rests on. At least
                one (``evidence_record``'s ``evidence_required``).
-``declared_by``  the signed-in person who declared it, never a posted field.
+``declared_by``  the signed-in person who declared it, never a posted field, with
+               the reference it is named by (``declared_by_ref``, ``user:<id>``),
+               which outlives the account (:func:`person_ref`).
 =============  ==================================================================
 
 **The words are Mythos-Core's** (``mythos_core.scope``, Mythos-Core#80), read from the core
@@ -109,6 +111,14 @@ class ScopeRefused(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def person_ref(user_id) -> str:
+    """The reference a person is named by on an incident's records, ``user:<id>`` (the
+    spelling a recovery receipt takes, and the one ``derive`` has always given the owner's
+    acceptance); ``""`` for nobody. A reference, not the account: it is kept beside the
+    account's key, and removing the account nulls the key and leaves the reference."""
+    return "" if user_id is None else f"user:{user_id}"
 
 
 # ------------------------------------------------------------- what a revision holds
@@ -250,6 +260,8 @@ def check(row) -> None:
         rests_on = None
     if rests_on is None or row.evidence != resolve_evidence(row.finding, rests_on):
         raise ScopeRefused("malformed", "a scope revision's evidence is the deployment's own")
+    if row.declared_by_ref != person_ref(row.declared_by_id):
+        raise ScopeRefused("malformed", "a scope revision names who declared it by the account its key names")
     if latest is not None and row.declared_by_id is None and set(_keys(latest.items) or ()) - set(keys):
         raise ScopeRefused("declared_by_required", "a revision that removes an item names who declared it")
     if latest is not None and set(_keys(latest.items) or ()) == set(keys):
@@ -415,6 +427,10 @@ def served(row, before=None, *, current) -> dict:
         "reason": row.reason,
         "evidence": row.evidence,
         "declared_by": row.declared_by.username if row.declared_by_id else None,
+        # As a reference: the one the revision keeps (from migration 0088 on), else the
+        # account's key while the account exists; None for nobody.
+        "declared_by_ref": (row.declared_by_ref or None) if row.declared_by_ref is not None
+        else (person_ref(row.declared_by_id) or None),
         "declared_at": row.declared_at.isoformat(),
     }
 

@@ -61,6 +61,12 @@ def _until():
     return timezone.now() + timedelta(days=30)
 
 
+def _recorder():
+    """The signed-in person a step is recorded by: every step names who recorded it (SPINE
+    SP-4), as the route always does."""
+    return User.objects.get_or_create(username="recorder", defaults={"role": User.Roles.ADMIN})[0]
+
+
 def _incident(name="d", *, owner=True):
     person = User.objects.create_user(username=f"owner-{name}", password="x", role=User.Roles.ADMIN) if owner else None
     dep = Deployment.objects.create(name=name, owner=person)
@@ -100,7 +106,7 @@ def _history(finding):
 
 def test_a_recovery_starts_under_investigation_on_the_incident_alone():
     finding = _incident()
-    (step,) = rr.record(finding)
+    (step,) = rr.record(finding, by=_recorder())
     assert (step.version, step.state, step.reopens, step.release) == (1, st.UNDER_INVESTIGATION, "", st.FAIL)
     assert step.conditions == [{"condition": "incident_recorded", "witness": {"kind": "finding", "ref": str(finding.uuid)}}]
     # Coverage of nothing is not full coverage, and the record says so with its source.
@@ -161,11 +167,11 @@ def test_a_gap_also_holds_back_restored_with_restrictions():
     receipt = record_reconciliation(dep, WF, permit, "applied").receipt_id
     body = {"permits": [permit], "receipts": [receipt], "restrictions": ["refunds-manual-only"]}
 
-    held = rr.record(finding, body={**body, "coverage": GAP})[-1]
+    held = rr.record(finding, by=_recorder(), body={**body, "coverage": GAP})[-1]
     assert (held.state, held.release) == (st.REPAIR_TESTED, st.AUDIT_INCOMPLETE)
     assert "coverage:failed_collector:edr-west" in held.gaps
 
-    (restored,) = rr.record(finding, body={"coverage": COVERED})
+    (restored,) = rr.record(finding, by=_recorder(), body={"coverage": COVERED})
     assert restored.state == st.RESTORED_WITH_RESTRICTIONS and restored.restrictions == ["refunds-manual-only"]
     assert _witnesses(restored, "effect_read_back") == [{"kind": "receipt", "ref": receipt}]
     assert _witnesses(restored, "effect_permitted") == [{"kind": "permit", "ref": permit}]
@@ -179,12 +185,12 @@ def test_a_failed_readback_is_a_blocker_and_a_reopen_names_what_it_reopens():
     failed = record_reconciliation(dep, WF, permit, "not_applied").receipt_id
     agree(finding)
 
-    blocked = rr.record(finding, body={"permits": [permit], "receipts": [failed]})[-1]
+    blocked = rr.record(finding, by=_recorder(), body={"permits": [permit], "receipts": [failed]})[-1]
     assert blocked.state == st.RECOVERY_INCOMPLETE
     assert blocked.gaps == [f"effect_not_applied:receipt:{failed}"]
 
     applied = record_reconciliation(dep, WF, permit, "applied").receipt_id
-    proposed = rr.record(finding, body={"receipts": [applied]})
+    proposed = rr.record(finding, by=_recorder(), body={"receipts": [applied]})
     # After a blocker, S1 lets only a repair proposed (or a reopen) follow, never acceptance.
     assert _states(proposed) == [st.REPAIR_PROPOSED]
     # A containment whose receipt and gaps are no longer linked has lost its support:
@@ -192,19 +198,19 @@ def test_a_failed_readback_is_a_blocker_and_a_reopen_names_what_it_reopens():
     second = _incident("second")
     gate = _permit(second.deployment)
     readback = record_reconciliation(second.deployment, WF, gate, "applied").receipt_id
-    first = rr.record(second, body={"permits": [gate], "receipts": [readback], "gaps": ["edr-west-offline"]})
+    first = rr.record(second, by=_recorder(), body={"permits": [gate], "receipts": [readback], "gaps": ["edr-west-offline"]})
     assert _states(first) == [st.UNDER_INVESTIGATION, st.CONTAINED_WITH_GAPS]
-    (reopened,) = rr.record(second, body={"receipts": [], "gaps": []})
+    (reopened,) = rr.record(second, by=_recorder(), body={"receipts": [], "gaps": []})
     assert (reopened.state, reopened.reopens) == (st.UNDER_INVESTIGATION, str(first[-1].uuid))
 
 
 def test_a_step_that_moves_nothing_is_refused_with_its_reason():
     finding = _incident()
-    rr.record(finding)
+    rr.record(finding, by=_recorder())
     evidence = Evidence.objects.create(finding=finding, classification="technically_verified")
     for body in ({}, {"evidence": [str(evidence.uuid)]}):
         with pytest.raises(rr.RecoveryRefused) as refused:
-            rr.record(finding, body=body)
+            rr.record(finding, by=_recorder(), body=body)
         assert refused.value.code == "nothing_moved"
         assert "under_investigation" in str(refused.value)
     assert RecoveryRecord.objects.filter(finding=finding).count() == 1
@@ -217,7 +223,7 @@ def test_a_step_that_moves_nothing_is_refused_with_its_reason():
 def test_a_derived_field_posted_is_refused_and_records_nothing(field):
     finding = _incident()
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, body={field: st.RECOVERY_ACCEPTED})
+        rr.record(finding, by=_recorder(), body={field: st.RECOVERY_ACCEPTED})
     assert refused.value.code == "not_posted" and "derived" in str(refused.value)
     assert _history(finding) == []
 
@@ -253,7 +259,7 @@ def test_a_state_set_by_hand_is_refused_at_save():
 
 def test_a_recorded_step_is_never_rewritten_or_deleted():
     finding = _incident()
-    (step,) = rr.record(finding)
+    (step,) = rr.record(finding, by=_recorder())
     before = _history(finding)
     with pytest.raises(RecoveryRecordRewriteRefused):
         step.save()
@@ -289,7 +295,7 @@ def test_a_link_to_another_deployments_record_is_refused(kind):
         # Its permit is linked too, so the receipt is refused for whose it is, not for that.
         body["permits"] = [_permit(finding.deployment)]
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, body=body)
+        rr.record(finding, by=_recorder(), body=body)
     assert refused.value.code == "unknown_link", refused.value
     assert "this deployment" in str(refused.value)
     assert _history(finding) == []
@@ -300,12 +306,12 @@ def test_the_deployments_own_links_are_taken_and_a_permit_must_be_a_signed_gate_
     dep = finding.deployment
     evidence = Evidence.objects.create(finding=finding, classification="technically_verified")
     permit = _permit(dep)
-    (step,) = rr.record(finding, body={"evidence": [str(evidence.uuid)], "permits": [permit]})
+    (step,) = rr.record(finding, by=_recorder(), body={"evidence": [str(evidence.uuid)], "permits": [permit]})
     assert _witnesses(step, "evidence_linked") == [{"kind": "evidence", "ref": str(evidence.uuid)}]
     assert _witnesses(step, "effect_permitted") == [{"kind": "permit", "ref": permit}]
     athena = record_signed(dep, WF, oc.HELD, datetime.now(UTC) - timedelta(minutes=2), engine="athena").outcome_id
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, body={"permits": [athena]})
+        rr.record(finding, by=_recorder(), body={"permits": [athena]})
     assert refused.value.code == "not_a_permit"
 
 
@@ -320,7 +326,7 @@ def test_residual_uncertainty_carries_every_item_with_its_sources():
     )
     said = {"statement": "the vendor's log covers only one region", "sources": [{"kind": "evidence", "ref": str(evidence.uuid)}]}
 
-    (step,) = rr.record(finding, body={"evidence": [str(evidence.uuid)], "residual_uncertainty": [said], "coverage": GAP})
+    (step,) = rr.record(finding, by=_recorder(), body={"evidence": [str(evidence.uuid)], "residual_uncertainty": [said], "coverage": GAP})
 
     residual = step.residual_uncertainty
     assert {"statement": gap.question, "sources": [{"kind": "unknown", "ref": str(gap.uuid)}]} in residual
@@ -334,7 +340,7 @@ def test_residual_uncertainty_carries_every_item_with_its_sources():
         ({"statement": "x", "sources": [{"kind": "evidence", "ref": "not-linked"}]}, "unknown_source"),
     ):
         with pytest.raises(rr.RecoveryRefused) as refused:
-            rr.record(finding, body={"residual_uncertainty": [bad]})
+            rr.record(finding, by=_recorder(), body={"residual_uncertainty": [bad]})
         assert refused.value.code == code
 
 

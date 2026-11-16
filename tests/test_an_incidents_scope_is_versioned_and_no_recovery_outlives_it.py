@@ -73,6 +73,7 @@ from tests.test_a_recovery_record_is_derived_from_its_witnesses import (
     _history,
     _incident,
     _permit,
+    _recorder,
     _repaired_and_tested,
     _states,
     _until,
@@ -122,7 +123,7 @@ def _restored(finding, *records):
     permit = _permit(dep)
     receipt = record_reconciliation(dep, WF, permit, "applied").receipt_id
     body = {"permits": [permit], "receipts": [receipt], "restrictions": ["refunds-manual-only"], "coverage": COVERED}
-    steps = rr.record(finding, body=body)
+    steps = rr.record(finding, by=_recorder(), body=body)
     assert (steps[-1].state, steps[-1].scope_revision) == (st.RESTORED_WITH_RESTRICTIONS, 1)
     return steps
 
@@ -520,7 +521,10 @@ def test_with_no_declared_scope_no_step_reaches_a_recovered_state_and_it_says_so
     else:
         permit = _permit(dep)
         receipt = record_reconciliation(dep, WF, permit, "applied").receipt_id
-        asked = {"body": {"permits": [permit], "receipts": [receipt], "restrictions": ["manual-only"], "coverage": COVERED}}
+        asked = {
+            "by": _recorder(),
+            "body": {"permits": [permit], "receipts": [receipt], "restrictions": ["manual-only"], "coverage": COVERED},
+        }
 
     steps = rr.record(finding, **asked)
 
@@ -550,7 +554,7 @@ def test_with_no_declared_scope_no_step_reaches_a_recovered_state_and_it_says_so
 def test_a_step_names_the_current_scope_revision_and_any_other_is_refused_at_save():
     finding = _incident()
     primary, backup = scopes.asset(finding.deployment), scopes.asset(finding.deployment, "backup-route")
-    (first,) = rr.record(finding)
+    (first,) = rr.record(finding, by=_recorder())
     assert first.scope_revision is None
     declare_scope(finding, primary)
     declare_scope(finding, primary, backup)
@@ -665,7 +669,7 @@ def test_an_empty_step_never_re_derives_a_recovered_state_under_a_wider_scope():
     assert read["steps"][-1]["recorded"]["state"] == st.RESTORED_WITH_RESTRICTIONS
 
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding)
+        rr.record(finding, by=_recorder())
     assert refused.value.code == "nothing_moved" and _added(2, backup) in str(refused.value)
     assert _history(finding) == before
     assert _read(finding)["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
@@ -673,7 +677,7 @@ def test_an_empty_step_never_re_derives_a_recovered_state_under_a_wider_scope():
     # Evidence that names the added item. S1's reopen: new evidence reopened the scope,
     # and the new record names the one it reopens.
     proof = scopes.evidence_naming(backup)
-    again = rr.record(finding, body={"evidence": [str(proof.uuid)]})
+    again = rr.record(finding, by=_recorder(), body={"evidence": [str(proof.uuid)]})
     assert _states(again) == [
         st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED, st.RESTORED_WITH_RESTRICTIONS,
     ]
@@ -686,7 +690,7 @@ def test_an_empty_step_never_re_derives_a_recovered_state_under_a_wider_scope():
 
     # The evidence taken away again, the restore loses its support: the next steps name
     # the item among their gaps, and none is a recovered state.
-    without = rr.record(finding, body={"evidence": []})
+    without = rr.record(finding, by=_recorder(), body={"evidence": []})
     assert _states(without) == [st.REPAIR_PROPOSED, st.REPAIR_TESTED]
     assert without[-1].gaps == [_added(2, backup)] and without[-1].release == st.AUDIT_INCOMPLETE
 
@@ -700,7 +704,7 @@ def test_evidence_for_one_added_item_covers_that_item_and_no_other():
     declare_scope(finding, primary, backup, modem)
 
     one = scopes.evidence_naming(backup)
-    again = rr.record(finding, body={"evidence": [str(one.uuid)]})
+    again = rr.record(finding, by=_recorder(), body={"evidence": [str(one.uuid)]})
 
     # It answered for one item, so the steps are recorded; the other holds the restore back.
     assert _states(again) == [st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED]
@@ -713,11 +717,11 @@ def test_evidence_for_one_added_item_covers_that_item_and_no_other():
     # More evidence for the same item is not evidence for the other.
     more = scopes.evidence_naming(backup)
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, body={"evidence": [str(one.uuid), str(more.uuid)]})
+        rr.record(finding, by=_recorder(), body={"evidence": [str(one.uuid), str(more.uuid)]})
     assert refused.value.code == "nothing_moved"
 
     other = scopes.evidence_naming(modem)
-    (restored,) = rr.record(finding, body={"evidence": [str(one.uuid), str(other.uuid)]})
+    (restored,) = rr.record(finding, by=_recorder(), body={"evidence": [str(one.uuid), str(other.uuid)]})
     assert (restored.state, restored.scope_revision, restored.gaps) == (st.RESTORED_WITH_RESTRICTIONS, 2, [])
 
 
@@ -726,7 +730,7 @@ def test_an_item_added_before_any_recovery_is_an_open_gap_until_evidence_names_i
     dep, owner = finding.deployment, finding.deployment.owner
     primary = scopes.asset(dep, "primary-route")
     declare_scope(finding, primary)
-    rr.record(finding)
+    rr.record(finding, by=_recorder())
     backup = scopes.asset(dep, "backup-route")
     declare_scope(finding, primary, backup)
     _repaired_and_tested(finding)
@@ -766,7 +770,7 @@ def test_another_deployments_evidence_never_covers_an_added_item():
     )
     foreign = Evidence.objects.create(finding=theirs, classification="technically_verified")
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, body={"evidence": [str(foreign.uuid)]})
+        rr.record(finding, by=_recorder(), body={"evidence": [str(foreign.uuid)]})
     assert refused.value.code == "unknown_link" and "this deployment" in str(refused.value)
 
     # Evidence of this deployment's finding attached to another deployment's asset of
@@ -780,7 +784,7 @@ def test_another_deployments_evidence_never_covers_an_added_item():
     links, _coverage = rr.resolve(finding, {"evidence": [str(stray.uuid)]}, restored)
     assert links["evidence"] == [{"uuid": str(stray.uuid), "classification": "technically_verified", "asset": None}]
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, body={"evidence": [str(stray.uuid)]})
+        rr.record(finding, by=_recorder(), body={"evidence": [str(stray.uuid)]})
     assert refused.value.code == "nothing_moved"
     assert _history(finding) == before
 
@@ -802,7 +806,7 @@ def test_a_permit_of_that_workflow_names_it():
 
     # The step links a signed gate decision of that workflow, resolved now as every
     # permit is: it names the workflow, and the step under the new revision says so.
-    again = rr.record(finding)
+    again = rr.record(finding, by=_recorder())
     assert _states(again)[-1] == st.RESTORED_WITH_RESTRICTIONS and again[-1].scope_revision == 2
     assert again[-1].scope_items == {
         "added": [{"revision": 2, "kind": "workflow", "ref": WF, "covered_by": [{"kind": "permit", "ref": permit}]}],
@@ -829,18 +833,18 @@ def test_no_other_permit_names_a_workflow_a_revision_adds():
     }
     for body in ({}, {"evidence": [str(scopes.evidence_naming(primary).uuid)]}, {"coverage": looked}):
         with pytest.raises(rr.RecoveryRefused) as refused:
-            rr.record(finding, body=body)
+            rr.record(finding, by=_recorder(), body=body)
         assert refused.value.code == "nothing_moved" and open_gap in str(refused.value), body
     # Another deployment's permit of a workflow of that very name is not a link of this one.
     other = _incident("elsewhere")
     theirs = _gate(other.deployment, "payout")
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, body={"permits": [refund_permit, theirs]})
+        rr.record(finding, by=_recorder(), body={"permits": [refund_permit, theirs]})
     assert refused.value.code == "unknown_link" and "this deployment" in str(refused.value)
     assert _history(finding) == before
 
     own = _gate(dep, "payout")
-    again = rr.record(finding, body={"permits": [refund_permit, own]})
+    again = rr.record(finding, by=_recorder(), body={"permits": [refund_permit, own]})
     assert _states(again)[-1] == st.RESTORED_WITH_RESTRICTIONS
     assert again[-1].scope_items["added"] == [
         {"revision": 2, "kind": "workflow", "ref": "payout", "covered_by": [{"kind": "permit", "ref": own}]}
@@ -870,7 +874,7 @@ def test_an_added_asset_on_which_nothing_was_found_is_named_by_a_look_recorded_a
     permit = _gate(dep)
     receipt = record_reconciliation(dep, WF, permit, "applied").receipt_id
     body = {"permits": [permit], "receipts": [receipt], "restrictions": ["refunds-manual-only"]}
-    restored = rr.record(finding, body={**body, "coverage": _looked_at(backup)})[-1]
+    restored = rr.record(finding, by=_recorder(), body={**body, "coverage": _looked_at(backup)})[-1]
     assert (restored.state, restored.scope_revision, restored.scope_items) == (
         st.RESTORED_WITH_RESTRICTIONS, 1, {"added": [], "removed": []},
     )
@@ -882,12 +886,12 @@ def test_an_added_asset_on_which_nothing_was_found_is_named_by_a_look_recorded_a
     # it and does not observe it.
     for asked in ({}, {"coverage": _looked_at(backup, observed=False)}):
         with pytest.raises(rr.RecoveryRefused) as refused:
-            rr.record(finding, body=asked)
+            rr.record(finding, by=_recorder(), body=asked)
         assert refused.value.code == "nothing_moved" and open_gap in str(refused.value), asked
     assert _history(finding) == before
 
     # Looked at again, after it was added: named, as a look that found nothing.
-    again = rr.record(finding, body={"coverage": _looked_at(backup)})
+    again = rr.record(finding, by=_recorder(), body={"coverage": _looked_at(backup)})
     assert _states(again)[-1] == st.RESTORED_WITH_RESTRICTIONS and again[-1].gaps == []
     look = {"kind": "coverage", "ref": f"asset:{backup.uuid}"}
     assert again[-1].scope_items == {
@@ -909,7 +913,7 @@ def test_an_added_asset_on_which_nothing_was_found_is_named_by_a_look_recorded_a
     assert read["current"]["state"] == st.RESTORED_WITH_RESTRICTIONS and read["steps"][-1]["scope_gaps"] == []
     assert read["scope_removed"] == [gone]
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding)
+        rr.record(finding, by=_recorder())
     assert refused.value.code == "nothing_moved"
 
     # Added again, it counts from when it was added again: the look from revision 2 is
@@ -917,9 +921,9 @@ def test_an_added_asset_on_which_nothing_was_found_is_named_by_a_look_recorded_a
     declare_scope(finding, primary, backup, by=owner, reason="the route is back in service")
     again_open = _added(4, backup)
     with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding)
+        rr.record(finding, by=_recorder())
     assert refused.value.code == "nothing_moved" and again_open in str(refused.value)
-    last = rr.record(finding, body={"coverage": _looked_at(backup)})[-1]
+    last = rr.record(finding, by=_recorder(), body={"coverage": _looked_at(backup)})[-1]
     assert last.state == st.RESTORED_WITH_RESTRICTIONS
     assert last.scope_items == {
         "added": [{"revision": 4, "kind": "asset", "ref": str(backup.uuid), "covered_by": [look]}], "removed": [gone],
@@ -936,7 +940,7 @@ def test_a_failed_read_back_is_recorded_whatever_the_scope():
     permit = restored.links["permits"][0]["outcome_id"]
     failed = record_reconciliation(dep, WF, permit, "not_applied").receipt_id
 
-    steps = rr.record(finding, body={"receipts": [failed]})
+    steps = rr.record(finding, by=_recorder(), body={"receipts": [failed]})
 
     assert _states(steps) == [st.UNDER_INVESTIGATION, st.RECOVERY_INCOMPLETE]
     assert steps[0].reopens == str(restored.uuid)
@@ -1143,7 +1147,7 @@ def test_a_scope_revision_that_cannot_be_read_is_caution_never_ok():
     assert _read(other)["steps"][-1]["scope_items"] == _UNKNOWN
     # With no scope declared at all, nothing is known of what one gained or lost.
     undeclared = _incident("undeclared")
-    (opened,) = rr.record(undeclared)
+    (opened,) = rr.record(undeclared, by=_recorder())
     assert (opened.scope_revision, opened.scope_items) == (None, _UNKNOWN)
     assert (_read(undeclared)["scope_revision"], _read(undeclared)["scope_removed"]) == (None, None)
 
@@ -1332,7 +1336,7 @@ def test_a_read_issues_one_statement_for_the_revisions_however_many_incidents_an
     primary, backup = scopes.asset(dep, "primary-route"), scopes.asset(dep, "backup-route")
     for finding in (first, second):
         declare_scope(finding, primary)
-        rr.record(finding)
+        rr.record(finding, by=_recorder())
     declare_scope(first, primary, backup)
     declare_scope(first, backup, by=first.deployment.owner)
 
