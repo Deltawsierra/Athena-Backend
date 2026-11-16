@@ -315,4 +315,50 @@ zopfli==0.2.3.post1
 # at 6447fd0, so tests/pin_bootstrap.py is unchanged, and so are currency,
 # exposure_receipt, failsafe, http, authority and tracing. The pin guard stays ON
 # (DEPENDENCY_PIN_GUARD is set nowhere).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@c33571b5ad06afbece7b2a1a964796141c70a350
+#
+# What the pin since c33571b (Mythos-Core#64) adds:
+#
+# Mythos-Core#66 to #81 -- the b42a1d3 pin, the head of the core's main on 16 Nov 2026.
+# Sixteen pull requests: two change what this service loads, one changes the guard its
+# tests run first, one adds words it now reads, and the rest are carried.
+# (1) The packages mythos_core.failsafe (#73) and mythos_core.http (#75) import each of
+# their names at its first use, not with the package. Every name resolves as it did, to
+# the same object: failsafe/signing.py still takes Command, DEFAULT_THRESHOLDS and Action
+# from failsafe and failsafe.commands, and pentest/models.py and pentest/views.py still
+# take egress from http. commands.py, sign.py, keyring.py, http/egress.py and authority/
+# are byte for byte what they were at c33571b. What changes is what loads with them. At
+# c33571b, loading this service's URL conf imported safe_http, the governor and the
+# channel with those packages, and safe_http started three threads in this process at
+# import (failsafe-ledger-rows, failsafe-logfile, failsafe-stdout). At b42a1d3 none of
+# the three modules is imported here and none of the threads is started. This service
+# makes no safe_http request and builds no Governor, so nothing it does used them. Each
+# of its stops binds its core names when its module is imported, at start, never on a
+# request.
+# (2) failsafe/channel.py's pure parts moved to failsafe/wire.py (#75), each imported
+# back under its own name: every definition of the old channel.py is in wire.py or
+# channel.py, unchanged. tests/test_the_engine_poll_does_bounded_work.py reads
+# channel._decode_commands and safe_http.MAX_RESPONSE_BYTES, and both are where they
+# were.
+# (3) mythos_core.pinguard (#71): whatever the outcome, the last line the guard prints
+# or raises is a verdict line, and the core's .gitattributes keeps pinguard.py LF, so one
+# commit prints one digest on Linux and on Windows. templates/pin_bootstrap.py is byte
+# for byte what it was (the same BOOTSTRAP_SHA256), so tests/pin_bootstrap.py is
+# unchanged.
+# (4) mythos_core.scope and mythos_core.provenance (#80): one spelling for the kinds of
+# scope item, the scope holds, a scope revision's reason and "a scope revision reopens
+# an accepted recovery". assurance/incident_scope.py and assurance/recovery_record.py
+# read them from the core and spell none of them
+# (tests/test_the_scope_words_and_rules_are_mythos_cores.py). On no stop path.
+# Carried, not reached: mythos_core.stopline (#68 to #70, #72 to #74, #76 and #81: the
+# stop controller, its page and its lane; the governor and safe_http read the page only
+# when an engine's supervisor names one, and this service runs neither),
+# mythos_core.measures (#66), and mythos_core.db's revocation journal and deadline (#71,
+# #77: a key revocation never waits on a lock without a deadline). This service keeps no
+# mythos_core.db store, issues no engine API keys and calls no function of that module;
+# its one import of it is still tests/fixtures/engine_launch/generate.py, which runs in
+# an Athena-Engine checkout. #67, #78 and #79 change the core's own tests and workflows.
+# status, coverage, evidence, currency, exposure_receipt, tracing, persona and
+# action_assurance are byte for byte what they were, and outcome.py and
+# evidence_record.py change in a comment only. The pin guard stays ON
+# (DEPENDENCY_PIN_GUARD is set nowhere).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@b42a1d3f06df8b0c20622f4d4be4604a95310358

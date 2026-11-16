@@ -225,7 +225,10 @@ jobs:
       - name: Import smoke (core, then every app the stops run through)
         shell: bash
         run: |
-          python -c "import mythos_core.http, mythos_core.failsafe"
+          # The modules are named: since Mythos-Core#73 and #75 the two packages import
+          # each of their modules at its first use, so importing the packages alone no
+          # longer imports safe_http, the module Windows once refused (Mythos-Core#53).
+          python -c "import mythos_core.http.safe_http, mythos_core.http.pinned_dns, mythos_core.failsafe.channel, mythos_core.failsafe.governor, mythos_core.failsafe.keyring"
           python manage.py check
           python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.worker_reports, assurance.economics.capacity"
           python manage.py makemigrations --check --dry-run

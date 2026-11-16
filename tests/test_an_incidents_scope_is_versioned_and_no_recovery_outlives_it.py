@@ -295,7 +295,7 @@ def test_a_revision_names_its_items_its_reason_and_its_evidence_and_changes_some
     for body, code in (
         ({**good, "items": []}, "items_required"),
         ({**good, "evidence": []}, "evidence_required"),
-        ({**good, "reason": "  "}, "malformed"),
+        ({**good, "reason": "  "}, "reason_required"),
         ({**good, "reason": "x" * 501}, "malformed"),
         ({**good, "reason": "first line\nSECOND-LINE"}, "malformed"),
         ({**good, "reason": "a tab\tSECOND-LINE"}, "malformed"),
@@ -303,7 +303,11 @@ def test_a_revision_names_its_items_its_reason_and_its_evidence_and_changes_some
         ({**good, "reason": "SECOND-LINE\x00"}, "malformed"),
         ({**good, "reason": ["SECOND-LINE"]}, "malformed"),
         ({**good, "reason": 7}, "malformed"),
-        ({key: good[key] for key in ("items", "evidence")}, "malformed"),
+        # A part left out is refused as that part posted empty: the client is told which.
+        ({key: good[key] for key in ("items", "evidence")}, "reason_required"),
+        ({key: good[key] for key in ("reason", "evidence")}, "items_required"),
+        ({key: good[key] for key in ("items", "reason")}, "evidence_required"),
+        ({}, "items_required"),
         ({**good, "items": [{"kind": "route", "ref": str(primary.uuid)}]}, "malformed"),
         ({**good, "items": [{**scopes.item(primary), "asset_kind": "model"}]}, "malformed"),
         ({**good, "items": [scopes.item(primary), scopes.item(primary)]}, "malformed"),
@@ -956,7 +960,7 @@ def test_a_narrowing_ends_the_hold_for_the_item_it_removes_and_says_so():
     assert _read(finding)["steps"][-1]["gaps"] == [_added(2, backup)]
 
     # Without a reason, or without its author, the removal is refused.
-    for asked, code in (({"by": owner, "reason": " "}, "malformed"), ({"reason": "a false alarm"}, "declared_by_required")):
+    for asked, code in (({"by": owner, "reason": " "}, "reason_required"), ({"reason": "a false alarm"}, "declared_by_required")):
         with pytest.raises(scope.ScopeRefused) as refused:
             declare_scope(finding, primary, **asked)
         assert refused.value.code == code
@@ -1362,8 +1366,9 @@ def test_the_decision_reads_no_scope_and_no_recovery_record():
 def test_nothing_on_a_stop_path_imports_the_scope_and_the_scope_imports_nothing_that_can_wait():
     """The stop, pause and revoke paths (safety, failsafe) import nothing of the scope or
     of the recovery record. The scope module does load with the URLconf, as the recovery
-    record that reads it does; at import it brings in the standard library and Django
-    only: nothing that reads a key, a file or the network."""
+    record that reads it does; at import it brings in the standard library, Django and
+    Mythos-Core's scope words (``mythos_core.scope``: data and predicates), and nothing
+    else: nothing that reads a key or the network, starts a thread or is on a stop path."""
     root = pathlib.Path(__file__).resolve().parent.parent
 
     def imported(tree, nodes):
@@ -1389,7 +1394,7 @@ def test_nothing_on_a_stop_path_imports_the_scope_and_the_scope_imports_nothing_
         for node in module.body if isinstance(node, (ast.Import, ast.ImportFrom))
         for alias in node.names
     }
-    assert at_import == {"__future__", "re", "uuid", "django.db", "django.utils"}
+    assert at_import == {"__future__", "re", "uuid", "django.db", "django.utils", "mythos_core"}
 
 
 def test_no_stop_reaches_the_scope_or_the_recovery_record(django_capture_on_commit_callbacks, monkeypatch, settings):

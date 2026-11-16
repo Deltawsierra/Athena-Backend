@@ -1039,6 +1039,15 @@ resolved in the finding's own deployment and refused otherwise: an `asset` (by u
 `Asset.Kind` is kept beside it) or an approved `workflow` (by slug). A route has no record
 of its own here, so a route is in scope as the assets on it. Every revision after the
 first names the one it `supersedes`, and the earlier one stays exactly as recorded.
+The words are Mythos-Core's (`mythos_core.scope`), read from the core and spelled nowhere
+in this backend's code: the kinds of scope item, the scope holds, a revision's reason and
+the rule that a scope revision reopens an accepted recovery
+(`tests/test_the_scope_words_and_rules_are_mythos_cores.py`). This backend is stricter in
+two things and looser in none: a revision declares only the two kinds it has a record for
+(the core also names `route` and `identity`), and a reason is at most 500 characters (the
+core allows 1000). A refused reason carries the core's code: `reason_required` when it is
+missing or blank, `malformed` otherwise. A stored item whose kind is not one of the core's
+reads as the core reads it: the scope is unreadable, never smaller.
 Append-only, as every history is (`assurance/append_only.py`); on no stop path, and read
 by no decision.
 
@@ -1078,8 +1087,9 @@ revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered
   `under_investigation` under the current revision and names the step it sets aside
   (`reopens`). After `restored_with_restrictions` that is S1's reopen. S1 lets nothing
   follow `recovery_accepted`, not even a reopen: the rule "a scope revision reopens an
-  accepted recovery" belongs in `mythos_core.status` and is not there yet, so S1's step
-  check is not asked about the accepted step and runs from the new one on.
+  accepted recovery" is the core's `mythos_core.scope.check_scope_reopen`, which is asked
+  about the accepted step and the step that reopens it, with each scope hold that stands
+  against the accepted one. S1's step check runs from the new step on.
 - **A narrowing ends the hold for the item it removes, openly.** The hold for an added
   item stands only while the item is in the current scope and nothing names it. Once a
   later revision removes it, it is no longer a gap: a recovered step held back only by it
@@ -1884,7 +1894,7 @@ through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
 Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
 pin, from the install pip recorded; otherwise it stops the run with one error naming each
 failed check and what to do. Each run ends with its verdict, for example
-`pin guard <sha>: mythos-core pinned c33571b, imported c33571b from <path>: OK`. Its one
+`pin guard <sha>: mythos-core pinned b42a1d3, imported b42a1d3 from <path>: OK`. Its one
 switch is described under "The shared pin guard" in Mythos-Core's README.
 `ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
 run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.
