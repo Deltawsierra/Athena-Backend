@@ -13,8 +13,11 @@ one that drips its status line and headers, a byte every 0.25 s:
 * health() fails as a timeout (``unknown`` to readiness) inside the bound;
 * a dripped body is cut off at the deadline and its connection closed, so the ask
   ends and nothing is left waiting;
-* a dripped status line or headers hold one ask, and only one: every ask meanwhile
-  answers at once, and opens no second connection;
+* a dripped status line or headers are cut off there too: the ask is sent under the
+  same deadline as a whole (safety.outbound's ``total=``), which shuts its sockets
+  down when it passes, so no thread is held for as long as the engine drips;
+* while an ask is in flight, every other answers at once and opens no second
+  connection; once it has ended, the next ask asks the engine again;
 * readiness answers inside its bound with the engine ``unknown`` because its own check
   ran out, and no check is left in flight.
 """
@@ -160,21 +163,61 @@ def test_a_dripped_body_is_cut_off_and_its_connection_closed(dripping):
     assert connections["closed_by_client"].wait(2.0), "the dripped body's connection was never closed"
 
 
-def test_while_a_dripped_header_holds_an_ask_the_next_answers_at_once(dripping):
-    """No read of the body bounds a status line dripped a byte at a time, so that ask
-    stays on its thread until the drip ends. While it does, health() answers at once,
-    as a timeout, and opens no second connection: a readiness probe each second does
-    not leave a thread behind each time."""
+def test_a_dripped_status_line_is_cut_off_and_its_connection_closed(dripping):
+    """No read of the body bounds a status line dripped a byte at a time: the send
+    itself holds the deadline (``total=``), which shuts the ask's sockets down when
+    it passes. So the ask ends at the deadline, not when the engine tires of
+    dripping (20 s here), and its connection is closed."""
     client, connections = dripping("headers")
-    first, still_running = _health(client)
-    assert not still_running and "error" in first, first
+    outcome, still_running = _health(client)
+    assert not still_running and "error" in outcome, outcome
+    assert "no whole answer to /health" in str(outcome["error"]), outcome
+    # Nothing is left to read: the ask is over as health() answers.
+    assert _ask_is_free(0.5), "the ask was still waiting on the dripped status line"
+    assert connections["closed_by_client"].wait(2.0), "the dripped status line's connection was never closed"
+    assert not [t for t in threading.enumerate() if t.name == "engine /health"]
+
+
+@pytest.mark.parametrize("part", ["body", "headers"])
+def test_while_an_ask_is_in_flight_the_next_answers_at_once(dripping, part):
+    """One /health ask at a time: while one is in flight, health() answers at once,
+    as a timeout, and opens no second connection, so a burst of readiness probes
+    does not start a thread each. Once that ask has ended at its deadline, the next
+    one asks the engine again, where a dripped status line used to hold every later
+    ask off for as long as the drip went on."""
+    client, connections = dripping(part)
+    first = {}
+
+    def ask():
+        try:
+            client.health()
+        except cyberengine_client.EngineError as exc:
+            first["error"] = exc
+
+    thread = threading.Thread(target=ask, daemon=True)
+    thread.start()
+    waited = time.monotonic() + 1.0
+    while connections["opened"] < 1 and time.monotonic() < waited:
+        time.sleep(0.01)
+    assert connections["opened"] == 1, "the first ask never reached the engine"
 
     started = time.monotonic()
     with pytest.raises(cyberengine_client.EngineError) as raised:
         client.health()
     assert time.monotonic() - started < 0.5
     assert isinstance(raised.value.__cause__, requests.Timeout)
+    assert "an earlier /health ask is still waiting" in str(raised.value)
     assert connections["opened"] == 1
+
+    thread.join(readiness.DEADLINE_SECONDS)
+    assert not thread.is_alive() and "error" in first, first
+    # A dripped body's ask ends within one more read after the deadline; a dripped
+    # status line's, at it.
+    assert _ask_is_free(1.5 if part == "body" else 0.5)
+    again, still_running = _health(client)
+    assert not still_running and "error" in again, again
+    assert "an earlier /health ask" not in str(again["error"]), again
+    assert connections["opened"] == 2
 
 
 @pytest.mark.django_db(transaction=True)
