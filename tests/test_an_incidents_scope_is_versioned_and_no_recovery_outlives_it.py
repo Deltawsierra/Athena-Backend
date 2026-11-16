@@ -293,6 +293,12 @@ def test_a_revision_names_its_items_its_reason_and_its_evidence_and_changes_some
         ({**good, "evidence": []}, "evidence_required"),
         ({**good, "reason": "  "}, "malformed"),
         ({**good, "reason": "x" * 501}, "malformed"),
+        ({**good, "reason": "first line\nSECOND-LINE"}, "malformed"),
+        ({**good, "reason": "a tab\tSECOND-LINE"}, "malformed"),
+        ({**good, "reason": "reordered \u202eSECOND-LINE"}, "malformed"),
+        ({**good, "reason": "SECOND-LINE\x00"}, "malformed"),
+        ({**good, "reason": ["SECOND-LINE"]}, "malformed"),
+        ({**good, "reason": 7}, "malformed"),
         ({key: good[key] for key in ("items", "evidence")}, "malformed"),
         ({**good, "items": [{"kind": "route", "ref": str(primary.uuid)}]}, "malformed"),
         ({**good, "items": [{**scopes.item(primary), "asset_kind": "model"}]}, "malformed"),
@@ -306,7 +312,10 @@ def test_a_revision_names_its_items_its_reason_and_its_evidence_and_changes_some
         with pytest.raises(scope.ScopeRefused) as refused:
             scope.declare(finding, body=body)
         assert refused.value.code == code, body
+        assert "SECOND-LINE" not in str(refused.value), "a refusal never repeats the text it refused"
     assert _revisions(finding) == []
+    # Exactly 500 printable characters on one line is a reason.
+    assert scope._reason("x" * 500) == "x" * 500
 
     scope.declare(finding, body=good)
     with pytest.raises(scope.ScopeRefused) as refused:
@@ -330,10 +339,12 @@ def _rev(number, *items):
         (1, [_rev(1, "a")], []),
         (1, [_rev(1, "a"), _rev(2, "a", "b")], ["scope:revision:2:added:asset:b"]),
         (2, [_rev(1, "a"), _rev(2, "a", "b")], []),
-        # Only removes: still a later revision. It names no item, and supersedes the step's.
-        (1, [_rev(1, "a", "b"), _rev(2, "a")], ["scope:revision:2:supersedes:1"]),
-        # Added, then removed again: the item is no longer a gap, and the step is still set aside.
-        (1, [_rev(1, "a"), _rev(2, "a", "b"), _rev(3, "a")], ["scope:revision:3:supersedes:1"]),
+        # Only removes: nothing is held back. A narrowing takes no recovered state away.
+        (1, [_rev(1, "a", "b"), _rev(2, "a")], []),
+        # Added, then removed again: the removal ends the hold.
+        (1, [_rev(1, "a"), _rev(2, "a", "b"), _rev(3, "a")], []),
+        # Two added, one removed: still held by the other.
+        (1, [_rev(1, "a"), _rev(2, "a", "b", "c"), _rev(3, "a", "b")], ["scope:revision:2:added:asset:b"]),
         # Removed, then added back: the later revision added it.
         (1, [_rev(1, "a", "b"), _rev(2, "a"), _rev(3, "a", "b")], ["scope:revision:3:added:asset:b"]),
         (1, [_rev(1, "a"), _rev(2, "a", "b"), _rev(3, "a", "b", "c")], [
@@ -346,7 +357,7 @@ def _rev(number, *items):
         (2, [SimpleNamespace(revision=1, items="a"), _rev(2, "a")], ["scope:unreadable"]),
     ],
 )
-def test_any_later_revision_sets_a_recovered_step_aside_and_names_what_it_added(taken_under, revisions, expected):
+def test_what_holds_a_recovered_state_back_is_each_item_a_later_revision_added_that_is_in_scope_now(taken_under, revisions, expected):
     assert scope.holds(taken_under, revisions) == expected
 
 
@@ -839,14 +850,16 @@ def test_an_added_asset_on_which_nothing_was_found_is_named_by_a_look_recorded_a
 
     # Removed, openly: no longer a gap, and listed with who removed it and why.
     declare_scope(finding, primary, by=owner, reason="the backup route was decommissioned")
-    assert _read(finding)["steps"][-1]["gaps"] == ["scope:revision:3:supersedes:2"]
-    narrowed = rr.record(finding)
     gone = {
         "kind": "asset", "ref": str(backup.uuid), "added": 2, "removed": 3, "removed_by": owner.username,
         "reason": "the backup route was decommissioned",
     }
-    assert _states(narrowed)[-1] == st.RESTORED_WITH_RESTRICTIONS and narrowed[-1].gaps == []
-    assert narrowed[-1].scope_items == {"added": [], "removed": [gone]}
+    read = _read(finding)
+    assert read["current"]["state"] == st.RESTORED_WITH_RESTRICTIONS and read["steps"][-1]["scope_gaps"] == []
+    assert read["scope_removed"] == [gone]
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding)
+    assert refused.value.code == "nothing_moved"
 
     # Added again, it counts from when it was added again: the look from revision 2 is
     # older than that, and the item is open until it is looked at again.
@@ -879,55 +892,109 @@ def test_a_failed_read_back_is_recorded_whatever_the_scope():
     assert steps[-1].gaps == [f"effect_not_applied:receipt:{failed}"] and steps[-1].release == st.FAIL
 
 
-def test_a_narrowing_lifts_the_gap_openly_and_never_advances_a_state_by_itself():
+def _gone(record, added, removed, by, reason) -> dict:
+    """``record`` as the derived record lists an item a revision added and a later one removed."""
+    return {**scopes.item(record), "added": added, "removed": removed, "removed_by": by.username, "reason": reason}
+
+
+def test_a_narrowing_ends_the_hold_for_the_item_it_removes_and_says_so():
+    """Accepted, widened, narrowed, with no step between: the acceptance stands again."""
     finding = _incident()
     dep, owner = finding.deployment, finding.deployment.owner
     primary = scopes.asset(dep, "primary-route")
     _accepted(finding, primary)
     backup = scopes.asset(dep, "backup-route")
     declare_scope(finding, primary, backup)
-    held, before = _read(finding), _history(finding)
-    assert held["steps"][-1]["gaps"] == [_added(2, backup)]
+    before = _history(finding)
+    assert _read(finding)["steps"][-1]["gaps"] == [_added(2, backup)]
 
     # Without a reason, or without its author, the removal is refused.
     for asked, code in (({"by": owner, "reason": " "}, "malformed"), ({"reason": "a false alarm"}, "declared_by_required")):
         with pytest.raises(scope.ScopeRefused) as refused:
             declare_scope(finding, primary, **asked)
         assert refused.value.code == code
-    declare_scope(finding, primary, by=owner, reason="a false alarm: the route was never connected")
+    why = "a false alarm: the route was never connected"
+    declare_scope(finding, primary, by=owner, reason=why)
 
-    # The item is no longer a gap. The acceptance is still set aside: a narrowing is a
-    # new revision, records no step and advances nothing by itself.
+    # The hold stood only while the item was in scope. The acceptance covered what is
+    # in scope now: it stands again, with no new step, and the removal is disclosed.
     read = _read(finding)
     assert read["scope_revision"] == 3
-    assert read["current"] == held["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
-    assert read["steps"][-1]["gaps"] == ["scope:revision:3:supersedes:1"]
+    assert read["current"] == {"version": 4, "state": st.RECOVERY_ACCEPTED, "release": st.PASS}
+    assert (read["steps"][-1]["gaps"], read["steps"][-1]["scope_gaps"]) == ([], [])
+    assert read["scope_removed"] == [_gone(backup, 2, 3, owner, why)]
     assert _history(finding) == before, "a revision records no step"
-    # A new step under it is needed, and what was removed is listed with it: disclosed, not a gap.
-    again = rr.record(finding, by=owner, accept_until=_until())
-    assert (again[-1].state, again[-1].scope_revision, again[-1].release) == (st.RECOVERY_ACCEPTED, 3, st.PASS)
-    assert again[-1].gaps == [] and again[-1].scope_items == {
-        "added": [],
-        "removed": [{
-            "kind": "asset", "ref": str(backup.uuid), "added": 2, "removed": 3, "removed_by": owner.username,
-            "reason": "a false alarm: the route was never connected",
-        }],
-    }
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, by=owner)
+    assert refused.value.code == "terminal"
 
-    # Only ever narrowed: still a new revision. The accepted recovery is set aside until
-    # a step is recorded under it, and the owner accepts again.
+    # Only ever narrowed: a revision that only removes takes no recovered state away.
     other = _incident("narrowed")
     one, two = scopes.asset(other.deployment, "primary-route"), scopes.asset(other.deployment, "spare-route")
-    accepted = _accepted(other, one, two)[-1]
+    _accepted(other, one, two)
     before = _history(other)
     declare_scope(other, one, by=other.deployment.owner, reason="the spare route was never reachable")
     read = _read(other)
-    assert read["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
-    assert read["steps"][-1]["gaps"] == ["scope:revision:2:supersedes:1"] and _history(other) == before
-    again = rr.record(other, by=other.deployment.owner, accept_until=_until())
-    assert (again[0].reopens, again[-1].state, again[-1].scope_revision) == (str(accepted.uuid), st.RECOVERY_ACCEPTED, 2)
+    assert read["current"] == {"version": 4, "state": st.RECOVERY_ACCEPTED, "release": st.PASS}
+    assert read["steps"][-1]["scope_gaps"] == [] and _history(other) == before
     # Removed from the first scope, it was never added to an earlier one: not listed.
-    assert again[-1].scope_items == {"added": [], "removed": []}
+    assert read["scope_removed"] == []
+
+
+def test_a_chain_reopened_for_an_item_goes_on_once_a_narrowing_removes_it():
+    """Accepted, widened, reopened by a step, narrowed: the next step is accepted, and names the removal."""
+    finding = _incident()
+    dep, owner = finding.deployment, finding.deployment.owner
+    primary = scopes.asset(dep, "primary-route")
+    _accepted(finding, primary)
+    backup, modem = scopes.asset(dep, "backup-route"), scopes.asset(dep, "vendor-modem")
+    declare_scope(finding, primary, backup, modem)
+    proof = scopes.evidence_naming(backup)
+    reopened = rr.record(finding, by=owner, body={"evidence": [str(proof.uuid)]}, accept_until=_until())
+    assert _states(reopened) == [st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED]
+    assert reopened[-1].gaps == [_added(2, modem)] and reopened[-1].release == st.AUDIT_INCOMPLETE
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, by=owner, accept_until=_until())
+    assert refused.value.code == "nothing_moved"
+
+    why = "the modem was never on this network"
+    declare_scope(finding, primary, backup, by=owner, reason=why)
+
+    # The removal answered the hold: the step under the narrowed revision is derived by
+    # SP-1's own rules from the links it carries, and lists what was removed.
+    (accepted,) = rr.record(finding, by=owner, accept_until=_until())
+    assert (accepted.state, accepted.release, accepted.scope_revision, accepted.gaps) == (
+        st.RECOVERY_ACCEPTED, st.PASS, 3, [],
+    )
+    assert accepted.scope_items == {
+        "added": [{
+            "revision": 2, "kind": "asset", "ref": str(backup.uuid),
+            "covered_by": [{"kind": "evidence", "ref": str(proof.uuid)}],
+        }],
+        "removed": [_gone(modem, 2, 3, owner, why)],
+    }
+
+
+def test_two_items_added_and_one_removed_is_still_held_by_the_other():
+    """Accepted, widened by two items, one removed: the other still holds it."""
+    finding = _incident()
+    dep, owner = finding.deployment, finding.deployment.owner
+    primary = scopes.asset(dep, "primary-route")
+    _accepted(finding, primary)
+    backup, modem = scopes.asset(dep, "backup-route"), scopes.asset(dep, "vendor-modem")
+    declare_scope(finding, primary, backup, modem)
+    before = _history(finding)
+    why = "the modem was never on this network"
+    declare_scope(finding, primary, backup, by=owner, reason=why)
+
+    read = _read(finding)
+    assert read["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
+    assert read["steps"][-1]["gaps"] == [_added(2, backup)]
+    assert read["scope_removed"] == [_gone(modem, 2, 3, owner, why)]
+    with pytest.raises(rr.RecoveryRefused) as refused:
+        rr.record(finding, by=owner, accept_until=_until())
+    assert refused.value.code == "nothing_moved" and _added(2, backup) in str(refused.value)
+    assert _history(finding) == before
 
 
 def test_a_step_held_for_want_of_a_scope_is_not_advanced_by_declaring_one():
@@ -1086,6 +1153,10 @@ def test_the_scope_route_records_the_next_revision_for_an_admin_and_names_the_ca
     for extra in ({"declared_by": "owner"}, {"revision": 9}, {"supersedes": 1}):
         refused = _as(world.admin).post(_scope_url(world.incident), {**wider, **extra}, format="json")
         assert (refused.status_code, refused.json()["code"]) == (400, "not_posted"), extra
+    # A reason that is not one printable line is refused, and the answer does not repeat it.
+    refused = _as(world.admin).post(_scope_url(world.incident), {**wider, "reason": "found\nHIDDEN-LINE"}, format="json")
+    assert (refused.status_code, refused.json()["code"]) == (400, "malformed")
+    assert "HIDDEN-LINE" not in refused.content.decode()
     second = _as(world.owner).post(_scope_url(world.incident), wider, format="json")
     assert second.status_code == 201, second.content
     assert second.json()["revisions"][0]["declared_by"] == "owner"
@@ -1159,7 +1230,7 @@ def test_the_recovery_record_reads_carry_each_steps_scope_revision_and_the_curre
     one = owner.get(_step_url(world.incident)).json()
     (listed,) = owner.get(f"/api/assurance/deployments/{world.a.uuid}/recovery-records/").json()["incidents"]
     for read in (one, listed):
-        assert read["scope_revision"] == 2
+        assert read["scope_revision"] == 2 and read["scope_removed"] == []
         assert read["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
         last = read["steps"][-1]
         assert (last["scope_revision"], last["gaps"]) == (1, [_added(2, world.backup)])

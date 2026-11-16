@@ -1067,21 +1067,23 @@ revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered
   each uncovered item among its gaps and reads `AUDIT_INCOMPLETE`.
 - **An empty step moves nothing.** After a recovered step that no longer stands, a step is
   recorded only when it answers something of what took the state away (a scope declared
-  where there was none, a link that names an added item, a later revision with nothing
-  open) or a blocker stands: a failure is never left unrecorded. Any other is a
+  where there was none, a link that names an added item) or a blocker stands: a failure
+  is never left unrecorded. Any other is a
   409 (`nothing_moved`) that names what is still open. The step that does move returns to
   `under_investigation` under the current revision and names the step it sets aside
   (`reopens`). After `restored_with_restrictions` that is S1's reopen. S1 lets nothing
   follow `recovery_accepted`, not even a reopen: the rule "a scope revision reopens an
   accepted recovery" belongs in `mythos_core.status` and is not there yet, so S1's step
   check is not asked about the accepted step and runs from the new one on.
-- **A narrowing lifts the gap for the item it removes, openly.** The item is no longer a
-  gap, and every step derived after it lists it (`scope_items.removed`): both revision
-  numbers, who removed it and why. A revision that removes an item names who declared it.
-  It is still a new revision: it records no step and advances nothing by itself, and a
-  recovered step taken before it stays set aside (`scope:revision:<n>:supersedes:<k>`)
-  until a step is recorded under it. An item removed and added again counts from when it
-  was added again.
+- **A narrowing ends the hold for the item it removes, openly.** The hold for an added
+  item stands only while the item is in the current scope and nothing names it. Once a
+  later revision removes it, it is no longer a gap: a recovered step held back only by it
+  stands again with no new step. The read (`scope_removed`) and every step derived after
+  (`scope_items.removed`) list it: both revision numbers, who removed it and why. A
+  revision that only removes items takes no recovered state away by itself and records no
+  step. A revision that removes an item names who declared it, and every revision states
+  why in one printable line. An item removed and added again counts from the revision
+  that added it again.
 - **Not covered:** the first declared scope's items are not tied one by one. Only items
   added later are.
 - **Rows from before this change** name no revision and are not rewritten. They read

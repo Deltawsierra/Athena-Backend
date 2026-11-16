@@ -88,13 +88,18 @@ holds only for that revision:
   One item's link covers that item and no other. Until every such item is named, both
   recovered states are held back: the step names each uncovered item among its gaps and
   reads ``AUDIT_INCOMPLETE``.
-- *A narrowing lifts the gap for the item it removes, openly.* The item is no longer a
-  gap, and ``scope_items`` lists it as removed: both revision numbers, who removed it and
-  why. The first declared scope's items are not tied one by one; only items added later are.
-- *After a recovered step that no longer stands* (any later revision sets it aside, a
-  narrowing included), a step is recorded only when it answers something of what took the
-  state away, or a blocker stands: a failure is never left unrecorded. A step whose links
-  name none of the items still open moves nothing (``nothing_moved``). The step that
+- *A narrowing ends the hold for the item it removes, openly.* A hold for an added item
+  stands only while the item is in the current scope and nothing names it. Once a later
+  revision removes it, it is no longer a gap: a recovered step that was held back only by
+  it stands again with no new step, and the read (``scope_removed``) and every step
+  derived after (``scope_items.removed``) list it with both revision numbers, who
+  removed it and why. A revision that only removes items takes no recovered state away.
+  The first declared scope's items are not tied one by one; only items added later are.
+- *After a recovered step that no longer stands*, a step is recorded only when it answers
+  something of what took the state away, or a blocker stands: a failure is never left
+  unrecorded. A step whose links name none of the items still open moves nothing
+  (``nothing_moved``). A chain already reopened goes on by SP-1's own rules from the
+  links it carries, and a hold a narrowing has ended no longer holds it back. The step that
   does move returns to ``under_investigation`` under the current revision and names the
   step it sets aside (``reopens``). After ``restored_with_restrictions`` that is S1's
   reopen, checked by S1. S1 lets nothing follow ``recovery_accepted``, not even a reopen:
@@ -805,6 +810,9 @@ def _incident(finding, steps: list, revisions: list) -> dict:
         "severity": finding.severity,
         # The incident's current scope revision; None when no scope is declared.
         "scope_revision": incident_scope.current_of(revisions),
+        # Every item a revision added and a later one removed: both revision numbers, who
+        # removed it and why. Disclosed with the record; never a gap.
+        "scope_removed": incident_scope.removed(revisions) or [],
         # As the last step reads now, never as a recovered state its scope has left behind.
         "current": None if last is None else {"version": last["version"], "state": last["state"], "release": last["release"]},
         "steps": read,
