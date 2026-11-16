@@ -1628,7 +1628,13 @@ reads all of this backend's code, routed or not, and fails on any place that can
 start a scan (a launch call, held or named in a string, or the engine's launch route)
 unless the preflight is asked first in the same function, or the place is a private
 helper reached only from code that asks it. An unrouted LLM scan view that asked
-nothing (`pentest/views_llm.py`) was deleted for that reason. A defender
+nothing (`pentest/views_llm.py`) was deleted for that reason. The routed LLM scan
+keeps what it tested on the scan (`target_config`): the adapter, the model, the
+target's name and the endpoint (scheme, host, port and path; no login, query or
+fragment). Nothing else the caller sent is kept, so no key reaches the record. It is
+written only once the preflight lets the launch go, and the scan's ingest registers
+the model as a Provider and Asset, so the asset inventory names the model each LLM
+scan tested. A defender
 answer with no `alerts` list is refused 502 `AUDIT_INCOMPLETE`. It is not recorded
 as "nothing detected".
 
@@ -1644,8 +1650,11 @@ its own and names each one, with the reason:
 - **the database**: `SELECT 1`, and the row read back must be the one asked for;
 - **the engine**: its own `GET /health`, which must answer `{"status": "ok"}`. It is
   asked under its own short timeout (0.5 s to connect, 1 s to read), never the long
-  one a scan is given, so a hung engine reads `unknown` well inside the bound and
-  holds no thread;
+  one a scan is given, and answered within 1.5 s in all. A hung engine, or one that
+  sends a byte inside every read timeout, reads `unknown` inside the bound. The ask
+  runs on a thread of its own, one at a time: a dripped body is cut off at 1.5 s, and
+  while a dripped status line or headers hold that thread, the check answers at once
+  without asking again;
 - **Mythos-Core**: the modules this backend loads import, and its word for unknown
   is still `unknown`.
 
@@ -1851,9 +1860,17 @@ sends is the record itself in most of those places; where it is found is printed
 Every request this service sends with `requests` itself -- to the engine, from the
 defender gateway, to a customer's connector or posture source, and the closure
 forward to Minotaur -- goes through `safety/outbound.py`: no `.netrc` login is
-read, an error is cut to the scheme, host and port of any URL in it with every
-header value withheld, and an answer is read with every credential the request
-carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
+read, an error it raises (and every exception that error carries) says one fixed
+message, its class and an opaque reference (`the outbound request failed
+(ConnectTimeoutError; ref ob-1a2b3c-7)`) and never the target's host, port, path,
+query, login or fragment, and an answer is read with every credential the request
+carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`,
+`tests/test_the_outbound_transport_shows_no_target_detail.py`). A call may ask for
+a total deadline (`total=`, seconds): a timer shuts its sockets down when it passes,
+however slowly the far end drips its status line, headers or body, and the call
+raises `TotalDeadlineExceeded`, leaving no thread or socket behind. It is opt-in: a
+call that does not pass it, every stop's included, is sent exactly as before, with
+no timer, thread, lock or wait added.
 
 - **The engine** (the engine client: a scan's launch, its status, its Stop, file
   uploads and every other engine call; and the defender gateway's `/defend`, which
