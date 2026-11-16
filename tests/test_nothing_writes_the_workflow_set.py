@@ -501,6 +501,11 @@ def test_the_payload_shapes_are_pinned():
         # approval it rests on was recipient-bound or legacy. Null on every other row,
         # this typed-in one included. Added to this pinned set deliberately.
         "approval_recipients",
+        # What a reader is shown of an observed effect's record, in Mythos-Core's words
+        # (its version, its digests or keyed references, its execution, its tool binding).
+        # Null on every other row, this typed-in one included. Added to this pinned set
+        # deliberately.
+        "effect_reading",
     }
     assert set(outcome.data["composition"]) == {
         "signal",

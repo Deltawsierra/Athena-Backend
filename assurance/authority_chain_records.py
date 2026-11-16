@@ -180,6 +180,9 @@ def _cited_outcome(row, keyring, deployment_uuid: str) -> rule.CitedOutcome:
     if evidence == _composition.EVIDENCE_OBSERVED_EFFECT:
         document = observed_effects.evidence_in_force(row, deployment_uuid)
         if document is not None:
+            # A v1 to v4 document names its action by a plain digest; a v5 one by a keyed
+            # reference and the id of the key it is keyed under, and holds no plain digest.
+            keyed = document.get("keyed_under")
             effect = rule.ObservedEffect(
                 tool_kind=document["tool"]["kind"],
                 tool_identifier=document["tool"]["identifier"],
@@ -189,7 +192,9 @@ def _cited_outcome(row, keyring, deployment_uuid: str) -> rule.CitedOutcome:
                 action=document["action"],
                 observed_at=observed_outcomes._instant(document["observed_at"]),
                 dispatch=dispatch_state(document, row),
-                action_digest=document["action_digest"],
+                action_digest=document.get("action_digest", ""),
+                action_ref=document.get("action_ref", ""),
+                keyed_under=(keyed["chain"], keyed["chain_key"]) if isinstance(keyed, dict) else None,
             )
     return rule.CitedOutcome(
         outcome_id=row.outcome_id,
@@ -296,7 +301,7 @@ def _load_inputs(
 
 
 def dispatch_state(document: dict, row) -> rule.DispatchState | None:
-    """The state an observed effect's dispatch ran under, from its v2, v3 or v4 document
+    """The state an observed effect's dispatch ran under, from its v2 to v5 document
     (read against its signed digest by the caller) and the route this backend bound for
     the dispatch instant when it recorded the row; ``None`` for a v1 document. A v3
     document's ``verified.workflow_approval`` -- the approval the gate read from this
@@ -305,13 +310,17 @@ def dispatch_state(document: dict, row) -> rule.DispatchState | None:
     document's ``verified`` reads as a v3 one's, and its ``tool_contract`` -- the
     contract the gate verified itself for the dispatched tool -- is
     :attr:`~assurance.authority_chain.DispatchState.tool_contract`; v1 to v3 have none,
-    and neither does a v4 one whose ``tool_contract`` is null."""
+    and neither does a v4 one whose ``tool_contract`` is null. A v5 document's
+    ``verified`` reads as a v4 one's (its ``tool_binding`` is read by
+    :func:`assurance.observed_effects.shown`). Each block is read by what the document
+    holds: the caller's document is one the core has held to exactly the fields of its
+    version (:func:`assurance.observed_effects.evidence_in_force`), so ``verified`` is
+    there from v3 and ``tool_contract`` from v4, and no version is named here."""
     block = document.get("dispatch")
     if not isinstance(block, dict):
         return None
     presented = block["presented"]
-    schema = document.get("schema")
-    verified = block.get("verified") if schema in observed_effects.VERIFIED_SCHEMAS else None
+    verified = block.get("verified")
     reading = verified.get("workflow_approval") if isinstance(verified, dict) else None
     gate = None
     if isinstance(reading, dict):
@@ -322,11 +331,7 @@ def dispatch_state(document: dict, row) -> rule.DispatchState | None:
             digest=reading["digest"],
             read_at=observed_outcomes._instant(reading["read_at"]),
         )
-    contract = (
-        verified.get("tool_contract")
-        if schema == observed_effects.EVIDENCE_SCHEMA_V4 and isinstance(verified, dict)
-        else None
-    )
+    contract = verified.get("tool_contract") if isinstance(verified, dict) else None
     tool_contract = (contract["kind"], contract["identifier"], contract["digest"]) if isinstance(contract, dict) else None
     return rule.DispatchState(
         dispatched_at=observed_outcomes._instant(block["dispatched_at"]),

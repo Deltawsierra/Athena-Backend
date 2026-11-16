@@ -724,14 +724,25 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     # the stored binding itself: that is a fingerprint, and what a reader needs is
     # whether it is the one serving.
     route = serializers.SerializerMethodField()
-    #: The approval-recipient entries a ``mythos.observed-effect/v4`` row's permit bound
-    #: (G6), exactly as signed: whether each approval the effect rests on was
+    #: The approval-recipient entries a ``mythos.observed-effect/v4`` or ``v5`` row's permit
+    #: bound (G6), exactly as signed: whether each approval the effect rests on was
     #: recipient-bound (``recipient: "bound"``, with the destination and tenant its MAC
     #: binds) or legacy (``"unbound"``, both null); ``[]`` when it rests on none. Read
     #: from the evidence document the signed digest names, only while the row is an
     #: observed effect signed by a key trusted now; ``null`` on every other row -- a v1
     #: to v3 document records none.
     approval_recipients = serializers.SerializerMethodField()
+    #: What a reader is shown of an observed effect's record, in Mythos-Core's words
+    #: (:func:`assurance.observed_effects.shown`): its version; how it refers to its action
+    #: and its answer (``plain digests``, withheld from this reader, or a v5 record's keyed
+    #: references, ``keyed: not checkable here``, with the id of the key); which stage of
+    #: execution it shows (``accepted``, as signed by v5 or read from an older record's
+    #: 2xx, never ``committed``); the tool binding a v5 record's permit was decided for,
+    #: as signed (an older record: ``no tool binding recorded``); and what this backend
+    #: finds in that binding. Read from the evidence document the signed digest names, only
+    #: while the row is an observed effect signed by a key trusted now; ``null`` on every
+    #: other row. No plain digest of an action, an answer or a population is served.
+    effect_reading = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkflowChainOutcome
@@ -756,6 +767,7 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "observer_key_id",
             "evidence_digest",
             "approval_recipients",
+            "effect_reading",
         ]
         read_only_fields = [
             "uuid",
@@ -817,6 +829,14 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
 
         deployment_uuid = self.context.get("deployment_uuid") or str(obj.deployment.uuid)
         return observed_effects.approval_recipients(obj, deployment_uuid)
+
+    def get_effect_reading(self, obj) -> dict | None:
+        if self.get_evidence_kind(obj) != EVIDENCE_OBSERVED_EFFECT:
+            return None
+        from . import observed_effects
+
+        deployment_uuid = self.context.get("deployment_uuid") or str(obj.deployment.uuid)
+        return observed_effects.shown(obj, deployment_uuid)
 
     def validate_basis(self, value):
         """``demonstrated`` means a run produced this outcome, and a POST is not a

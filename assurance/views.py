@@ -2076,8 +2076,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         parser_classes=[SafeJSONParser],
     )
     def effect_reconciliations(self, request, uuid=None):
-        """Record one reconciliation receipt: the ``mythos.effect-reconciliation/v1``
-        answer a provider readback gave about a dispatch whose effect was unknown, signed
+        """Record one reconciliation receipt: the ``mythos.effect-reconciliation``
+        (version 1 or 2) answer a provider readback gave about a dispatch whose effect was unknown, signed
         by Achilles' observed-effect key under a payload type of its own
         (:mod:`assurance.effect_reconciliation`). The only writer of one.
 
@@ -2169,9 +2169,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     )
     def observed_effects(self, request, uuid=None):
         """Record one observed effect: the outcome Achilles signed with its
-        observed-effect key, and the ``mythos.observed-effect`` document (v1 or v2) its digest
-        names (:mod:`assurance.observed_effects`). The only writer of an
-        ``observed_effect``, and the only route that takes one.
+        observed-effect key, and the ``mythos.observed-effect`` document (v1 to v5) its digest
+        names (:mod:`assurance.observed_effects`; the document's one definition is
+        Mythos-Core's). The only writer of an ``observed_effect``, and the only route that
+        takes one.
+
+        The body is bounded before it is parsed: one envelope and one document of the
+        largest size the core's rules allow a version 5 document
+        (``observed_effects.MAX_BODY_BYTES``, both numbers read from the core), 413 for a
+        byte more. Evidence: it stops nothing, and no stop waits on it.
 
         ``{"envelope": <DSSE envelope>, "evidence": <document>}``. Refused, with
         nothing recorded: a signature by any key not mapped to ``observed_effect``, an
