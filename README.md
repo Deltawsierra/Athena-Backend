@@ -1107,6 +1107,7 @@ receipt could not (migration `assurance.0088`: five nullable fields, no row writ
   an accepted step whose acceptance has ended is served at the state before it, its
   release `FAIL`, and its `standing` is the core's word `acceptance_ended` (each step's
   standing is one of the core's five, in the core's order). The row is not rewritten.
+- **An ended acceptance can be renewed** (Mythos-Core#85, `scope.check_acceptance_reopen`, asked about every step after an accepted one): nothing follows an acceptance in force (`terminal`, 409); once it has ended the owner accepts again under the current scope revision, or a step records a state S1 lets follow the state before acceptance, as a new row (`tests/test_an_ended_acceptance_can_be_renewed.py`, with the core's `tests/vectors/acceptance-reopen-v1.json`).
 - **Who vouches for every witness** (`support`, the core's entry shape): the engine and
   its key for a permit or a receipt; otherwise the named person who recorded the step that
   linked it, with that step's time (`user:<id>`). Every step names who recorded it
@@ -1119,6 +1120,7 @@ receipt could not (migration `assurance.0088`: five nullable fields, no row writ
   A stored one that is not a name is shown as it is and named among the gaps by a pointer
   (`unnamed:restriction:<i>`). Each person is also a reference that outlives the account
   (`recorded_by_ref`, `accepted_by_ref`, a scope revision's `declared_by_ref`).
+- **Only the core's public names:** a name is checked by `mythos_core.evidence_record.is_name` and the observed effect's v4 fields are `observed_effect.VERIFIED_FIELDS_V4` (Mythos-Core#85, #84); nothing here reads a private name of the core.
 
 `tests/test_the_recovery_record_says_what_a_receipt_could.py` holds all of it to the core,
 with its vector file (`tests/vectors/recovery-receipt-v1.json`, byte for byte the core's),
@@ -1189,7 +1191,7 @@ revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered
 - **A narrowing ends the hold for the item it removes, openly.** The hold for an added
   item stands only while the item is in the current scope and nothing names it. Once a
   later revision removes it, it is no longer a gap: a recovered step held back only by it
-  stands again with no new step. The read (`scope_removed`) and every step derived after
+  stands again with no new step. A step recorded as held back by it reads the current revision's holds, as the record does: the removed item's hold is not listed, and with no hold left it is held back from nothing (`FAIL` until a new step). The read (`scope_removed`) and every step derived after
   (`scope_items.removed`) list it: both revision numbers, who removed it and why. A
   revision that only removes items takes no recovered state away by itself and records no
   step. A revision that removes an item names who declared it, and every revision states

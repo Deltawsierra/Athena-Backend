@@ -350,13 +350,17 @@ def test_an_ended_acceptance_under_a_wider_scope_is_read_as_ended_first(monkeypa
     assert last["gaps"] == [hold]
 
 
-def test_nothing_follows_an_ended_acceptance_and_the_refusal_says_so(monkeypatch):
+def test_an_ended_acceptance_is_renewed_by_the_owner_as_a_new_step(monkeypatch):
+    """Mythos-Core#85: once an acceptance has ended, the owner accepts again
+    (``scope.check_acceptance_reopen``), as a new step; the ended one stays as it was.
+    (Until #85 this was refused ``terminal``: see tests/test_an_ended_acceptance_can_be_renewed.py.)"""
     finding = _incident()
     (*_, accepted) = _accepted(finding)
+    before = _history(finding)
     _at(monkeypatch, accepted.accepted_until + timedelta(days=1))
-    with pytest.raises(rr.RecoveryRefused) as refused:
-        rr.record(finding, by=finding.deployment.owner, accept_until=accepted.accepted_until + timedelta(days=30))
-    assert refused.value.code == "terminal" and "ended" in str(refused.value)
+    (renewal,) = rr.record(finding, by=finding.deployment.owner, accept_until=accepted.accepted_until + timedelta(days=30))
+    assert (renewal.version, renewal.state, renewal.release) == (accepted.version + 1, st.RECOVERY_ACCEPTED, st.PASS)
+    assert _history(finding)[: len(before)] == before
 
 
 # ------------------------------------------------------------ 3. a gap holds a pass back
