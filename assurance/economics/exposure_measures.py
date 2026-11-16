@@ -157,12 +157,20 @@ def modeled(run: ModelRun, section: str, label: str, value: str) -> Figure:
     ``value`` is the amount exactly as the report prints it. Where the core refuses
     any part of it, or the run has no valuation date, the figure is not a measure and
     says why; its kind stays the model's, never another."""
+    return held(measures.MODELED_EXPOSURE, run, section, label, value)
+
+
+def held(kind: str, run: ModelRun, section: str, label: str, value: str) -> Figure:
+    """A figure of ``kind`` (one of the core's eight), as a measure built through the
+    core from ``value``, the amount exactly as it is served; or, where the core refuses
+    any part of it or ``run`` has no valuation date, not a measure, with the reason, its
+    kind kept."""
     shown = f"{run.currency} {value}"
     if run.valuation_date is None:
-        return Figure(section, label, shown, measures.MODELED_EXPOSURE, None, NO_PERIOD)
+        return Figure(section, label, shown, kind, None, NO_PERIOD)
     try:
         measure = measures.Measure(
-            kind=measures.MODELED_EXPOSURE,
+            kind=kind,
             amount=measures.Money(Decimal(value), run.currency),
             period=measures.Period(run.valuation_date, run.valuation_date),
             cumulative=False,
@@ -170,10 +178,9 @@ def modeled(run: ModelRun, section: str, label: str, value: str) -> Figure:
             source=run.source,
         )
     except measures.MeasureError as refused:
-        return Figure(section, label, shown, measures.MODELED_EXPOSURE, None,
-                      f"mythos_core.measures refuses it ({refused.code})")
+        return Figure(section, label, shown, kind, None, f"mythos_core.measures refuses it ({refused.code})")
     except (InvalidOperation, TypeError, ValueError):
-        return Figure(section, label, shown, measures.MODELED_EXPOSURE, None, "its amount is not a number")
+        return Figure(section, label, shown, kind, None, "its amount is not a number")
     return Figure(section, label, shown, measure.kind, measure, None)
 
 

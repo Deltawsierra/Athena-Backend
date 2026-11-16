@@ -72,13 +72,14 @@ Continuous financial assurance (E6, section 34), on the same conventions:
 The deployment's economic-exposure report (owner decision 12; section 38), on the same
 conventions, READ-ONLY (it records, recomputes, signs and verifies nothing):
 
-- ``GET deployments/<uuid>/economics/exposure-report/?output=html|pdf``: the most
+- ``GET deployments/<uuid>/economics/exposure-report/?output=html|pdf|json``: the most
   recent approved scenario version's exposure, from one run whose stored rows verify,
   as a document a customer can be handed (:mod:`.exposure_report`); with none, it says
   so and shows no figure. Every gap is named, and a report with one reads
   ``AUDIT_INCOMPLETE``. Every amount of money it shows says what kind of figure it is
   (AT-6, section 38.2): each is held as a ``mythos_core.measures`` measure
-  (:mod:`.exposure_measures`), and the report adds no two of them.
+  (:mod:`.exposure_measures`), and the report adds no two of them. ``?output=json`` is
+  the same document as ``mythos.exposure-report/v1`` (section 38.3), with its own digest.
 
 The receipt route says whether the receipt's run is current, in headers beside the
 bytes it serves unchanged (``X-Exposure-Freshness``, ``X-Exposure-Stale-Reasons``,
@@ -573,11 +574,11 @@ class ReceiptView(APIView):
 
 
 class ExposureReportView(APIView):
-    """The deployment's economic-exposure report, as HTML or PDF (section 38)."""
+    """The deployment's economic-exposure report, as HTML, PDF or JSON (section 38)."""
 
     permission_classes = [permissions.IsAuthenticated]
     #: The document is chosen by ``?output=``, never by the Accept header.
-    OUTPUTS = ("html", "pdf")
+    OUTPUTS = ("html", "pdf", "json")
 
     def perform_content_negotiation(self, request, force=False):
         return super().perform_content_negotiation(request, force=True)
@@ -593,7 +594,10 @@ class ExposureReportView(APIView):
             served = exposure_report.document(deployment)
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
-        if output == "pdf":
+        if output == "json":
+            response = HttpResponse(report.canonical_bytes(exposure_report.json_document(served)),
+                                    content_type="application/json")
+        elif output == "pdf":
             response = HttpResponse(exposure_report.render_pdf(served), content_type="application/pdf")
             response["Content-Disposition"] = f'attachment; filename="economic-exposure-{deployment.uuid}.pdf"'
         else:

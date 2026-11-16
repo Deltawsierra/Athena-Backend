@@ -240,8 +240,8 @@ def test_a_reduction_of_zero_reduces_exactly_nothing(deployment, people):
     assert residual.record["outcomes_sha256"] == current.record["outcomes_sha256"]
     roi = remediation_service.roi_document(current.scenario, residual)
     assert roi["figures"]["expected_reduction"] == "0.00"
-    assert roi["figures"]["tail_reduction"]["p90"]["reduction"] == "0.00"
-    assert roi["figures"]["tail_reduction"]["p95"]["reduction"] == "0.00"
+    assert roi["figures"]["tail_reduction"]["p90"]["difference_of_percentiles"] == "0.00"
+    assert roi["figures"]["tail_reduction"]["p95"]["difference_of_percentiles"] == "0.00"
     # Beside a reduction shown as zero, neither an ROI nor a payback is given (round 1, LOW-1).
     assert roi["figures"]["payback"]["value"] is None
     assert "not above zero" in roi["figures"]["payback"]["not_meaningful"]
@@ -332,9 +332,9 @@ def test_roi_and_payback_arithmetic():
     assert figures["first_year_investment"] == {"low": "200000.00", "base": "200000.00", "high": "200000.00"}
     assert figures["risk_adjusted_roi"]["value"] == "3.0000"
     assert figures["payback"]["value"] == "0.33"
-    assert figures["tail_reduction"]["p90"]["reduction"] == "1750000.00"
+    assert figures["tail_reduction"]["p90"]["difference_of_percentiles"] == "1750000.00"
     # 2,499,999.995 is shown half-even at the cent: 2,500,000.00.
-    assert figures["tail_reduction"]["p95"]["reduction"] == "2500000.00"
+    assert figures["tail_reduction"]["p95"]["difference_of_percentiles"] == "2500000.00"
     assert "not a guaranteed return" in figures["risk_adjusted_roi"]["statement"]
     assert figures["risk_adjusted_roi"]["display_only"] is False
     # Half-even at the last place: a payback of 1/8 year is 0.12, an ROI of 1/8 is 0.1250.
@@ -382,7 +382,7 @@ def test_without_a_frequency_nothing_annual_is_meaningful():
     assert figures["expected_reduction"] is None
     for key in ("risk_adjusted_roi", "payback"):
         assert figures[key]["value"] is None and "no expected annual exposure" in figures[key]["not_meaningful"]
-    assert figures["tail_reduction"]["p95"]["reduction"] is None
+    assert figures["tail_reduction"]["p95"]["difference_of_percentiles"] is None
 
 
 @pytest.mark.parametrize("currency, shown", [("JPY", "600001"), ("KWD", "600000.500"), ("USD", "600000.50")])

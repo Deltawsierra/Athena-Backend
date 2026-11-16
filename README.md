@@ -1425,6 +1425,15 @@ dashboard needs (section 30):
   core will not hold (an amount off the minor unit, a run with no valuation date) is
   still shown, is not a measure, says why, and is a named gap. No amount changed.
 
+  **The report as JSON** (`?output=json`; `mythos.exposure-report/v1`; AT-6b; spec,
+  section 38.3): the same report, as data. It carries every figure as the measure it is
+  (kind, money, period, basis, source), the kinds shown in the core's words, the
+  assumptions as inputs as stated (each as recorded, with the line that says they are
+  not measures), the rule, the period and the basis in words, the input digest of the
+  run shown, every gap under `not_measured`, and its own `sha256:` digest. It is
+  canonical JSON (the same bytes for the same rows), answered `no-store` and `nosniff`,
+  and uses none of the words clean, resolved, secure or safe.
+
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
 stored row it serves is checked first against its digest and its result (a card's
@@ -1469,11 +1478,37 @@ guard of its own, serves ONE remediation option per scenario version and its eco
   acts on kept with probability `1 - r_f` and multiplied by `1 - r_m` -- each with its
   Validity Card, under one 120 s deadline; idempotent; an admin or analyst only;
 - `GET .../economics/scenarios/<scenario uuid>/roi/?simulation=<uuid>`: the ROI
-  document, `mythos.economics.roi/v1`: current and residual expected annual exposure,
+  document, `mythos.economics.roi/v2`: current and residual expected annual exposure,
   the expected reduction, the first-year investment, the risk-adjusted ROI (decision
   support, not a guaranteed return; not meaningful over a zero investment), the payback
-  in years (never negative or infinite), the P90 and P95 tail reduction, utility
-  retained, and the confidence delta between the two runs' cards.
+  in years (never negative or infinite), each run's P90 and P95 and the difference
+  between them, utility retained, and the confidence delta between the two runs' cards.
+
+**What the ROI says it nets** (`mythos.economics.roi/v2`; AT-6b; spec, section 28.11).
+Every amount of money in the ROI document is held as a measure of `mythos_core.measures`
+under `measures`, each with its kind, its money, its period (the valuation day alone)
+and what it rests on (a run's stored inputs with its input digest, or the option's record
+with its digest):
+
+- each run's expected annual exposure, P90 and P95 is a `modeled_exposure` of that run;
+- the expected reduction is a `modeled_exposure`: the current run's mean less the residual
+  run's, two runs that draw the same years, so it is the mean of the paired years'
+  reductions. It is never booked, and never savings realised;
+- the first-year investment is a `remediation_expense`, the core's kind for an expense,
+  and an estimate (`estimate: true`): the cost the option states, not money spent. It
+  rests on the option's record, so it never adds to a booked expense;
+- the ROI and the payback are ratios, not money, so not measures: each sets the modelled
+  reduction against the estimated cost, two kinds that never add or net.
+
+`side_by_side` sets each pair the document compares (current against residual, the
+reduction against the cost, each percentile against the residual run's) beside each other
+with the core's reason they do not add, never a sum or a difference; `nets` says in words
+what each figure nets. v2 is v1 with those three keys and one key renamed: a tail's
+`reduction` (the current run's percentile less the residual run's: a difference of two
+percentiles, not a percentile of the reduction) is `difference_of_percentiles`, its value
+unchanged, and it is not held as a measure. No amount changed. The Dashboard reads
+`tail_reduction.<p>.reduction`: until it reads the new name, its tail rows show that
+figure as not reported.
 
 The ROI document is canonical JSON with its own digest, built from stored rows only,
 each run verified as the report verifies one; where either is Unknown, refused,

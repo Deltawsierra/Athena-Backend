@@ -90,6 +90,16 @@ RESIDUAL_HEADING = "Residual exposure after controls"
 ASSUMPTIONS_HEADING = "Assumptions and their sources"
 #: The section that states what kind of figure each amount is (section 38.2).
 MEASURES_HEADING = "What kind of figure each amount is"
+#: The report's JSON format (section 38.3), served beside the HTML and the PDF.
+JSON_SCHEMA = "mythos.exposure-report/v1"
+#: Every key of the JSON document, in order.
+JSON_FIELDS = ("schema", "deployment", "title", "status", "scenario", "input_digest", "rule", "period", "basis",
+               "kinds", "measures", "assumptions", "not_measured", "digest")
+#: The keys of an assumption, as stated (the JSON document's ``assumptions.inputs``).
+INPUT_FIELDS = ("name", "unit", "currency", "low", "base", "high", "source_type", "evidence_ref", "effective_date",
+                "withheld")
+#: What ``unknown`` means where a figure reads it.
+UNKNOWN_MEANS = "a figure whose kind is not established: not one of the core's kinds, and never shown under one"
 TOTAL_RULE = (
     "the deployment's latest portfolio (section 33), as GET .../economics/portfolio/ serves it: its own figures, "
     "never recomputed here; shown only where the portfolio may be totalled, its stored rows verify, and every "
@@ -404,8 +414,7 @@ def _measures(held: list[em.Figure]) -> list[tuple[str, str]]:
     if unknown:
         # Each reason once: every figure of unknown kind is then listed without it.
         reasons = "; ".join(dict.fromkeys(figure.why for figure in unknown))
-        rows.append((em.UNKNOWN, "a figure whose kind is not established: not one of the core's kinds, and never "
-                                 f"shown under one: {reasons}"))
+        rows.append((em.UNKNOWN, f"{UNKNOWN_MEANS}: {reasons}"))
     rows.append(("Period", em.PERIOD_RULE))
     rows.append(("Basis", em.BASIS_RULE))
     rows.extend(("Side by side, never added", text) for text in _pairs(held))
@@ -420,6 +429,7 @@ def document(deployment) -> dict:
     selected, passed_over = select(deployment)
     gaps: list[str] = list(passed_over)
     held: list[em.Figure] = []
+    scenario, inputs = None, []
     sections = []
     versions = []
     for version in FinancialScenario.objects.filter(deployment=deployment).order_by("id"):
@@ -435,6 +445,8 @@ def document(deployment) -> dict:
     else:
         version, built = selected
         bridge = built["currency_bridge"]
+        scenario = {"uuid": str(version.uuid), "title": version.title, "simulation": built["simulation"]["uuid"],
+                    "input_digest": built["simulation"]["input_digest"]}
         summary_rows += [
             ("Scenario shown", f"{version.title} ({version.uuid})"),
             ("As of", f"{bridge['valuation_date']} ({bridge['valuation_date_from']})"
@@ -472,6 +484,7 @@ def document(deployment) -> dict:
         for name, entry in sorted(built["parameters"].items()):
             if entry.get("withheld"):
                 gaps.append(f"Assumption {name}: figures withheld: {_quoted(entry['withheld'])}")
+            inputs.append({key: name if key == "name" else entry.get(key) for key in INPUT_FIELDS})
             assumptions.append((name, f"low {entry.get('low')}, base {entry.get('base')}, high {entry.get('high')} "
                                 f"{entry.get('currency') or entry.get('unit')}; source {entry.get('source_type')}; "
                                 f"evidence {entry.get('evidence_ref') or 'none named'}; effective "
@@ -490,7 +503,34 @@ def document(deployment) -> dict:
     sections.insert(0, ("Summary", summary_rows))
     sections.append(("What is not measured", [("", gap) for gap in gaps] or [("", "nothing this report covers")]))
     return {"title": f"{TITLE}: {deployment.name}", "status": status, "sections": sections,
-            "measures": em.served(held)}
+            "measures": em.served(held), "deployment": str(deployment.uuid), "scenario": scenario,
+            "assumptions": inputs, "not_measured": list(gaps)}
+
+
+def json_document(served: dict) -> dict:
+    """The report as JSON (``mythos.exposure-report/v1``, section 38.3), from the same
+    document the HTML and the PDF render: every figure as the typed measure it is,
+    the assumptions as inputs as stated, the rule, the period and the basis, the input
+    digest of the run shown, and every gap; with its own digest. Nothing is computed."""
+    shown = served["scenario"]
+    kinds = sorted({entry["kind"] for entry in served["measures"]})
+    document = {
+        "schema": JSON_SCHEMA,
+        "deployment": served["deployment"],
+        "title": served["title"],
+        "status": served["status"],
+        "scenario": None if shown is None else {key: shown[key] for key in ("uuid", "title", "simulation")},
+        "input_digest": None if shown is None else shown["input_digest"],
+        "rule": em.RULE,
+        "period": em.PERIOD_RULE,
+        "basis": em.BASIS_RULE,
+        "kinds": {kind: em.KIND_MEANS.get(kind, UNKNOWN_MEANS) for kind in kinds},
+        "measures": served["measures"],
+        "assumptions": {"statement": em.ASSUMPTIONS_ARE, "inputs": served["assumptions"]},
+        "not_measured": served["not_measured"],
+    }
+    document["digest"] = report.digest_of(document)
+    return document
 
 
 # ------------------------------------------------------------------ rendering: every text escaped
