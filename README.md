@@ -172,6 +172,11 @@ is judged a stop until its response is closed (or, never closed, dropped); the
 last stop to let go collects the young generations, and the collector runs
 again. A hold lasts at most `safety.collection.HOLD_LIMIT` (5 s) without a break,
 so overlapping stops or a response nobody closes cannot switch it off for good.
+The hold never waits, either: under Python 3.12 a collection can run inside the
+hold's own bookkeeping and let an earlier stop's hold go there, so its lock is only
+ever taken if it is free. A stop that finds it busy is served without a hold, and a
+hold let go while it is busy is counted by the next caller
+(`tests/test_no_stop_waits_on_its_own_collector_hold.py`).
 
 ### The failsafe service token
 
@@ -1040,8 +1045,9 @@ the rule that a scope revision reopens an accepted recovery
 (`tests/test_the_scope_words_and_rules_are_mythos_cores.py`). This backend is stricter in
 two things and looser in none: a revision declares only the two kinds it has a record for
 (the core also names `route` and `identity`), and a reason is at most 500 characters (the
-core allows 1000). A stored item whose kind is not one of the core's reads as the core
-reads it: the scope is unreadable, never smaller.
+core allows 1000). A refused reason carries the core's code: `reason_required` when it is
+missing or blank, `malformed` otherwise. A stored item whose kind is not one of the core's
+reads as the core reads it: the scope is unreadable, never smaller.
 Append-only, as every history is (`assurance/append_only.py`); on no stop path, and read
 by no decision.
 
