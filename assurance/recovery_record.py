@@ -65,10 +65,12 @@ contract, the closure evidence -- is vouched for by the named person who recorde
 that linked it, with that step's time (``actor``, ``stated_at``): carried from the step
 before when it linked the same record and named its person, else this step's recorder. A
 coverage look that names an added scope item is vouched for by whoever posted the manifest.
-The owner's acceptance is no support entry: it is the acceptance. A witness that nobody can
+The owner's acceptance is no support entry: it is the acceptance. Every step :func:`record`
+writes names who recorded it (``recorded_by_required`` otherwise). A witness that nobody can
 be named for is not a support: it is a gap, ``support:<condition>:<kind>:<ref>``, with what
 would close it. A row recorded before SP-4 names no voucher, and every read reads each of
-its witnesses as such a gap: what the core says an unknown voucher is.
+its witnesses as such a gap: what the core says an unknown voucher is; a stored step with
+no recorder reads its person-vouched witnesses so too, and never raises.
 
 **Names, not prose.** A posted restriction or gap is a name or a pointer in the core's
 grammar (ASCII letters, digits and ``._:/+-``, at most 200): free text is refused
@@ -1008,9 +1010,10 @@ def draft(finding, *, version, links, coverage=None, accepted_by=None, accepted_
 
 def record(finding, *, by=None, body=None, accept_until=None) -> list:
     """Record the steps of ``finding``'s recovery that what ``body`` links now supports,
-    one row per step, and return them. ``accept_until`` is the owner's acceptance, given
-    by ``by``, which must be the deployment's owner. Refused, with nothing recorded, when
-    nothing moves or a link or the acceptance is refused."""
+    one row per step, recorded by ``by``, and return them. ``accept_until`` is the owner's
+    acceptance, given by ``by``, which must be the deployment's owner. Refused, with nothing
+    recorded, when nobody records it (``recorded_by_required``), nothing moves, or a link
+    or the acceptance is refused."""
     from .models import RecoveryRecord
 
     now = timezone.now()
@@ -1035,6 +1038,11 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
             raise RecoveryRefused("not_the_owner", "only the deployment's owner accepts its recovery")
         if accept_until <= now:
             raise RecoveryRefused("acceptance_ended", "an acceptance names an end in the future")
+    # A step names who recorded it (SPINE SP-4): that person vouches for every witness the
+    # step links that no engine signed, at the step's time. The route always names the
+    # signed-in person; nothing records a step for nobody.
+    if by is None:
+        raise RecoveryRefused("recorded_by_required", "a recovery step names who recorded it: the signed-in person")
     links, coverage = resolve(finding, body, previous, now, by=by)
     steps = []
     try:

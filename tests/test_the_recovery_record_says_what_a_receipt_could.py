@@ -211,9 +211,18 @@ def _scenarios(monkeypatch) -> dict:
     _accepted_under(finding, primary)
     declare_scope(finding, primary, scopes.asset(finding.deployment, "backup-route"))
 
-    out["recorded by nobody"] = finding = _incident("nobody")
-    rr.record(finding)
+    out["stored with no recorder"] = finding = _incident("nobody")
+    _stored_with_no_recorder(finding)
     return out
+
+
+def _stored_with_no_recorder(finding, body=None):
+    """A step stored with no recorder: ``record`` refuses one, so only a row written before
+    that refusal, or drafted directly, can be one. Saved through every check of the model."""
+    links, coverage = rr.resolve(finding, body)
+    row = rr.draft(finding, version=1, links=links, coverage=coverage)
+    row.save()
+    return row
 
 
 def _accepted_under(finding, *records):
@@ -452,10 +461,24 @@ def test_a_carried_witness_keeps_the_person_and_the_time_of_the_step_that_linked
     assert accepted.release == st.PASS
 
 
+def test_a_step_names_who_recorded_it_and_record_refuses_one_for_nobody():
+    finding = _incident()
+    for asked in ({}, {"body": {"permits": [_permit(finding.deployment)]}}):
+        with pytest.raises(rr.RecoveryRefused) as refused:
+            rr.record(finding, **asked)
+        assert refused.value.code == "recorded_by_required"
+    assert _history(finding) == []
+    owner = finding.deployment.owner
+    (step,) = rr.record(finding, by=owner)
+    assert (step.recorded_by, step.recorded_by_ref, step.gaps) == (owner, f"user:{owner.pk}", [])
+
+
 def test_a_witness_nobody_can_be_named_for_is_a_gap_with_what_would_close_it():
+    """A stored step with no recorder still reads, never raises, and names each witness no
+    person vouches for as a gap, with what would close it."""
     finding = _incident()
     permit = _permit(finding.deployment)
-    (step,) = rr.record(finding, body={"permits": [permit]})
+    step = _stored_with_no_recorder(finding, {"permits": [permit]})
     unvouched = f"support:incident_recorded:finding:{finding.uuid}"
     assert step.gaps == [unvouched] and step.release == st.FAIL
     # A signed record needs no person: the engine and its key vouch for it.
@@ -787,9 +810,9 @@ def test_a_receipt_of_each_step_is_one_the_core_takes_and_says_what_the_record_s
                 held_back_from=row.held_back_from or None, scope_revision=row.scope_revision, ref=f"rr-{row.version}",
             )
             if not row.support:
-                # Nobody vouches for anything the step rests on (recorded by nobody, which no
-                # route allows, and linking no signed record): the core takes no receipt of
-                # it, and says why. Every witness is named among its gaps.
+                # Nobody vouches for anything the step rests on (stored with no recorder,
+                # which record() refuses, and linking no signed record): the core takes no
+                # receipt of it, and says why. Every witness is named among its gaps.
                 with pytest.raises(core.RecoveryReceiptError) as refused:
                     _receipt(finding, row, **then)
                 assert refused.value.code == core.CONDITIONS_REQUIRED, name

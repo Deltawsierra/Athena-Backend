@@ -1109,7 +1109,8 @@ receipt could not (migration `assurance.0088`: five nullable fields, no row writ
   standing is one of the core's five, in the core's order). The row is not rewritten.
 - **Who vouches for every witness** (`support`, the core's entry shape): the engine and
   its key for a permit or a receipt; otherwise the named person who recorded the step that
-  linked it, with that step's time (`user:<id>`). Nobody nameable is a gap
+  linked it, with that step's time (`user:<id>`). Every step names who recorded it
+  (`recorded_by_required` otherwise). Nobody nameable is a gap
   (`support:<condition>:<kind>:<ref>`) with what would close it (`gaps_named`, the core's
   `voucher_words`); each sentence a reader prints is the core's `support_sentence`. A row
   from before 0088 names no voucher, and reads every witness as such a gap.
