@@ -389,6 +389,17 @@ def test_a_stored_row_is_in_force_only_as_what_its_digest_names():
             assert recipients == document["dispatch"]["verified"]["approval_recipients"]
         else:
             assert recipients is None, name
+    # A version 5 row whose document holds a plain digest is no document, whatever its
+    # digest column says: the read asks the core too, not only the intake.
+    v5 = _vector("observed-effect-v5.json")
+    plain = {**copy.deepcopy(v5["evidence"]), "action_ref": v5["inputs"]["action_digest"]}
+    row = Row(
+        effect_evidence=plain,
+        evidence_digest=oc.evidence_digest_of(plain),
+        workflow=plain["workflow"],
+        effect_dispatch_id=plain["dispatch_id"],
+    )
+    assert observed_effects.evidence_in_force(row, plain["deployment"]) is None
 
 
 # ------------------------------------------------------------------- the intake's bound
