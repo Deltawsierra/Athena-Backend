@@ -4774,7 +4774,7 @@ every family leaves a residual expected annual loss of 0.
 
 ### 28.3 The economics
 
-`GET .../roi/` serves the ROI document (`mythos.economics.roi/v1`), from stored rows
+`GET .../roi/` serves the ROI document (`mythos.economics.roi/v2` since AT-6b, section 28.11), from stored rows
 only, of the option and one residual run (`?simulation=<uuid>`, else its latest) paired
 with its current run. Every figure is read at full precision from the two runs' records
 (the result digest covers them) on their headline line -- retained cash under a policy,
@@ -4787,7 +4787,7 @@ else gross cash, as the card and the receipt read it -- and computed once:
 | `first_year_investment` | implementation plus one year of recurring cost, at low, base and high |
 | `risk_adjusted_roi` | the expected reduction over the first-year investment at base, to 4 places; labelled decision support from modelled exposure, not a guaranteed return; `null` with the reason where the investment is 0 |
 | `payback` | the first-year investment at base over the expected annual reduction, in years, to 2 places; `null` with the reason where the reduction is not above zero: never a negative or infinite payback |
-| `tail_reduction` | the change in P90 and in P95 (the severe-but-plausible percentile, where the run's is 95) of annual loss |
+| `tail_reduction` | each run's P90 and P95 (the severe-but-plausible percentile, where the run's is 95) of annual loss, and `difference_of_percentiles`: the current run's less the residual run's (v1 named it `reduction`; section 28.11) |
 | `utility_retained` | `retained` or `broken` from a cited retest's replay (legitimate use, and every behaviour its repair contract preserves); otherwise `unknown`, with the reason |
 | `confidence_delta` | the residual card's grade against the current card's, each as its card document states it where it verifies (section 27.5): `improved`, `unchanged`, `worsened`, or `not_comparable` with the reason |
 
@@ -5010,6 +5010,40 @@ service transaction only inserts, after its run.
     MEDIUM-1). Alternative: serve its report too, marked residual.
 15. **The simulate route issues each run's Validity Card, not its chart series**: the
     ROI reads the grade only. Alternative: issue the series too, as step 6's simulate.
+
+### 28.11 What the ROI nets (AT-6b)
+
+`mythos.economics.roi/v2`. Every amount of money the ROI document serves is held as a
+measure of `mythos_core.measures` (`assurance/economics/roi_measures.py`), listed under
+`measures` with its kind, money, period and basis, or with the reason it is not one; a
+cost estimate says `estimate: true`.
+
+| Figure | Kind | Rests on |
+|---|---|---|
+| each run's expected annual exposure, P90, P95 | `modeled_exposure` | that run's stored inputs and input digest |
+| `expected_reduction` | `modeled_exposure`; never booked, never savings realised | the residual run's stored inputs (they hold the current run's) |
+| `first_year_investment` (low, base, high) | `remediation_expense`, an estimate | the option's record and digest |
+| `tail_reduction.<p>.difference_of_percentiles` | not a measure: a difference of two percentiles | -- |
+| `risk_adjusted_roi`, `payback` | not money, not measures: ratios of two kinds | -- |
+
+- **What it nets.** The expected reduction nets the current run's mean against the
+  residual run's. The two runs draw the same years (one seed, the same streams; the
+  `current_pairing` check), so the difference of their means is the mean of the paired
+  years' reductions: a modelled figure of that pair of runs. A difference of two
+  percentiles is not a percentile of the reduction; it is kept, renamed, and the two
+  percentiles stand side by side. The ROI and the payback set the modelled reduction
+  against the estimated cost: two kinds, which never add or net.
+- **Side by side.** `side_by_side` lists each pair the document compares, as
+  `mythos_core.measures.side_by_side`, with the core's reason they do not add
+  (`modeled_with_modeled`, `modeled_with_booked`); `nets` says what each figure nets.
+- **The period and the basis.** Every figure is for the valuation day alone, as in
+  section 38.2. An estimated cost rests on the option's record, so the core never adds it
+  to a booked expense (`basis_mismatch`).
+- **The format change.** v2 is v1 with `measures`, `side_by_side` and `nets`, and one key
+  renamed: `tail_reduction.<p>.reduction` is `difference_of_percentiles`, its value
+  unchanged. `ROI_SCHEMAS` lists both. The document is built on read and never stored,
+  so nothing reads a v1 document back. Athena-Dashboard reads the old key: until it reads
+  the new one, its tail rows show that figure as not reported. No amount changed.
 
 ## 29. The live feeds (MVP step 10)
 
@@ -9175,3 +9209,75 @@ states it: the deployment's latest portfolio (section 33), as GET .../economics/
   route, access rules, escaping and headers; reading it writes no row, runs no engine
   and signs nothing. A portfolio that will not import leaves the total unmeasured and
   the rest of the report served.
+
+### 38.2 Every figure says what kind it is
+
+Roadmap AT-6. A confirmed loss, a remediation expense, deferred revenue, a modelled
+exposure, insurance promised and received, funds frozen and returned are different
+things, and a report that adds them, or shows one under another's name, misleads the
+person it is handed to. Mythos-Core holds the types (`mythos_core.measures`,
+Mythos-Core #66); the report holds every figure of loss or exposure it shows as one of them
+(`assurance/economics/exposure_measures.py`). The rule, as the report states it: every figure of loss or exposure in this report is held as a measure of mythos_core.measures: its kind, its money in one currency at the minor unit, the period it is for and the snapshot it rests on. Figures of two kinds are never added, nor figures in two currencies, at any rate; a modelled exposure is never added to any figure, another modelled exposure included: a total of modelled exposures is a model run's own to state. A figure whose kind is not established reads unknown, with the reason, and is never shown under a default kind.
+
+| Kind | What it means, in the core's words |
+|---|---|
+| `confirmed_loss` | value lost, as the one who lost it confirms it |
+| `remediation_expense` | money spent responding and restoring: incident and exceptional costs, as booked |
+| `revenue_deferral` | revenue the incident delayed or held back: deferred, which is not lost |
+| `modeled_exposure` | a figure a model computed for a scenario: never booked, and never added to another |
+| `insurance_promised` | cover stated, committed or claimed, and not yet paid |
+| `insurance_received` | insurance money actually received |
+| `funds_frozen` | assets held where they are, and not yet returned |
+| `funds_returned` | assets actually returned to those they were taken from |
+
+- **What the report's figures are.** Every amount of a scenario run, of a residual
+  run and of the deployment total is a statistic of a simulated distribution (an
+  expected annual loss, a percentile, an expected shortfall): `modeled_exposure`. No
+  row of economics records a booked figure, so no figure of the report is a
+  `confirmed_loss` or any other booked kind, and none is labelled one.
+- **A measure, built through the core.** Kind; money (`Money`: the amount the report
+  prints, a `Decimal` at the currency's minor unit, in one reportable currency); period
+  (`Period`); basis (`SourceReference`: `simulation-inputs:<run>` or
+  `portfolio-inputs:<portfolio>` with the run's input digest, which the integrity
+  checks hold the stored rows to); source (the run's report, `<schema>:<run>`). The
+  period, as the report states it: a modelled figure is for its valuation day alone, first and last day the same: a simulated year is not a calendar year, and the stored rows state no other day for it. The basis, as it states it: a modelled figure rests on the stored inputs of the model run that computed it (simulation-inputs for a scenario's run, portfolio-inputs for the portfolio's), named by that run's id, with that run's input digest, which the integrity checks hold the stored rows to.
+- **Nothing is typed by default.** A figure the core refuses (an amount off the minor
+  unit, a currency it does not report, a digest that is not one) or one whose run has
+  no valuation date is still shown, to the last minor unit, is not a measure, says
+  why, and is named under "What is not measured". A figure whose kind cannot be
+  established reads `unknown`, with the reason, and is never a measure (no figure of
+  the report reaches this today).
+- **An assumption is not a measure** (the lead's ruling, 16 Nov 2026). A parameter the
+  run reads (in money, or in money per unit, per hour or per year) is an input as
+  someone stated it, not a figure of loss or exposure, and its nature is known: it is
+  not `unknown`. It is listed where the report lists its assumptions, its numbers as
+  recorded, under one line: "inputs the model reads, as the customer, an expert, a benchmark or an observation states them: not measures of loss or exposure; each is shown as recorded, with no kind, and is never added to any figure". It has no kind and is no
+  gap. An insurance limit is a policy term, not `insurance_promised`.
+- **Totals go through the core.** The one place the report may add figures is
+  `exposure_measures.total`, which is `mythos_core.measures.total`: it refuses two
+  kinds, two currencies and any two modelled exposures (`MeasuresDoNotAdd`). The
+  report adds no two figures. Where it sets two beside each other -- gross and net,
+  cash and market value, the exposure and its residual, the scenario and the
+  deployment total -- they are a `SideBySide` and the report gives the core's reason
+  they do not add.
+- **The deployment total (section 38.1) is unchanged**: the portfolio's own figure,
+  now typed, resting on the portfolio's inputs. The report asks the core whether the
+  scenarios' own figures add, is refused (`modeled_with_modeled`), and says so.
+- **Additive.** Every row the report had is there, text for text; the kind rows and
+  the section "What kind of figure each amount is" are new. The document has no format
+  name or version, and none is added. No amount changed, and no signed receipt, run
+  report or portfolio document is touched: `mythos.financial-exposure-receipt/v1`
+  cannot carry measures (the core's own note), and nothing here writes one.
+
+### 38.3 The report as JSON (AT-6b)
+
+`GET .../exposure-report/?output=json` serves the same document the HTML and the PDF
+render, as `mythos.economics.exposure-report/v1` (named as every format economics serves is,
+`mythos.economics.<thing>/v<n>`, as `mythos.economics.roi/v2`): canonical JSON with its own `sha256:` digest,
+answered `no-store` and `nosniff`. Its keys, in order: `schema`, `deployment`, `title`,
+`status`, `scenario` (the version shown and its run, or `null`), `input_digest` (of that
+run), `rule`, `period`, `basis`, `kinds` (each kind shown, in the core's words),
+`measures` (every figure as the measure it is, or why it is not one), `assumptions` (the
+statement "inputs the model reads, as the customer, an expert, a benchmark or an observation states them: not measures of loss or exposure; each is shown as recorded, with no kind, and is never added to any figure", and each input as recorded), `not_measured` (every gap)
+and `digest`. It computes nothing, and uses none of the words clean, resolved, secure or
+safe. `tests/test_the_exposure_report_has_a_json_format.py` holds the schema.

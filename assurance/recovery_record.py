@@ -47,10 +47,48 @@ that no other state can follow is reopened to ``under_investigation``, naming it
 **Coverage.** A declared gap, a source not fully observed, unknown inventory or no
 required source at all (``coverage.coverage_ratio``) holds back both recovered states,
 ``restored_with_restrictions`` and ``recovery_accepted``: a gap never yields one. A step
-held back that way names each gap among its ``gaps``, and its release is
-``coverage.release_given_coverage(manifest, PASS)``: ``AUDIT_INCOMPLETE``. Otherwise the
-release is ``PASS`` only for ``recovery_accepted`` (``status.release_may_pass``) and
-``FAIL`` for every other state.
+held back that way names each gap among its ``gaps`` and the recovered state it is held
+back from (``held_back_from``: the furthest one its witnesses support but for the holds).
+
+**The release is the core's** (SPINE SP-4, ``mythos_core.recovery_receipt``, Mythos-Core#82):
+``release_status(state, gap, held_back_from, acceptance_carries)``, the one rule a recovery
+receipt is computed with, so the record and a receipt of it cannot disagree. ``PASS`` only
+for ``recovery_accepted`` whose acceptance carries, with no gap; ``AUDIT_INCOMPLETE`` for an
+accepted step with a gap or for any step held back; ``FAIL`` for every other. A gap holds a
+pass back, whatever it is. Every read computes the release the same way, from what it
+serves, and no rule of this module computes one.
+
+**Who vouches for each witness** (``support``, the core's support entries). A permit and a
+receipt are signed records: the engine whose key signed it, and the key's id
+(``engine``, ``key_id``). Every other witness -- the finding, its evidence, the repair
+contract, the closure evidence -- is vouched for by the named person who recorded the step
+that linked it, with that step's time (``actor``, ``stated_at``): carried from the step
+before when it linked the same record and named its person, else this step's recorder. A
+coverage look that names an added scope item is vouched for by whoever posted the manifest.
+The owner's acceptance is no support entry: it is the acceptance. Every step :func:`record`
+writes names who recorded it (``recorded_by_required`` otherwise). A witness that nobody can
+be named for is not a support: it is a gap, ``support:<condition>:<kind>:<ref>``, with what
+would close it. A row recorded before SP-4 names no voucher, and every read reads each of
+its witnesses as such a gap: what the core says an unknown voucher is; a stored step with
+no recorder reads its person-vouched witnesses so too, and never raises.
+
+**Names, not prose.** A posted restriction or gap is a name or a pointer in the core's
+grammar (ASCII letters, digits and ``._:/+-``, at most 200): free text is refused
+(``not_a_name``), and a statement with its sources belongs in ``residual_uncertainty``. A
+posted gap spelled as one this record derives is refused (``not_posted``). A stored one
+that is not a name (only a row from before SP-4 can hold one) is shown as it is and named
+among the gaps by a pointer, ``unnamed:restriction:<i>`` or ``unnamed:gap:<i>``. Each
+person is a reference, ``user:<id>`` (``recorded_by_ref``, ``accepted_by_ref``), kept beside
+the account's key so it outlives the account's removal.
+
+**An acceptance ends.** A step is accepted until ``accepted_until``. Every read compares the
+reader's own instant with it, as it compares the incident's current scope with the step's:
+an accepted step whose acceptance has ended by then is served at the last state before it
+that was not a recovered one, held back from nothing, its release computed (``FAIL``), and
+its standing is the core's word for it, ``acceptance_ended``. The row is history and is not
+rewritten. Each step's ``standing`` is the core's word for how it stands now, decided in the
+core's order: ``superseded`` (a later step is the latest), ``acceptance_ended``, ``unknown``
+(the scope is behind the step), ``scope_moved`` (a revision since) or ``current``.
 
 **Scope (SPINE SP-3).** Each step names the revision of the incident's scope it was
 derived under (``scope_revision``; :mod:`assurance.incident_scope`), and a recovered state
@@ -123,7 +161,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -141,6 +179,51 @@ EFFECT_NOT_APPLIED = "effect_not_applied"
 REPAIR_AGREED = "repair_agreed"
 REPAIR_TESTED = "repair_tested"
 OWNER_ACCEPTED = "owner_accepted"
+#: The condition a link that names an item a scope revision added supports
+#: (:func:`scope_items`' ``covered_by``): it is a witness too, and someone vouches for it.
+SCOPE_ITEM_NAMED = "scope_item_named"
+
+#: The first part of each gap this record derives and nobody posts: a witness nobody can be
+#: named for, a stored value that is not a name, a coverage hold, a blocker. (The scope holds
+#: are the core's spelling and are told apart by the core, ``core_scope.is_scope_hold``.)
+SUPPORT, UNNAMED, COVERAGE_HOLD = "support", "unnamed", "coverage"
+#: The kinds of witness an engine's key signs; every other kind is vouched for by a person.
+SIGNED_KINDS = ("permit", "receipt")
+
+
+def _receipt():
+    """``mythos_core.recovery_receipt`` (Mythos-Core#82): the release rule, the standings,
+    the words a reader prints for a support entry and for what would close a gap. Read at
+    first use, never with this module, as :mod:`assurance.effect_reconciliation` reads the
+    observed-effect record: the URL conf, which a stop's request may load first, loads
+    nothing of a receipt. It is data and pure functions: no clock, file, key or network."""
+    from mythos_core import recovery_receipt
+
+    return recovery_receipt
+
+
+def is_name(value) -> bool:
+    """Whether ``value`` is a name or an opaque pointer in the core's one grammar (ASCII
+    letters, digits and ``._:/+-``, at most 200, starting with a letter or a digit): what a
+    receipt takes for a restriction, a gap, a reference. ``mythos_core.evidence_record``
+    offers no public check for it, so this reads its pattern, as the core's own
+    ``recovery_receipt``, ``provenance`` and ``measures`` do."""
+    from mythos_core.evidence_record import _NAME
+
+    return type(value) is str and _NAME.fullmatch(value) is not None
+
+
+def instant(value) -> str | None:
+    """``value`` (an aware datetime, or an ISO 8601 text with its offset, as the links keep
+    one) in the core's one form, ``YYYY-MM-DDTHH:MM:SS.ffffffZ``; None when it cannot be
+    read."""
+    try:
+        when = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        if when.tzinfo is None:
+            return None
+        return when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 #: The conditions every step names, and those each state rests on besides.
 _BASE = (INCIDENT_RECORDED, EVIDENCE_LINKED, EFFECT_PERMITTED)
@@ -184,6 +267,47 @@ def _list(value, what: str, pattern=None, longest: int = 200) -> list[str]:
     if len(set(value)) != len(value):
         raise RecoveryRefused("malformed", f"{what} names each one once")
     return list(value)
+
+
+def _derives(gap: str) -> bool:
+    """Whether ``gap`` is spelled as a gap this record derives: a scope hold (or anything
+    the core's scope prefix begins), a witness nobody vouches for, a pointer to a value
+    that is not a name, a coverage hold or a blocker."""
+    family = gap.split(":", 1)[0]
+    scope_prefix = core_scope.NOT_DECLARED.split(":", 1)[0]
+    return core_scope.is_scope_hold(gap) or family in (scope_prefix, SUPPORT, UNNAMED, COVERAGE_HOLD, EFFECT_NOT_APPLIED)
+
+
+def _named(value: list[str], what: str) -> list[str]:
+    """``value``, the posted ``restrictions`` or ``gaps``, each a name or a pointer in the
+    core's grammar (:func:`is_name`), refused with the core's code when one is free text.
+    A posted gap spelled as one this record derives is refused too: it is derived, never
+    posted. The refusal never repeats what it refused."""
+    for item in value:
+        if not is_name(item):
+            raise RecoveryRefused(
+                _receipt().NOT_A_NAME,
+                f"each of {what} is a name or a pointer (ASCII letters, digits and ._:/+-, at most 200, starting "
+                "with a letter or a digit), and one is free text: a statement with its sources is posted as "
+                "residual_uncertainty",
+            )
+        if what == "gaps" and _derives(item):
+            raise RecoveryRefused(
+                "not_posted",
+                "a gap spelled as one the record derives (a scope or coverage hold, a blocker, a witness nobody "
+                "vouches for, a value that is not a name) is derived from what the step rests on, never posted",
+            )
+    return value
+
+
+def _posted_or_carried(value, what: str, *, posted: bool) -> list[str]:
+    return _named(_list(value, what), what) if posted else _list(value, what)
+
+
+def person_ref(user_id) -> str:
+    """The reference a person is named by on this record, ``user:<id>``; ``""`` for nobody
+    (:func:`assurance.incident_scope.person_ref`, the one spelling)."""
+    return incident_scope.person_ref(user_id)
 
 
 def _scope(finding) -> str:
@@ -241,10 +365,14 @@ def _coverage_holds(manifest: cov.Manifest) -> tuple[list[str], bool]:
 # ------------------------------------------------------------------ the links
 
 
-def resolve(finding, body=None, previous=None, now=None) -> tuple[dict, dict]:
-    """``(links, coverage)`` for a step of ``finding``'s recovery: what ``body`` posts,
-    with what it leaves out carried from ``previous``, each resolved in the finding's own
-    deployment. Refuses a link that is another deployment's, or does not verify now."""
+def resolve(finding, body=None, previous=None, now=None, by=None) -> tuple[dict, dict]:
+    """``(links, coverage)`` for a step of ``finding``'s recovery recorded by ``by``: what
+    ``body`` posts, with what it leaves out carried from ``previous``, each resolved in the
+    finding's own deployment. Refuses a link that is another deployment's, or does not
+    verify now, and a posted restriction or gap that is not a name (:func:`_named`).
+
+    Each permit and receipt keeps the engine whose key signed it and the key's id, as they
+    verified now; the coverage manifest keeps when and by whom it was posted."""
     from .models import (
         DecisionTransition,
         EffectReconciliationReceipt,
@@ -310,7 +438,11 @@ def resolve(finding, body=None, previous=None, now=None) -> tuple[dict, dict]:
             raise RecoveryRefused(
                 "not_a_permit", f"permit {one} is not a signed Action Gate decision that permitted, verified now"
             )
-        permits.append({"outcome_id": one, "workflow": outcome.workflow})
+        # Who vouches for it: the engine the signed outcome is bound to, and its key.
+        permits.append(
+            {"outcome_id": one, "workflow": outcome.workflow, "engine": outcome.observer_engine or None,
+             "key_id": outcome.observer_key_id or None}
+        )
 
     receipt_ids = _list(given["receipts"], "receipts", _ID)
     rows = {
@@ -328,9 +460,12 @@ def resolve(finding, body=None, previous=None, now=None) -> tuple[dict, dict]:
             raise RecoveryRefused(
                 "unpermitted_receipt", f"receipt {one} reads back gate decision {row.gate_outcome_id}, not a linked permit"
             )
+        # Who vouches for it: the key it verified under now, and that key's engine.
+        signer = keyring.get(row.observer_key_id) if hasattr(keyring, "get") else None
         receipts.append(
             {"receipt_id": one, "dispatch_id": row.dispatch_id, "gate_outcome_id": row.gate_outcome_id,
-             "conclusion": row.conclusion}
+             "conclusion": row.conclusion, "engine": getattr(signer, "engine", None) or None,
+             "key_id": row.observer_key_id or None}
         )
 
     contract = RepairContract.objects.filter(finding_id=finding.pk).order_by("-version").first()
@@ -360,13 +495,19 @@ def resolve(finding, body=None, previous=None, now=None) -> tuple[dict, dict]:
             "uuid": str(closure.uuid), "carries_closure": not retest_closure.refusal_reasons(finding),
         },
         "unknowns": unknowns,
-        "gaps": _list(given["gaps"], "gaps"),
-        "restrictions": _list(given["restrictions"], "restrictions"),
+        # A posted list is names (_named); one carried from the step before is kept as it
+        # was recorded, and a value in it that is not a name is named by a pointer.
+        "gaps": _posted_or_carried(given["gaps"], "gaps", posted="gaps" in body),
+        "restrictions": _posted_or_carried(given["restrictions"], "restrictions", posted="restrictions" in body),
         "uncertainty": _uncertainty(given["residual_uncertainty"], sources),
-        # When the step's coverage manifest was posted, by the server's clock: now for
-        # one posted with this step, as carried for one carried from the step before.
+        # When the step's coverage manifest was posted, by the server's clock, and by whom:
+        # now and this step's recorder for one posted with this step, as carried for one
+        # carried from the step before.
         "coverage_recorded_at": (now or timezone.now()).isoformat() if "coverage" in body else before.get(
             "coverage_recorded_at"
+        ),
+        "coverage_recorded_by": person_ref(getattr(by, "pk", None)) if "coverage" in body else before.get(
+            "coverage_recorded_by"
         ),
     }
     data = body["coverage"] if "coverage" in body else (previous.coverage if previous is not None else None)
@@ -533,15 +674,167 @@ def lapsed(row, revisions) -> list[str]:
     return scope_holds_of(row.scope_revision, revisions, row.links, manifest_of(row.finding, row.coverage))
 
 
+# ------------------------------------------------- who vouches, names, the release
+
+
+def _witnesses(conditions, items) -> list[tuple[str, str, str]]:
+    """Every ``(condition, kind, ref)`` a step rests on that someone must vouch for, each
+    once: each condition's witness but the owner's acceptance (which is the acceptance, not
+    a support), and each link that names an item the scope gained (``scope_item_named``)."""
+    named = [
+        (SCOPE_ITEM_NAMED, link.get("kind"), link.get("ref"))
+        for item in ((items or {}).get("added") or ()) if isinstance(item, dict)
+        for link in (item.get("covered_by") or ()) if isinstance(link, dict)
+    ]
+    return list(dict.fromkeys((
+        *(
+            (c["condition"], c["witness"]["kind"], c["witness"]["ref"])
+            for c in conditions if c["condition"] != OWNER_ACCEPTED
+        ),
+        *named,
+    )))
+
+
+def _support_gap(condition, kind, ref) -> str:
+    """The gap a witness nobody can be named for leaves."""
+    return f"{SUPPORT}:{condition}:{kind}:{ref}"
+
+
+def _entry(condition, kind, ref, voucher: dict) -> dict | None:
+    """One support entry in the core's shape, or None when the core would not take it as
+    one (it refuses an entry whose voucher is a placeholder, a word of reassurance, a key
+    id it cannot read or an instant it cannot read): such a witness is a gap."""
+    core = _receipt()
+    entry = {"condition": condition, "kind": kind, "ref": ref, **voucher}
+    try:
+        core.support_sentence(entry)
+    except core.RecoveryReceiptError:
+        return None
+    return entry
+
+
+def support_of(conditions, links: dict, items, *, recorded_by: str, recorded_at, previous) -> tuple[list, list]:
+    """``(support, gaps)``: who vouches for each witness of a step (:func:`_witnesses`),
+    each in the core's support-entry shape and in its one order, and the gap each witness
+    nobody can be named for leaves.
+
+    - A permit or a receipt: the engine whose key signed it and the key's id, as the link
+      keeps them (:func:`resolve`).
+    - A coverage look that names an added item: whoever posted the manifest, when.
+    - Every other witness: the named person who recorded the step that linked it, with
+      that step's time -- carried from ``previous`` when it linked the same record and
+      named its person, else ``recorded_by`` (``user:<id>``, blank for nobody) at
+      ``recorded_at``.
+
+    Pure."""
+    carried = {}
+    for entry in getattr(previous, "support", None) or ():
+        if isinstance(entry, dict) and _receipt().ACTOR in entry and type(entry.get("kind")) is type(entry.get("ref")) is str:
+            carried.setdefault((entry["kind"], entry["ref"]), entry)
+    signed = {
+        **{("permit", p.get("outcome_id")): p for p in links.get("permits", ()) if isinstance(p, dict)},
+        **{("receipt", r.get("receipt_id")): r for r in links.get("receipts", ()) if isinstance(r, dict)},
+    }
+    actor, engine = _receipt().ACTOR, _receipt().ENGINE
+    support, gaps = [], []
+    for condition, kind, ref in _witnesses(conditions, items):
+        if kind in SIGNED_KINDS:
+            link = signed.get((kind, ref)) or {}
+            voucher = {engine: link.get("engine"), "key_id": link.get("key_id")} if link.get("engine") else None
+        elif kind == COVERAGE:
+            by, at = links.get("coverage_recorded_by"), instant(links.get("coverage_recorded_at"))
+            voucher = {actor: by, "stated_at": at} if by and at else None
+        elif (kind, ref) in carried:
+            voucher = {actor: carried[(kind, ref)][actor], "stated_at": carried[(kind, ref)].get("stated_at")}
+        else:
+            at = instant(recorded_at)
+            voucher = {actor: recorded_by, "stated_at": at} if recorded_by and at else None
+        entry = None if voucher is None else _entry(condition, kind, ref, voucher)
+        if entry is None:
+            gaps.append(_support_gap(condition, kind, ref))
+        else:
+            support.append(entry)
+    support.sort(key=lambda e: (e["condition"], e["kind"], e["ref"]))
+    return support, gaps
+
+
+def unnamed(gaps, restrictions) -> list[str]:
+    """A pointer for each of ``gaps`` and ``restrictions`` that is not a name
+    (:func:`is_name`): ``unnamed:gap:<i>``, ``unnamed:restriction:<i>``, ``i`` its place in
+    its list. Free text stays as it was recorded; the pointer is how a receipt can name it.
+    A pointer is itself a name, so asking again of a list that holds one adds nothing."""
+    return [
+        *(f"{UNNAMED}:gap:{i}" for i, gap in enumerate(gaps) if not is_name(gap)),
+        *(f"{UNNAMED}:restriction:{i}" for i, one in enumerate(restrictions) if not is_name(one)),
+    ]
+
+
+def _added_kind(gap: str) -> str | None:
+    """The kind of item an added-item scope hold names, read back through the core's own
+    spelling (``core_scope.gap``); None for any other gap."""
+    parts = gap.split(":", 5)
+    try:
+        return parts[4] if len(parts) == 6 and core_scope.gap(int(parts[2]), parts[4], parts[5]) == gap else None
+    except (core_scope.ScopeError, ValueError):
+        return None
+
+
+def would_close(gap: str) -> list[dict]:
+    """What would close ``gap``: each kind of record, and whether an engine must sign it or
+    a named person state it (``voucher``), with the words every reader prints for that
+    (``voucher_words``, the core's). Never empty."""
+    core = _receipt()
+    engine, actor = core.ENGINE, core.ACTOR
+    family = gap.split(":", 1)[0]
+    if gap in (core_scope.NOT_DECLARED, core_scope.UNREADABLE):
+        closers = [("scope_revision", actor)]
+    elif core_scope.is_scope_hold(gap):
+        kind = _added_kind(gap)
+        closers = {
+            core_scope.ASSET: [(COVERAGE, actor), (EVIDENCE, actor)],
+            core_scope.WORKFLOW: [(PERMIT, engine)],
+        }.get(kind, [("scope_revision", actor)])
+    elif family == COVERAGE_HOLD:
+        closers = [(COVERAGE, actor)]
+    elif family == EFFECT_NOT_APPLIED:
+        closers = [("receipt", engine)]
+    elif family == SUPPORT and len(gap.split(":")) >= 4:
+        kind = gap.split(":")[2]
+        closers = [(kind, engine if kind in SIGNED_KINDS else actor)]
+    else:
+        # A posted gap, or a pointer to a value that is not a name: a later step, recorded
+        # by a named person, that no longer lists it or names it.
+        closers = [("recovery_step", actor)]
+    return [{"kind": kind, "voucher": voucher, "voucher_words": core.voucher_words(voucher)} for kind, voucher in closers]
+
+
+def release_of(*, state, gaps, held_back_from, acceptance_carries) -> str:
+    """The release a step yields: the core's one rule
+    (``mythos_core.recovery_receipt.release_status``), never one of this module's. A gap
+    holds a pass back. Raises :class:`RecoveryRefused` with the core's code when the core
+    refuses the four inputs."""
+    core = _receipt()
+    try:
+        return core.release_status(
+            state=state, gap=bool(gaps), held_back_from=held_back_from or None,
+            acceptance_carries=bool(acceptance_carries),
+        )
+    except core.RecoveryReceiptError as exc:
+        raise RecoveryRefused(exc.code, str(exc)) from None
+
+
 def derive(
-    *, ref: str, links: dict, manifest: cov.Manifest, accepted: str, previous, scope_revision=None, revisions=()
+    *, ref: str, links: dict, manifest: cov.Manifest, accepted: str, previous, scope_revision=None, revisions=(),
+    recorded_by: str = "", recorded_at=None,
 ) -> dict | None:
     """What a step resting on ``links``, ``manifest`` and ``accepted`` (the owner's
-    acceptance in force, or blank) says after ``previous``, derived under revision
+    acceptance in force, or blank), recorded by ``recorded_by`` (``user:<id>``, blank for
+    nobody) at ``recorded_at``, says after ``previous``, derived under revision
     ``scope_revision`` of the incident's scope (None: none is declared) with every
     revision in ``revisions``, oldest first: its state, reopens, conditions, gaps,
-    restrictions, release and residual uncertainty -- or None, when nothing may follow
-    ``previous`` that the witnesses support. Pure."""
+    restrictions, release, what it is held back from, who vouches for each witness and
+    its residual uncertainty -- or None, when nothing may follow ``previous`` that the
+    witnesses support. Pure."""
     facts = _facts(links, accepted)
     holds, complete = _coverage_holds(manifest)
     scope_holds = scope_holds_of(scope_revision, revisions, links, manifest)
@@ -577,14 +870,29 @@ def derive(
     state = st.UNDER_INVESTIGATION if lapse else _step(None if previous is None else previous.state, supported)
     if state is None:
         return None
-    held = (not complete or bool(scope_holds)) and any(supported(one, holds_count=False) for one in RECOVERED)
+    # The recovered state the step would have reached but for its coverage and scope
+    # holds: the furthest one its witnesses support with the holds left out. None when no
+    # hold stands, or none is supported even so.
+    held_back_from = None
+    if not complete or scope_holds:
+        held_back_from = max(
+            (one for one in RECOVERED if supported(one, holds_count=False)), key=_RANK.get, default=None
+        )
     conditions = [
         {"condition": name, "witness": {"kind": kind, "ref": witness}}
         for name in dict.fromkeys((*_BASE, *_NEEDS[state]))
         for kind, witness in facts[name]
     ]
+    items = scope_items(links, manifest, scope_revision, revisions)
+    support, unvouched = support_of(
+        conditions, links, items, recorded_by=recorded_by, recorded_at=recorded_at, previous=previous
+    )
     gaps = [*links["gaps"], *(f"{EFFECT_NOT_APPLIED}:receipt:{r}" for _, r in facts[EFFECT_NOT_APPLIED])]
-    gaps += [*holds, *scope_holds] if held else []
+    gaps += [*holds, *scope_holds] if held_back_from else []
+    # A witness nobody can be named for is not a support: it is a gap. So is a value of a
+    # list carried from a step before SP-4 that is not a name, by its pointer.
+    gaps += unvouched
+    gaps += unnamed(gaps, links["restrictions"])
     reopens = str(previous.uuid) if previous is not None and state == st.UNDER_INVESTIGATION else ""
     try:
         recovery = st.Recovery(
@@ -598,8 +906,11 @@ def derive(
             core_scope.check_scope_reopen(_as_recovery(reopened), recovery, lapse)
     except (st.RecoveryError, core_scope.ScopeError) as exc:
         raise RecoveryRefused(exc.code, str(exc)) from None
-    gate = st.PASS if st.release_may_pass([recovery]) or held else st.FAIL
-    release = cov.release_given_coverage(manifest, gate)
+    # The core's rule. The acceptance carries: it is in force when the step is recorded,
+    # given under the scope revision the step is derived under, and no scope hold stands.
+    release = release_of(
+        state=state, gaps=gaps, held_back_from=held_back_from, acceptance_carries=bool(accepted) and not scope_holds
+    )
     residual = [
         *({"statement": u["question"], "sources": [{"kind": "unknown", "ref": u["uuid"]}]} for u in links["unknowns"]),
         *({"statement": hold, "sources": [{"kind": "coverage", "ref": manifest.scope}]} for hold in holds),
@@ -616,34 +927,44 @@ def derive(
         "conditions": conditions,
         "gaps": gaps,
         "restrictions": list(links["restrictions"]),
-        # A pass never rests on a scope that holds anything back, complete coverage or not.
-        "release": st.AUDIT_INCOMPLETE if scope_holds and release == st.PASS else release,
+        "release": release,
+        "held_back_from": held_back_from or "",
+        "support": support,
         "residual_uncertainty": residual,
-        "scope_items": scope_items(links, manifest, scope_revision, revisions),
+        "scope_items": items,
     }
 
 
 def _derived(row, previous, revisions) -> dict | None:
+    # At the instant the step is recorded: whether the acceptance is in force then. A read
+    # asks again at its own instant (served).
     in_force = row.accepted_by_id is not None and row.accepted_until is not None and row.accepted_until > row.recorded_at
     return derive(
         ref=str(row.uuid), links=row.links, manifest=manifest_of(row.finding, row.coverage),
-        accepted=f"user:{row.accepted_by_id}" if in_force else "", previous=previous,
-        scope_revision=row.scope_revision, revisions=revisions,
+        accepted=person_ref(row.accepted_by_id) if in_force else "", previous=previous,
+        scope_revision=row.scope_revision, revisions=revisions, recorded_by=person_ref(row.recorded_by_id),
+        recorded_at=row.recorded_at,
     )
 
 
 def _stored(row) -> dict:
     return {
         "state": row.state, "reopens": row.reopens, "conditions": row.conditions, "gaps": row.gaps,
-        "restrictions": row.restrictions, "release": row.release, "residual_uncertainty": row.residual_uncertainty,
-        "scope_items": row.scope_items,
+        "restrictions": row.restrictions, "release": row.release, "held_back_from": row.held_back_from,
+        "support": row.support, "residual_uncertainty": row.residual_uncertainty, "scope_items": row.scope_items,
     }
+
+
+def _references(row) -> tuple:
+    """The person references a step keeps beside the accounts' keys, as they must be."""
+    return person_ref(row.recorded_by_id), person_ref(row.accepted_by_id)
 
 
 def check_derived(row) -> None:
     """Refuse ``row`` (unsaved) unless it names the incident's current scope revision
-    (none when none is declared) and every derived field is what :func:`derive` says of
-    its own links, coverage and acceptance after the step before it, under that revision."""
+    (none when none is declared), every derived field is what :func:`derive` says of its
+    own links, coverage, acceptance and recorder after the step before it, under that
+    revision, and each person reference names the account its key names."""
     from .models import RecoveryRecord
 
     previous = RecoveryRecord.objects.filter(finding_id=row.finding_id, version__lt=row.version).order_by("-version").first()
@@ -653,12 +974,13 @@ def check_derived(row) -> None:
         derived = _derived(row, previous, revisions) if current else None
     except (KeyError, TypeError, AttributeError):
         derived = None
-    if derived != _stored(row):
+    if derived != _stored(row) or (row.recorded_by_ref, row.accepted_by_ref) != _references(row):
         raise RecoveryRefused(
             "not_derived",
-            "a recovery step's state, conditions, gaps, restrictions, release and residual uncertainty are derived "
-            "from what it rests on, the step before it and the incident's current scope revision; this one says "
-            "otherwise",
+            "a recovery step's state, conditions, gaps, restrictions, release, what it is held back from, who vouches "
+            "for each witness and its residual uncertainty are derived from what it rests on, the step before it and "
+            "the incident's current scope revision, and each person it names is the account its key names; this one "
+            "says otherwise",
         )
 
 
@@ -675,20 +997,23 @@ def draft(finding, *, version, links, coverage=None, accepted_by=None, accepted_
         accepted_until=accepted_until, recorded_by=recorded_by, recorded_at=recorded_at or timezone.now(),
         scope_revision=incident_scope.current_of(revisions),
     )
+    row.recorded_by_ref, row.accepted_by_ref = _references(row)
     derived = _derived(row, previous, revisions)
     if derived is None:
         return None
     row.state, row.reopens, row.conditions = derived["state"], derived["reopens"], derived["conditions"]
     row.gaps, row.restrictions, row.release = derived["gaps"], derived["restrictions"], derived["release"]
+    row.held_back_from, row.support = derived["held_back_from"], derived["support"]
     row.residual_uncertainty, row.scope_items = derived["residual_uncertainty"], derived["scope_items"]
     return row
 
 
 def record(finding, *, by=None, body=None, accept_until=None) -> list:
     """Record the steps of ``finding``'s recovery that what ``body`` links now supports,
-    one row per step, and return them. ``accept_until`` is the owner's acceptance, given
-    by ``by``, which must be the deployment's owner. Refused, with nothing recorded, when
-    nothing moves or a link or the acceptance is refused."""
+    one row per step, recorded by ``by``, and return them. ``accept_until`` is the owner's
+    acceptance, given by ``by``, which must be the deployment's owner. Refused, with nothing
+    recorded, when nobody records it (``recorded_by_required``), nothing moves, or a link
+    or the acceptance is refused."""
     from .models import RecoveryRecord
 
     now = timezone.now()
@@ -697,7 +1022,15 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
     # An accepted recovery is final for the scope revision it was accepted under, and
     # only for that one: once that scope no longer stands, steps are recorded again.
     if previous is not None and previous.state in st.RECOVERY_TERMINAL and not lapsed(previous, revisions):
-        raise RecoveryRefused("terminal", f"the recovery was accepted (step {previous.version}); nothing follows")
+        ended = previous.accepted_until is not None and previous.accepted_until <= now
+        raise RecoveryRefused(
+            "terminal",
+            f"the recovery was accepted (step {previous.version}); nothing follows"
+            + (
+                ", not even a new acceptance once that one has ended: it reads as not accepted, and only a scope "
+                "revision reopens it" if ended else ""
+            ),
+        )
     if accept_until is not None:
         if finding.deployment.owner_id is None:
             raise RecoveryRefused("no_owner", "no owner set for this deployment")
@@ -705,7 +1038,12 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
             raise RecoveryRefused("not_the_owner", "only the deployment's owner accepts its recovery")
         if accept_until <= now:
             raise RecoveryRefused("acceptance_ended", "an acceptance names an end in the future")
-    links, coverage = resolve(finding, body, previous, now)
+    # A step names who recorded it (SPINE SP-4): that person vouches for every witness the
+    # step links that no engine signed, at the step's time. The route always names the
+    # signed-in person; nothing records a step for nobody.
+    if by is None:
+        raise RecoveryRefused("recorded_by_required", "a recovery step names who recorded it: the signed-in person")
+    links, coverage = resolve(finding, body, previous, now, by=by)
     steps = []
     try:
         with transaction.atomic():
@@ -742,9 +1080,90 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
 # ------------------------------------------------------------------ the reads
 
 
-def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION) -> dict:
-    """One step as its reads serve it: every derived field, what it rests on, its
-    coverage manifest with what ``coverage.coverage_ratio`` measures of it, and who
+def _held_of(row) -> str | None:
+    """What a step that still stands is held back from: as it recorded it; for a step
+    recorded before SP-4, exactly what the rule that wrote it meant. Under that rule (and
+    under the core's) a step that is not accepted reads ``AUDIT_INCOMPLETE`` only when it
+    is held back, and it is held back from ``recovery_accepted`` when its own acceptance
+    was in force when it was recorded (the one witness acceptance adds to a tested repair),
+    else from ``restored_with_restrictions``. Pure."""
+    if row.held_back_from is not None:
+        return row.held_back_from if row.held_back_from in RECOVERED and row.held_back_from != row.state else None
+    if row.release != st.AUDIT_INCOMPLETE or row.state == st.RECOVERY_ACCEPTED:
+        return None
+    in_force = row.accepted_until is not None and row.accepted_until > row.recorded_at
+    held = st.RECOVERY_ACCEPTED if in_force else st.RESTORED_WITH_RESTRICTIONS
+    return None if held == row.state else held
+
+
+def _read_support(row) -> tuple[list | None, list[str], list[str]]:
+    """``(support, sentences, gaps)`` for a step as a read serves it: each support entry
+    with the sentence every reader prints for it (the core's ``support_sentence``), and the
+    gap each witness leaves that no voucher is on record for. A step recorded before SP-4
+    names no voucher, so every witness of it is such a gap (the core's reading of an
+    unknown voucher), and its support is None, never an empty list. A stored entry the core
+    cannot read is a gap too. Pure."""
+    core = _receipt()
+    if not isinstance(row.support, list):
+        return None, [], [_support_gap(*witness) for witness in _witnesses(row.conditions, row.scope_items)]
+    support, sentences, gaps = [], [], []
+    for entry in row.support:
+        try:
+            sentences.append(core.support_sentence(entry))
+            support.append(entry)
+        except core.RecoveryReceiptError:
+            held = entry if isinstance(entry, dict) else {}
+            gaps.append(_support_gap(held.get("condition"), held.get("kind"), held.get("ref")))
+    return support, sentences, gaps
+
+
+def _served_release(state, gaps, held_back_from) -> str:
+    """The release a read serves: the core's rule over what it serves. Where the core
+    refuses what the row holds (only a row written past its guards can hold that), the
+    release cannot be read, and it reads ``AUDIT_INCOMPLETE``: caution, never a pass and
+    never a failure nothing showed."""
+    try:
+        return release_of(
+            state=state, gaps=gaps, held_back_from=held_back_from, acceptance_carries=state == st.RECOVERY_ACCEPTED
+        )
+    except RecoveryRefused:
+        return st.AUDIT_INCOMPLETE
+
+
+def _served_ref(stored, user_id):
+    """A person's reference as a read serves it: the one the row keeps, else (a row from
+    before SP-4) the account's key while the account exists; None for nobody."""
+    if stored is not None:
+        return stored or None
+    return person_ref(user_id) or None
+
+
+def standing_of(row, *, last: bool, current_revision, at) -> str:
+    """How ``row`` stands at the reader's instant ``at``, in the core's words and the core's
+    order (``mythos_core.recovery_receipt.receipt_standing``), with the record's head: the
+    latest step, and the incident's ``current_revision`` (None: none declared).
+
+    ``superseded`` when a later step is the latest; then ``acceptance_ended`` when the step
+    carries an acceptance that has ended by ``at``; ``unknown`` when the scope is behind the
+    revision the step was taken under (a head behind the step is not the head);
+    ``scope_moved`` when a revision was declared since; else ``current``. Pure."""
+    core = _receipt()
+    if not last:
+        return core.SUPERSEDED
+    if row.accepted_until is not None and at >= row.accepted_until:
+        return core.ACCEPTANCE_ENDED
+    taken = row.scope_revision
+    if current_revision == taken:
+        return core.CURRENT
+    if current_revision is None or (taken is not None and current_revision < taken):
+        return core.UNKNOWN
+    return core.SCOPE_MOVED
+
+
+def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION, *, at=None, standing=None) -> dict:
+    """One step as its reads serve it at the reader's instant ``at`` (now when None):
+    every derived field, what it rests on, its coverage manifest with what
+    ``coverage.coverage_ratio`` measures of it, who vouches for each witness, and who
     accepted and recorded it (``None`` when nobody is on record). No summary badge: the
     state is one of S1's words, beside its conditions and gaps.
 
@@ -753,20 +1172,59 @@ def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION) -> dict:
     step's ``scope_revision`` whatever the step's state. Where the step is a recovered
     state and any stands, the step is not served as recovered: its ``state`` is
     ``held_at`` (the last state before it that was not a recovered one), its ``gaps``
-    name each, and its ``release`` is ``AUDIT_INCOMPLETE``. ``recorded`` is what the
-    row holds, always: the row is history and is not rewritten."""
+    name each, and it is held back from the state it recorded. Where the step is
+    accepted and its acceptance has ended by ``at``, it is not served as accepted either:
+    its ``state`` is ``held_at`` and it is held back from nothing. Its ``release`` is the
+    core's over what is served, in every case (:func:`release_of`); ``standing`` is the
+    core's word for how it stands (:func:`standing_of`, as the last step when not given).
+    ``recorded`` is what the row holds, always: the row is history and is not
+    rewritten."""
     measured = cov.coverage_ratio(manifest_of(row.finding, row.coverage))
     scope_gaps = list(scope_gaps)
-    stands = row.state not in RECOVERED or not scope_gaps
+    at = timezone.now() if at is None else at
+    scope_lapsed = row.state in RECOVERED and bool(scope_gaps)
+    acceptance_lapsed = (
+        row.state == st.RECOVERY_ACCEPTED and row.accepted_until is not None and row.accepted_until <= at
+    )
+    support, sentences, unvouched = _read_support(row)
+    recorded_gaps = [*row.gaps, *(gap for gap in unvouched if gap not in row.gaps)]
+    recorded_gaps += [pointer for pointer in unnamed(recorded_gaps, row.restrictions) if pointer not in recorded_gaps]
+    gaps = [*recorded_gaps, *scope_gaps] if scope_lapsed else recorded_gaps
+    if acceptance_lapsed:
+        state, held_back_from = held_at, None
+    elif scope_lapsed:
+        state, held_back_from = held_at, row.state
+    else:
+        state, held_back_from = row.state, _held_of(row)
+    if standing is None:
+        standing = standing_of(row, last=True, current_revision=row.scope_revision, at=at)
     return {
         "ref": str(row.uuid),
         "version": row.version,
-        "state": row.state if stands else held_at,
+        "state": state,
         "reopens": row.reopens or None,
         "conditions": row.conditions,
-        "gaps": row.gaps if stands else [*row.gaps, *scope_gaps],
+        "gaps": gaps,
         "restrictions": row.restrictions,
-        "release": row.release if stands else st.AUDIT_INCOMPLETE,
+        "release": _served_release(state, gaps, held_back_from),
+        # The recovered state the step would have reached but for a gap or a scope hold
+        # among its gaps, or None. The core's word and value.
+        "held_back_from": held_back_from,
+        "standing": standing,
+        # Who vouches for each witness, in the core's entry shape, and the sentence every
+        # reader prints for each (the core's). None on a step recorded before SP-4.
+        "support": support,
+        "support_sentences": sentences,
+        # Every gap as a name (free text by its pointer), with what would close it; and a
+        # scope that is not declared, or cannot be read, said as one whatever the state
+        # (the core's rule for a receipt: unknown is never ok).
+        "gaps_named": [
+            {"gap": gap, "would_close": would_close(gap)}
+            for gap in dict.fromkeys(
+                (*gaps, *(hold for hold in scope_gaps if hold in (core_scope.NOT_DECLARED, core_scope.UNREADABLE)))
+            )
+            if is_name(gap)
+        ],
         "scope_revision": row.scope_revision,
         "scope_gaps": scope_gaps,
         # As recorded: each item the scope gained, with the kind of link that names it
@@ -789,8 +1247,10 @@ def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION) -> dict:
             "unknown_inventory": list(measured.unknown_inventory),
         },
         "accepted_by": row.accepted_by.username if row.accepted_by_id else None,
+        "accepted_by_ref": _served_ref(row.accepted_by_ref, row.accepted_by_id),
         "accepted_until": row.accepted_until.isoformat() if row.accepted_until else None,
         "recorded_by": row.recorded_by.username if row.recorded_by_id else None,
+        "recorded_by_ref": _served_ref(row.recorded_by_ref, row.recorded_by_id),
         "recorded_at": row.recorded_at.isoformat(),
     }
 
@@ -809,26 +1269,33 @@ def _steps_of(finding_ids) -> dict:
     return steps
 
 
-def served_steps(steps: list, revisions: list) -> list[dict]:
-    """Every step of one incident, oldest first, as its reads serve it under the
-    incident's scope ``revisions`` (oldest first): each with the scope revision it was
-    derived under and what holds it back now (:func:`served`)."""
+def served_steps(steps: list, revisions: list, at=None) -> list[dict]:
+    """Every step of one incident, oldest first, as its reads serve it at the reader's
+    instant ``at`` (now when None) under the incident's scope ``revisions`` (oldest
+    first): each with the scope revision it was derived under, what holds it back now and
+    how it stands (:func:`served`)."""
+    at = timezone.now() if at is None else at
+    current = incident_scope.current_of(revisions)
     held_at, out = st.UNDER_INVESTIGATION, []
-    for step in steps:
+    for index, step in enumerate(steps):
         holds = scope_holds_of(step.scope_revision, revisions, step.links, manifest_of(step.finding, step.coverage))
-        out.append(served(step, holds, held_at))
+        standing = standing_of(step, last=index == len(steps) - 1, current_revision=current, at=at)
+        out.append(served(step, holds, held_at, at=at, standing=standing))
         if step.state not in RECOVERED:
             held_at = step.state
     return out
 
 
-def _incident(finding, steps: list, revisions: list) -> dict:
-    read = served_steps(steps, revisions)
+def _incident(finding, steps: list, revisions: list, at) -> dict:
+    read = served_steps(steps, revisions, at)
     last = read[-1] if read else None
     return {
         "finding": str(finding.uuid),
         "title": finding.title,
         "severity": finding.severity,
+        # The reader's instant every step is read at, in the core's one form: an
+        # acceptance that ended by then is read as ended.
+        "as_of": instant(at),
         # The incident's current scope revision; None when no scope is declared.
         "scope_revision": incident_scope.current_of(revisions),
         # Every item a revision added and a later one removed: both revision numbers, who
@@ -844,10 +1311,12 @@ def _incident(finding, steps: list, revisions: list) -> dict:
 
 def finding_record(finding) -> dict:
     """One incident's recovery record: every step, oldest first, each with the scope
-    revision it was derived under, and the incident's current one. Three queries."""
+    revision it was derived under, and the incident's current one, read at the server's
+    clock now. Three queries."""
+    at = timezone.now()
     steps = _steps_of([finding.pk]).get(finding.pk, [])
     revisions = incident_scope.revisions_of([finding.pk]).get(finding.pk, [])
-    return {"deployment": str(finding.deployment.uuid), **_incident(finding, steps, revisions)}
+    return {"deployment": str(finding.deployment.uuid), **_incident(finding, steps, revisions, at)}
 
 
 def recorded_steps(finding, steps: list) -> list[dict]:
@@ -859,8 +1328,8 @@ def recorded_steps(finding, steps: list) -> list[dict]:
 def deployment_records(deployment, *, offset: int, page_size: int) -> dict:
     """The deployment's incidents -- its findings that have a recovery record -- one page
     of them, each with every step oldest first and its current scope revision, and how
-    many there are: the count and the page are of this deployment's incidents only. Four
-    queries."""
+    many there are: the count and the page are of this deployment's incidents only, each
+    read at the same instant, the server's clock now. Four queries."""
     from django.db.models import Exists, OuterRef
 
     from .history_reads import _envelope, _page
@@ -872,5 +1341,6 @@ def deployment_records(deployment, *, offset: int, page_size: int) -> dict:
     page, total = _page(incidents, offset, page_size)
     steps = _steps_of([finding.pk for finding in page])
     revisions = incident_scope.revisions_of([finding.pk for finding in page])
-    read = [_incident(f, steps.get(f.pk, []), revisions.get(f.pk, [])) for f in page]
+    at = timezone.now()
+    read = [_incident(f, steps.get(f.pk, []), revisions.get(f.pk, []), at) for f in page]
     return _envelope(deployment, "incidents", read, total, offset, page_size)

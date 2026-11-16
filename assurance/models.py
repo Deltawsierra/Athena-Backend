@@ -4464,6 +4464,19 @@ class RecoveryRecord(models.Model):
     # of which kind, and each item it lost, with who removed it and why
     # (assurance.recovery_record.scope_items). Null: a row from before SP-3.
     scope_items = models.JSONField(null=True, blank=True)
+    # SPINE SP-4, what a recovery receipt says (mythos_core.recovery_receipt). Each is
+    # recorded from migration 0088 on and null on every row before it, which no migration
+    # writes: a read takes null for "not recorded" (assurance.recovery_record.served).
+    # Derived: the recovered state the step would have reached but for a gap or a scope
+    # hold among its gaps, or "" for none.
+    held_back_from = models.CharField(max_length=32, null=True, blank=True)
+    # Derived: who vouches for each witness, in the core's support-entry shape: the engine
+    # and its key for a signed record, or the named person and when.
+    support = models.JSONField(null=True, blank=True)
+    # The person each key names, as a reference ("user:<id>", "" for nobody), kept beside
+    # the key so it outlives the account: removing an account nulls the key, not this.
+    recorded_by_ref = models.CharField(max_length=40, null=True, blank=True)
+    accepted_by_ref = models.CharField(max_length=40, null=True, blank=True)
 
     objects = RecoveryRecordQuerySet.as_manager()
 
@@ -4547,6 +4560,11 @@ class IncidentScopeRevision(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     declared_at = models.DateTimeField(default=timezone.now)
+    # Who declared it, as a reference ("user:<id>", "" for nobody), kept beside the key so
+    # it outlives the account (SPINE SP-4: a recovery receipt names who removed an item by
+    # reference). Set when the revision is recorded; null on every revision recorded before
+    # migration 0088, which no migration writes.
+    declared_by_ref = models.CharField(max_length=40, null=True, blank=True)
 
     objects = IncidentScopeRevisionQuerySet.as_manager()
 
@@ -4562,7 +4580,7 @@ class IncidentScopeRevision(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        from .incident_scope import check
+        from .incident_scope import check, person_ref
 
         refusal = IncidentScopeRewriteRefused(
             "A recorded scope revision is history and is never rewritten; record the next revision as a new row."
@@ -4570,6 +4588,8 @@ class IncidentScopeRevision(models.Model):
         # An INSERT and nothing else (assurance.append_only), and only of the next
         # revision, whose every item and piece of evidence is the deployment's own.
         kwargs = insert_only(self, kwargs, refusal)
+        if self.declared_by_ref is None:
+            self.declared_by_ref = person_ref(self.declared_by_id)
         check(self)
         super().save(*args, **kwargs)
 

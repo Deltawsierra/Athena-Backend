@@ -1111,6 +1111,38 @@ signed-in person's acceptance, refused (403) unless they are the deployment's ow
 names no one. A refused link or field is a 400; a step that changes links and no state,
 or may not follow the last, is a 409 with the reason.
 
+## The recovery record says what a recovery receipt could say (SPINE SP-4, part 2a)
+
+Mythos-Core#82 defines the recovery receipt (`mythos_core.recovery_receipt`,
+`mythos.recovery-receipt/v1`). Before this service issues one, its record says nothing a
+receipt could not (migration `assurance.0088`: five nullable fields, no row written):
+
+- **The release is the core's** `release_status(state, gap, held_back_from,
+  acceptance_carries)`, recorded and on every read; this service has no release rule of
+  its own. A gap holds a pass back, whatever it is: an accepted step with a posted gap
+  reads `AUDIT_INCOMPLETE`. Each step names the recovered state it is held back from
+  (`held_back_from`), or none.
+- **An acceptance ends.** Every read compares the reader's instant with `accepted_until`:
+  an accepted step whose acceptance has ended is served at the state before it, its
+  release `FAIL`, and its `standing` is the core's word `acceptance_ended` (each step's
+  standing is one of the core's five, in the core's order). The row is not rewritten.
+- **Who vouches for every witness** (`support`, the core's entry shape): the engine and
+  its key for a permit or a receipt; otherwise the named person who recorded the step that
+  linked it, with that step's time (`user:<id>`). Every step names who recorded it
+  (`recorded_by_required` otherwise). Nobody nameable is a gap
+  (`support:<condition>:<kind>:<ref>`) with what would close it (`gaps_named`, the core's
+  `voucher_words`); each sentence a reader prints is the core's `support_sentence`. A row
+  from before 0088 names no voucher, and reads every witness as such a gap.
+- **Names, not prose.** A posted restriction or gap is a name in the core's grammar
+  (`not_a_name` otherwise, 400); one spelled as a gap the record derives is `not_posted`.
+  A stored one that is not a name is shown as it is and named among the gaps by a pointer
+  (`unnamed:restriction:<i>`). Each person is also a reference that outlives the account
+  (`recorded_by_ref`, `accepted_by_ref`, a scope revision's `declared_by_ref`).
+
+`tests/test_the_recovery_record_says_what_a_receipt_could.py` holds all of it to the core,
+with its vector file (`tests/vectors/recovery-receipt-v1.json`, byte for byte the core's),
+and builds, signs and verifies a receipt of each step with the vectors' test key.
+
 ## An incident's scope, versioned (SPINE SP-3)
 
 What an incident is believed to have affected changes during an investigation: a backup
@@ -1479,6 +1511,43 @@ dashboard needs (section 30):
   version it totals is this deployment's and approved; each version it does not total
   is named with its reason, each total carries the portfolio's integrity line (which
   runs it vouches for and which not), and one gap makes it read `AUDIT_INCOMPLETE`.
+  Every figure of loss or exposure it shows says what kind of figure it is (AT-6; spec,
+  section 38.2): each is held as a measure of `mythos_core.measures` -- its kind, its money
+  in one currency at the minor unit, the period it is for and the snapshot it rests
+  on -- and listed under "What kind of figure each amount is". The kinds are the
+  core's eight, in the core's words:
+  - `confirmed_loss`: value lost, as the one who lost it confirms it;
+  - `remediation_expense`: money spent responding and restoring: incident and exceptional costs, as booked;
+  - `revenue_deferral`: revenue the incident delayed or held back: deferred, which is not lost;
+  - `modeled_exposure`: a figure a model computed for a scenario: never booked, and never added to another;
+  - `insurance_promised`: cover stated, committed or claimed, and not yet paid;
+  - `insurance_received`: insurance money actually received;
+  - `funds_frozen`: assets held where they are, and not yet returned;
+  - `funds_returned`: assets actually returned to those they were taken from.
+  Every figure of a run, of a residual run and of the deployment total is a
+  `modeled_exposure`; none is ever labelled a booked kind. Its period is the
+  valuation day alone (first and last day the same: a simulated year is not a
+  calendar year). Its basis is the stored inputs of the run that computed it, named
+  with that run's input digest (`simulation-inputs:<run>`, or
+  `portfolio-inputs:<portfolio>` for the deployment total). An assumption is not a
+  measure: it is an input the model reads, as someone stated it, listed with the
+  assumptions as recorded, with no kind, and never a gap for having none. A figure
+  whose kind cannot be established reads `unknown`, with the reason, and is never
+  shown under a kind. The kinds are never added: a total is `mythos_core.measures.total`'s to
+  make, which refuses two kinds, two currencies and any two modelled exposures, so
+  the report adds no two figures and sets them side by side instead; the deployment
+  total stays the portfolio's own figure, typed and never recomputed. A figure the
+  core will not hold (an amount off the minor unit, a run with no valuation date) is
+  still shown, is not a measure, says why, and is a named gap. No amount changed.
+
+  **The report as JSON** (`?output=json`; `mythos.economics.exposure-report/v1`; AT-6b; spec,
+  section 38.3): the same report, as data. It carries every figure as the measure it is
+  (kind, money, period, basis, source), the kinds shown in the core's words, the
+  assumptions as inputs as stated (each as recorded, with the line that says they are
+  not measures), the rule, the period and the basis in words, the input digest of the
+  run shown, every gap under `not_measured`, and its own `sha256:` digest. It is
+  canonical JSON (the same bytes for the same rows), answered `no-store` and `nosniff`,
+  and uses none of the words clean, resolved, secure or safe.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
@@ -1524,11 +1593,37 @@ guard of its own, serves ONE remediation option per scenario version and its eco
   acts on kept with probability `1 - r_f` and multiplied by `1 - r_m` -- each with its
   Validity Card, under one 120 s deadline; idempotent; an admin or analyst only;
 - `GET .../economics/scenarios/<scenario uuid>/roi/?simulation=<uuid>`: the ROI
-  document, `mythos.economics.roi/v1`: current and residual expected annual exposure,
+  document, `mythos.economics.roi/v2`: current and residual expected annual exposure,
   the expected reduction, the first-year investment, the risk-adjusted ROI (decision
   support, not a guaranteed return; not meaningful over a zero investment), the payback
-  in years (never negative or infinite), the P90 and P95 tail reduction, utility
-  retained, and the confidence delta between the two runs' cards.
+  in years (never negative or infinite), each run's P90 and P95 and the difference
+  between them, utility retained, and the confidence delta between the two runs' cards.
+
+**What the ROI says it nets** (`mythos.economics.roi/v2`; AT-6b; spec, section 28.11).
+Every amount of money in the ROI document is held as a measure of `mythos_core.measures`
+under `measures`, each with its kind, its money, its period (the valuation day alone)
+and what it rests on (a run's stored inputs with its input digest, or the option's record
+with its digest):
+
+- each run's expected annual exposure, P90 and P95 is a `modeled_exposure` of that run;
+- the expected reduction is a `modeled_exposure`: the current run's mean less the residual
+  run's, two runs that draw the same years, so it is the mean of the paired years'
+  reductions. It is never booked, and never savings realised;
+- the first-year investment is a `remediation_expense`, the core's kind for an expense,
+  and an estimate (`estimate: true`): the cost the option states, not money spent. It
+  rests on the option's record, so it never adds to a booked expense;
+- the ROI and the payback are ratios, not money, so not measures: each sets the modelled
+  reduction against the estimated cost, two kinds that never add or net.
+
+`side_by_side` sets each pair the document compares (current against residual, the
+reduction against the cost, each percentile against the residual run's) beside each other
+with the core's reason they do not add, never a sum or a difference; `nets` says in words
+what each figure nets. v2 is v1 with those three keys and one key renamed: a tail's
+`reduction` (the current run's percentile less the residual run's: a difference of two
+percentiles, not a percentile of the reduction) is `difference_of_percentiles`, its value
+unchanged, and it is not held as a measure. No amount changed. The Dashboard reads
+`tail_reduction.<p>.reduction`: until it reads the new name, its tail rows show that
+figure as not reported.
 
 The ROI document is canonical JSON with its own digest, built from stored rows only,
 each run verified as the report verifies one; where either is Unknown, refused,
@@ -1977,7 +2072,7 @@ through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
 Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
 pin, from the install pip recorded; otherwise it stops the run with one error naming each
 failed check and what to do. Each run ends with its verdict, for example
-`pin guard <sha>: mythos-core pinned 320d685, imported 320d685 from <path>: OK`. Its one
+`pin guard <sha>: mythos-core pinned 12c6433, imported 12c6433 from <path>: OK`. Its one
 switch is described under "The shared pin guard" in Mythos-Core's README.
 `ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
 run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.

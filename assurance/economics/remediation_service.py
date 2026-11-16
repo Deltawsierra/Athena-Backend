@@ -696,6 +696,18 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
         "the residual run's card grade against the current run's, each as its card document states it where it "
         "verifies, as step 6's report reads it; the control effect's own evidence does not enter either grade yet"
     )
+    # Every amount of money as a typed measure, the pairs set against each other, and
+    # what each figure nets (v2, AT-6b): nothing is computed here, every amount is the
+    # text the figures already serve.
+    from . import roi_measures
+
+    typed = []
+    if figures_shown:
+        typed = roi_measures.figures_of(figures, roi_measures.runs_of(
+            current_report, residual_report, option=str(option.uuid), option_digest=option.option_digest,
+            option_currency=option.currency, option_source=f"{engine_remediation.OPTION_SCHEMA}:{option.uuid}",
+            roi_schema=engine_remediation.ROI_SCHEMA,
+        ))
     roi = {
         "schema": engine_remediation.ROI_SCHEMA,
         "scenario": report._scenario_part(scenario, deployment_uuid),
@@ -705,6 +717,9 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
         "line": line,
         "currency": {"code": code, "minor_unit": shown.minor_unit, "rounding": report.ROUNDING},
         "figures": figures,
+        "measures": roi_measures.served(typed),
+        "side_by_side": roi_measures.pairs_of(typed),
+        "nets": dict(roi_measures.NETS),
         "utility_retained": utility_retained(scenario, option.utility_evidence or None),
         "confidence_delta": delta,
         "veto": vetoed,
