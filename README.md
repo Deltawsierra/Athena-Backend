@@ -502,13 +502,35 @@ backend.
 - Each role promotion that names who granted it (`RoleGrant.record`) emits a
   `delegation` record of the grant on every deployment: the granter delegated the
   account (both named `athena-backend:<username>`) the scope
-  `athena-backend:role:<role>`, from the instant it was granted, with no end. A role
-  of this backend's, so named, is not an action a customer's tool performs: a
-  `delegates_to` hop over an effect's action is not proven by it
-  (`delegation_out_of_scope`). A promotion that names nobody emits none; a
-  demotion, a deactivation and a removal emit nothing (they are revokes), and the
-  token refresh emits nothing (it is how an operator keeps the session they press
-  stop from).
+  `athena-backend:role:<role>`, from the instant it was granted, for ONE LEASE of 24 h
+  (`assurance/role_grant_lease.py`, in the policy pin). A role of this backend's, so
+  named, is not an action a customer's tool performs: a `delegates_to` hop over an
+  effect's action is not proven by it (`delegation_out_of_scope`). A promotion that
+  names nobody emits none, and the token refresh emits nothing (it is how an
+  operator keeps the session they press stop from).
+- A role grant's record proves only within its lease and before its revocation
+  (AB-GRANT-LEASE). A withdrawal -- a demotion, the superuser flag taken away, a
+  deactivation, a removal -- emits a `revoked` record of every lease still running
+  of each grant the account no longer holds, `revoked_at` the instant of the
+  withdrawal, so a later effect reads `delegation_revoked` (an effect before it stays
+  proven). It is signed only after the stop is answered (once the response is sent),
+  never before: the accounts app imports none of the identity code. A held role is
+  kept proven by `manage.py reconcile_role_grants`, which re-asserts each grant still
+  held (a new record, a new 24 h window) once it has less than 12 h left, and revokes
+  any lease of a grant no longer held (a role changed by a path that announced
+  nothing). If it does not run -- no key, no keyring, the database down, never
+  scheduled -- nothing is extended: each lease ends and the hop reads
+  `delegation_expired`. The open-ended records signed before leases are read to one
+  lease from when they opened; the first reconcile re-asserts the roles still held.
+  Schedule it hourly, from the backend's folder, in PowerShell:
+
+  ```powershell
+  schtasks /Create /SC HOURLY /TN "Athena role-grant reconcile" /TR "C:\path\to\venv\Scripts\python.exe C:\path\to\Athena-Backend\manage.py reconcile_role_grants"
+  ```
+
+  It prints what it re-asserted and revoked, exits 0 when the grant key is not set
+  (the emitter is off), and exits non-zero when it could not run, so the scheduler
+  reports it.
 - Each record is signed with a key of this backend's, a PEM (PKCS#8) Ed25519 private
   key named by `ATHENA_SIGNIN_RECORD_KEY_FILE` (signed as `mythos-signin-collector`)
   or `ATHENA_GRANT_RECORD_KEY_FILE` (as `mythos-grant-collector`), and is taken in
@@ -2029,9 +2051,47 @@ exit starts or runs the writers. What a process lost or refused since it started
 lines meant for stderr, log records dropped, unrecorded dispatches refused past the
 hard bound -- is counted, and any non-zero count makes `GET /api/health/` answer
 `"status": "degraded"` (still 200: the process is alive) with each count, and the
-sweep log it at WARNING whenever a count moves. The counts are per process. Everything else on a stop's path goes the same way, through a queue of
+sweep log it at WARNING whenever a count moves. Everything else on a stop's path goes the same way, through a queue of
 at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
+
+Health counts every worker, not only the one that answers. The counts are kept per
+process, and a probe reaches one worker, so each serving worker publishes its counts
+as a small JSON file in one directory (`assurance/worker_reports.py`), and
+`GET /api/health/` sums its own counts, read live, with every other worker's file:
+
+- **Where.** `ATHENA_WORKER_REPORT_DIR`, else a directory in the system's temporary
+  directory named for the checkout. Every worker of a host must name the same one.
+  A file, not a database row, so publishing never takes the database's one writer
+  a stop's own write needs; the economics run slots keep their per-host state the
+  same way. With several hosts, each host's health covers that host's workers --
+  the ones a load balancer's probe of that host is about -- unless the variable
+  names a directory every host shares (files never collide; keep the clocks in step,
+  since staleness is judged by each file's publication time).
+- **Off every stop.** A request costs a comparison and a liveness check; the first
+  one starts the publisher thread, which reads the counts every second and writes
+  when one moves, and every 10 s regardless. A slow or failing directory delays only
+  that thread. A failed publish is counted and shown as
+  `worker_reports_unpublished`, which reads degraded like the other counts. On
+  Windows, a replace refused because a reader has the file open is tried 5 times.
+- **Unknown, never ok.** A report that cannot be read, a directory that cannot be
+  listed, or a live worker's report not rewritten within 60 s (a worker killed
+  outright: SIGKILL, the OOM killer, `taskkill /F`) reads `"status": "unknown"`
+  with the reason under `"unknown"`, keyed by the worker's random id. Counts
+  anywhere read `"degraded"`, with the sums under `"degraded"` and each counting
+  worker under `"workers"`.
+- **What `"ok"` carries.** `"status": "ok"` and the message, as before, and every
+  count it read under `"counts"`, each 0 (`stderr_lines_lost`, `log_records_dropped`,
+  `unrecorded_dispatches_refused`, `worker_reports_unpublished`), with `"workers"`
+  empty. A reader can tell an `"ok"` that read its counts from one that reports none
+  (a backend from before #217), and need not read a missing count as zero.
+- **Exited workers.** A worker that exits normally writes its last counts, marked
+  exited; they stay in health's sums until an operator acknowledges them. One that
+  exits with nothing counted removes its file. List and acknowledge with
+  `python manage.py acknowledge_worker_reports` (`REPORT_ID ... --by NAME`, or
+  `--all --by NAME`): each acknowledged report is kept under `acknowledged/` in the
+  directory with who acknowledged it (the name given and the account that ran it)
+  and when, and the line is logged at WARNING. A live worker's report is refused.
 
 **Migration `assurance.0043`** adds `marker` as a nullable column with no default: a
 plain `ADD COLUMN`, so it copies no table and holds the write lock for no time

@@ -2,11 +2,39 @@ import logging
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.dispatch import Signal
 from django.utils import timezone
 
 from assurance.append_only import HistoryQuerySet, insert_only
 
 logger = logging.getLogger(__name__)
+
+#: Sent, with ``account_pk``, when an existing account loses something it held: its
+#: role changed (the role it had is no longer its role), the superuser flag taken away,
+#: or the account deactivated. A removal is the account's own ``post_delete``. This
+#: module reads and writes nothing for it and imports nothing that listens: the
+#: identity emitter (assurance.identity_emitter) listens, notes the account, and signs
+#: the revocation of the grant it no longer holds only once the change is ANSWERED --
+#: so a demotion, which is a stop, never waits on it. Sent robustly: no receiver can
+#: refuse or undo the change.
+role_withdrawn = Signal()
+
+
+def withdraws(before, after) -> bool:
+    """Whether an existing account moving from ``before`` to ``after`` -- each
+    ``(role, is_superuser, is_active)`` -- loses something it held: the role it had,
+    the superuser flag, or being active."""
+    (role, superuser, active), (new_role, new_superuser, new_active) = before, after
+    return role != new_role or (bool(superuser) and not new_superuser) or (bool(active) and not new_active)
+
+
+def announce_withdrawal(account_pk) -> None:
+    """Say that account ``account_pk`` lost something it held (:data:`role_withdrawn`).
+    Never raises, and never holds the change back."""
+    try:
+        role_withdrawn.send_robust(sender=CustomUser, account_pk=account_pk)
+    except Exception:  # noqa: BLE001 - the withdrawal stands; only its revocation record is missing
+        logger.exception("account %s's withdrawal could not be announced", account_pk)
 
 
 class CustomUser(AbstractUser):
@@ -60,12 +88,16 @@ class CustomUser(AbstractUser):
         """Set this account's role, as ``by``: the one UPDATE it always was. Only a
         PROMOTION then records who granted it and when (:class:`RoleGrant`); a
         demotion records nothing, reads nothing more, and is never refused: it is a
-        revoke."""
+        revoke. Any change of role then announces that the role it had is withdrawn
+        (:data:`role_withdrawn`), which reads and writes nothing here."""
+        had = self.role
         before = rank(self.role, self.is_superuser)
         self.role = role
         self.save(update_fields=["role"])
         if rank(self.role, self.is_superuser) > before:
             RoleGrant.record(self, by)
+        if self.role != had:
+            announce_withdrawal(self.pk)
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -107,7 +139,8 @@ class RoleGrant(models.Model):
     approval is refused for it by this rule.
 
     A grant that names its granter is also emitted, once it commits, as a signed
-    delegation record (assurance.identity_emitter, authority chain short 2); a record
+    delegation record of one lease (assurance.identity_emitter, authority chain short
+    2, which listens for this model's ``post_save``: nothing here imports it); a record
     that cannot be made never refuses the promotion."""
 
     id = models.BigAutoField(primary_key=True)
@@ -136,17 +169,11 @@ class RoleGrant(models.Model):
             granted_by_username=(granter.get_username() or "")[:150] if named else "",
             granted_at=timezone.now(),
         )
-        # Signed, once the promotion commits, as a delegation record of the grant
-        # (assurance.identity_emitter, authority chain short 2). Only a promotion
-        # reaches here; the promotion stands whatever happens to its record. A grant
-        # that names nobody was delegated by nobody, and has no delegation record.
-        if named:
-            try:
-                from assurance import identity_emitter
-
-                identity_emitter.after_commit(lambda: identity_emitter.emit_role_grant(grant.pk))
-            except Exception:  # noqa: BLE001 - the promotion stands; only its record is missing
-                logger.exception("role grant %s's record could not be scheduled", grant.pk)
+        # Signed, once the promotion commits, as a delegation record of the grant, by
+        # the identity emitter's post_save receiver (assurance.identity_emitter,
+        # authority chain short 2). Only a promotion reaches here; the promotion stands
+        # whatever happens to its record. A grant that names nobody was delegated by
+        # nobody, and has no delegation record.
         return grant
 
     @classmethod

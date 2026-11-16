@@ -184,6 +184,9 @@ jobs:
   # a closed loopback port at once, it times the connect out, and urllib3's timed-out
   # connect carries the connection object, whose repr names the host and port. Only
   # Windows meets that shape for real, so only this job proves no error says it.
+  # And the identity emitter's own tests: a demoted operator's role grant stops proving,
+  # its revocation is signed only once the stop is answered, and the reconcile never
+  # extends a lease.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -223,7 +226,7 @@ jobs:
         run: |
           python -c "import mythos_core.http, mythos_core.failsafe"
           python manage.py check
-          python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.economics.capacity"
+          python manage.py shell -c "import pentest.models, pentest.views, pentest.urls, failsafe.signing, failsafe.views, assurance.oplog, assurance.worker_reports, assurance.economics.capacity"
           python manage.py makemigrations --check --dry-run
 
       - name: Test (pin guard, stop paths, the economics run cap, Windows-equivalent tests, SPINE's statement budget and scope)
@@ -238,6 +241,7 @@ jobs:
             tests/test_economics_run_cap_on_every_platform.py \
             tests/test_oplog_without_select.py \
             tests/test_an_unrecorded_dispatch_is_always_named.py \
+            tests/test_health_counts_every_worker.py \
             tests/test_failsafe_control_plane.py \
             tests/test_no_in_flight_failsafe_command_is_left_off_a_list.py \
             tests/test_no_control_holds_back_a_stop.py \
@@ -268,6 +272,8 @@ jobs:
             tests/test_the_engine_health_check_holds_a_total_deadline.py \
             tests/test_every_llm_scan_registers_its_model.py \
             tests/test_economics_exposure_report.py \
+            tests/test_a_demoted_operators_grant_stops_proving.py \
+            tests/test_the_backend_sign_in_emits_signed_identity_records.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \
