@@ -10,8 +10,11 @@ what kind of figure it is, and unlike kinds are never added (roadmap AT-6;
 - no amount changed: each is the figure ``report.build_report`` and
   ``GET .../economics/portfolio/`` serve, text for text;
 - an estimate is never labelled a booked kind; a figure the core refuses, or one with no
-  period, is not a measure and says why, its amount still shown and the gap named; an
-  assumption's money reads ``unknown``, with the reason, never under a default kind;
+  period, is not a measure and says why, its amount still shown and the gap named; a
+  figure whose kind cannot be established reads ``unknown``, with the reason, never under
+  a default kind;
+- an assumption is an input as stated, not a measure: listed with the assumptions, its
+  numbers as recorded, under one line that says so, with no kind and no gap;
 - a total is the core's to make: two kinds, two currencies and two modelled exposures are
   refused, and the report itself adds nothing; the deployment total is the portfolio's own
   figure, typed, never a sum of the scenarios' own;
@@ -135,7 +138,7 @@ def test_every_figure_of_a_run_is_a_modeled_exposure_measure_and_no_amount_chang
     assert (f"Exposure: {eal} modeled_exposure; {rows[eal]}; period {DAY} to {DAY}, for that period alone; rests on "
             f"snapshot simulation-inputs:{result.uuid} ({result.input_digest}); recorded in "
             f"{report.REPORT_SCHEMA}:{result.uuid}") in text
-    assert em.RULE in text and em.PERIOD_RULE in text
+    assert em.RULE in text and em.PERIOD_RULE in text and em.BASIS_RULE in text
     pdf = _client(people["owner"]).get(_url(deployment, "?output=pdf"))
     assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
 
@@ -212,7 +215,7 @@ def test_an_estimate_is_never_labelled_a_booked_kind(deployment, people):
     _totalled(deployment)
     served = exposure_report.document(deployment)
     kinds = {entry["kind"] for entry in served["measures"]}
-    assert kinds == {measures.MODELED_EXPOSURE, em.UNKNOWN} and not kinds & set(measures.BOOKED_KINDS)
+    assert kinds == {measures.MODELED_EXPOSURE} and not kinds & set(measures.BOOKED_KINDS)
     figure = em.modeled(RUN, "Exposure", "P90", "12.34")
     assert figure.kind == figure.measure.kind == measures.MODELED_EXPOSURE
     # A figure cannot carry one kind and hold a measure of another.
@@ -220,22 +223,39 @@ def test_an_estimate_is_never_labelled_a_booked_kind(deployment, people):
         em.Figure("Exposure", "P90", "USD 12.34", measures.CONFIRMED_LOSS, figure.measure, None)
 
 
-def test_an_assumptions_money_reads_unknown_with_the_reason_never_under_a_kind(deployment, people):
-    _insured(deployment, people)
+def test_an_assumption_is_an_input_as_stated_never_a_measure_and_never_a_gap(deployment, people):
+    """An assumption's nature is known: an input the model reads, as someone stated it. It
+    is not a measure and not ``unknown``: it is listed where the report lists its
+    assumptions, its numbers exactly as before, under one line that says what it is, with no
+    kind and no gap."""
+    _, result = _insured(deployment, people)
+    parameters = report.build_report(result)["parameters"]
     served = exposure_report.document(deployment)
-    assumed = _figures(served, exposure_report.ASSUMPTIONS_HEADING)
-    rows = dict(dict(served["sections"])[exposure_report.ASSUMPTIONS_HEADING])
-    # The money assumptions of the fixture, and only they: a count and an hours figure are not money.
-    assert set(assumed) == {"exposure.regulatory_response_cost", "insurance_deductible", "insurance_limit",
-                            "notification_fixed_cost", "notification_unit_cost"}
-    for name, entry in assumed.items():
-        assert entry == {"section": exposure_report.ASSUMPTIONS_HEADING, "label": name,
-                         "shown": rows[name].partition(";")[0], "kind": em.UNKNOWN, "measure": None,
-                         "why": em.ASSUMPTION_WHY}
-        assert entry["shown"].startswith("low ") and entry["shown"].endswith(" USD")
-    # Shown as recorded, below the minor unit included: the number is not changed and not typed.
+    listed = dict(served["sections"])[exposure_report.ASSUMPTIONS_HEADING]
+    assert listed[0] == ("What these are", em.ASSUMPTIONS_ARE)
+    rows = dict(listed[1:])
+    assert set(rows) == set(parameters) and len(listed) == len(parameters) + 1
+    # The numbers as recorded, below the minor unit included: the text the report served before.
+    for name, entry in parameters.items():
+        assert rows[name] == (f"low {entry.get('low')}, base {entry.get('base')}, high {entry.get('high')} "
+                              f"{entry.get('currency') or entry.get('unit')}; source {entry.get('source_type')}; "
+                              f"evidence {entry.get('evidence_ref') or 'none named'}; effective "
+                              f"{entry.get('effective_date')}")
     assert rows["notification_unit_cost"].startswith("low 2.375, base 2.375, high 2.375 USD; ")
-    assert rows["Kind of each amount of money below"] == f"unknown: {em.ASSUMPTION_WHY}"
+    # Never a measure, never a kind, never unknown.
+    assert _figures(served, exposure_report.ASSUMPTIONS_HEADING) == {}
+    assert {entry["kind"] for entry in served["measures"]} == {measures.MODELED_EXPOSURE}
+    kinds = dict(served["sections"])[exposure_report.MEASURES_HEADING]
+    assert not [label for label, _ in kinds
+                if label == em.UNKNOWN or label.startswith(exposure_report.ASSUMPTIONS_HEADING)]
+    # Never a gap: no line under "What is not measured" names an assumption.
+    gaps = [value for _, value in dict(served["sections"])["What is not measured"]]
+    assert not [gap for gap in gaps for name in parameters if name in gap]
+    text = _text(_page(_client(people["owner"]), deployment))
+    assert f"What these are {em.ASSUMPTIONS_ARE}" in text
+
+
+def test_a_figure_whose_kind_is_not_established_reads_unknown_and_is_never_a_measure():
     # Unknown is not a kind of the core, and nothing is a measure of it.
     assert em.UNKNOWN not in measures.MEASURE_KINDS
     measure = em.modeled(RUN, "Exposure", "P90", "12.34").measure
@@ -428,6 +448,10 @@ def test_the_kinds_are_the_cores_eight_each_in_the_cores_words():
         assert f"`{kind}`: {means}" in readme, kind
         assert lint.lint(f"{kind}: {means}").ok
     assert "kinds are never added" in readme and "### 38.2 Every figure says what kind it is" in spec
-    for words in (em.RULE, em.PERIOD_RULE, em.ASSUMPTION_WHY, em.NO_PERIOD, em.NOT_SUMMED):
+    for words in (em.RULE, em.PERIOD_RULE, em.BASIS_RULE, em.ASSUMPTIONS_ARE, em.NO_PERIOD, em.NOT_SUMMED):
         assert lint.lint(words).ok, words
-    assert em.RULE in spec and em.PERIOD_RULE in spec
+    assert em.RULE in spec and em.PERIOD_RULE in spec and em.BASIS_RULE in spec and em.ASSUMPTIONS_ARE in spec
+    # The README says both: the period and the basis of a modelled figure.
+    assert "Its period is the valuation day alone" in readme
+    assert "Its basis is the stored inputs of the run that computed it, named with that run's input digest" in readme
+    assert "An assumption is not a measure" in readme and "An assumption is not a measure" in spec

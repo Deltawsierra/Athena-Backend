@@ -1396,8 +1396,8 @@ dashboard needs (section 30):
   version it totals is this deployment's and approved; each version it does not total
   is named with its reason, each total carries the portfolio's integrity line (which
   runs it vouches for and which not), and one gap makes it read `AUDIT_INCOMPLETE`.
-  Every amount of money it shows says what kind of figure it is (AT-6; spec, section
-  38.2): each is held as a measure of `mythos_core.measures` -- its kind, its money
+  Every figure of loss or exposure it shows says what kind of figure it is (AT-6; spec,
+  section 38.2): each is held as a measure of `mythos_core.measures` -- its kind, its money
   in one currency at the minor unit, the period it is for and the snapshot it rests
   on -- and listed under "What kind of figure each amount is". The kinds are the
   core's eight, in the core's words:
@@ -1410,10 +1410,15 @@ dashboard needs (section 30):
   - `funds_frozen`: assets held where they are, and not yet returned;
   - `funds_returned`: assets actually returned to those they were taken from.
   Every figure of a run, of a residual run and of the deployment total is a
-  `modeled_exposure`, valued on its valuation day and resting on the stored inputs of
-  the run that computed it; none is ever labelled a booked kind. An assumption's
-  money has no kind established and reads `unknown`, with the reason, shown as
-  recorded. The kinds are never added: a total is `mythos_core.measures.total`'s to
+  `modeled_exposure`; none is ever labelled a booked kind. Its period is the
+  valuation day alone (first and last day the same: a simulated year is not a
+  calendar year). Its basis is the stored inputs of the run that computed it, named
+  with that run's input digest (`simulation-inputs:<run>`, or
+  `portfolio-inputs:<portfolio>` for the deployment total). An assumption is not a
+  measure: it is an input the model reads, as someone stated it, listed with the
+  assumptions as recorded, with no kind, and never a gap for having none. A figure
+  whose kind cannot be established reads `unknown`, with the reason, and is never
+  shown under a kind. The kinds are never added: a total is `mythos_core.measures.total`'s to
   make, which refuses two kinds, two currencies and any two modelled exposures, so
   the report adds no two figures and sets them side by side instead; the deployment
   total stays the portfolio's own figure, typed and never recomputed. A figure the

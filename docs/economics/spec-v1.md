@@ -9182,8 +9182,8 @@ Roadmap AT-6. A confirmed loss, a remediation expense, deferred revenue, a model
 exposure, insurance promised and received, funds frozen and returned are different
 things, and a report that adds them, or shows one under another's name, misleads the
 person it is handed to. Mythos-Core holds the types (`mythos_core.measures`,
-Mythos-Core #66); the report holds every amount of money it shows as one of them
-(`assurance/economics/exposure_measures.py`). The rule, as the report states it: every amount of money in this report is held as a measure of mythos_core.measures: its kind, its money in one currency at the minor unit, the period it is for and the snapshot it rests on. Figures of two kinds are never added, nor figures in two currencies, at any rate; a modelled exposure is never added to any figure, another modelled exposure included: a total of modelled exposures is a model run's own to state. A figure whose kind is not established reads unknown, with the reason, and is never shown under a default kind.
+Mythos-Core #66); the report holds every figure of loss or exposure it shows as one of them
+(`assurance/economics/exposure_measures.py`). The rule, as the report states it: every figure of loss or exposure in this report is held as a measure of mythos_core.measures: its kind, its money in one currency at the minor unit, the period it is for and the snapshot it rests on. Figures of two kinds are never added, nor figures in two currencies, at any rate; a modelled exposure is never added to any figure, another modelled exposure included: a total of modelled exposures is a model run's own to state. A figure whose kind is not established reads unknown, with the reason, and is never shown under a default kind.
 
 | Kind | What it means, in the core's words |
 |---|---|
@@ -9206,13 +9206,19 @@ Mythos-Core #66); the report holds every amount of money it shows as one of them
   (`Period`); basis (`SourceReference`: `simulation-inputs:<run>` or
   `portfolio-inputs:<portfolio>` with the run's input digest, which the integrity
   checks hold the stored rows to); source (the run's report, `<schema>:<run>`). The
-  period, as the report states it: a modelled figure is for its valuation day, first and last day the same: a simulated year is not a calendar year, and the stored rows state no other day for it.
+  period, as the report states it: a modelled figure is for its valuation day alone, first and last day the same: a simulated year is not a calendar year, and the stored rows state no other day for it. The basis, as it states it: a modelled figure rests on the stored inputs of the model run that computed it (simulation-inputs for a scenario's run, portfolio-inputs for the portfolio's), named by that run's id, with that run's input digest, which the integrity checks hold the stored rows to.
 - **Nothing is typed by default.** A figure the core refuses (an amount off the minor
   unit, a currency it does not report, a digest that is not one) or one whose run has
   no valuation date is still shown, to the last minor unit, is not a measure, says
-  why, and is named under "What is not measured". An assumption's money (a parameter in
-  money, or in money per unit, per hour or per year) is an input the model reads: its
-  kind is not established, so it reads `unknown`, with the reason, shown as recorded.
+  why, and is named under "What is not measured". A figure whose kind cannot be
+  established reads `unknown`, with the reason, and is never a measure (no figure of
+  the report reaches this today).
+- **An assumption is not a measure** (the lead's ruling, 16 Nov 2026). A parameter the
+  run reads (in money, or in money per unit, per hour or per year) is an input as
+  someone stated it, not a figure of loss or exposure, and its nature is known: it is
+  not `unknown`. It is listed where the report lists its assumptions, its numbers as
+  recorded, under one line: "inputs the model reads, as the customer, an expert, a benchmark or an observation states them: not measures of loss or exposure; each is shown as recorded, with no kind, and is never added to any figure". It has no kind and is no
+  gap. An insurance limit is a policy term, not `insurance_promised`.
 - **Totals go through the core.** The one place the report may add figures is
   `exposure_measures.total`, which is `mythos_core.measures.total`: it refuses two
   kinds, two currencies and any two modelled exposures (`MeasuresDoNotAdd`). The

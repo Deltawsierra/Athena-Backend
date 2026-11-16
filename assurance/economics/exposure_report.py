@@ -26,14 +26,15 @@ recomputes, signs and verifies nothing, and asks no engine.
   every version it does not total is named with the portfolio's reason, and one run it
   cannot vouch for makes the total read ``AUDIT_INCOMPLETE``.
 
-- **Every amount says what kind of figure it is** (AT-6, section 38.2): each amount
-  of money shown is held as a ``mythos_core.measures.Measure`` (:mod:`.exposure_measures`)
+- **Every figure says what kind it is** (AT-6, section 38.2): each figure of loss or
+  exposure shown is held as a ``mythos_core.measures.Measure`` (:mod:`.exposure_measures`)
   -- its kind, its money, its period and the snapshot it rests on -- and the report
   states them under "What kind of figure each amount is". Every figure of a run or of
-  the portfolio is a ``modeled_exposure``; an assumption's money has no kind
-  established and reads ``unknown``, with the reason. The report adds no two figures:
-  a total is the core's to make (:func:`.exposure_measures.total`), and the core
-  refuses every sum of modelled exposures. No amount is changed by any of it.
+  the portfolio is a ``modeled_exposure``. An assumption is not a measure: it is an
+  input as stated, listed with the assumptions as recorded, with no kind and no gap.
+  The report adds no two figures: a total is the core's to make
+  (:func:`.exposure_measures.total`), and the core refuses every sum of modelled
+  exposures. No amount is changed by any of it.
 
 Nothing here is on a stop path: it is reached only from its route in
 :mod:`.report_api`, which imports it inside the view.
@@ -396,7 +397,7 @@ def _measures(held: list[em.Figure]) -> list[tuple[str, str]]:
     in the core's words, the pairs set side by side, and every figure as a measure
     (or why it is not one)."""
     if not held:
-        return [("Rule", em.RULE), ("", "no amount of money is shown")]
+        return [("Rule", em.RULE), ("", "no figure of loss or exposure is shown")]
     rows = [("Rule", em.RULE)]
     rows.extend((kind, em.KIND_MEANS[kind]) for kind in sorted({f.kind for f in held} - {em.UNKNOWN}))
     unknown = [figure for figure in held if figure.kind == em.UNKNOWN]
@@ -406,6 +407,7 @@ def _measures(held: list[em.Figure]) -> list[tuple[str, str]]:
         rows.append((em.UNKNOWN, "a figure whose kind is not established: not one of the core's kinds, and never "
                                  f"shown under one: {reasons}"))
     rows.append(("Period", em.PERIOD_RULE))
+    rows.append(("Basis", em.BASIS_RULE))
     rows.extend(("Side by side, never added", text) for text in _pairs(held))
     rows.extend((f"{figure.section}: {figure.label}",
                  f"{em.UNKNOWN}; not held as a measure; shown as recorded: {figure.shown}"
@@ -474,12 +476,9 @@ def document(deployment) -> dict:
                                 f"{entry.get('currency') or entry.get('unit')}; source {entry.get('source_type')}; "
                                 f"evidence {entry.get('evidence_ref') or 'none named'}; effective "
                                 f"{entry.get('effective_date')}"))
-            if entry.get("currency") or str(entry.get("unit") or "").startswith("money"):
-                # Money whose kind is not established: never typed by default (the lead decides).
-                held.append(em.not_established(ASSUMPTIONS_HEADING, name, assumptions[-1][1].partition(";")[0],
-                                               em.ASSUMPTION_WHY))
-        if any(figure.section == ASSUMPTIONS_HEADING for figure in held):
-            assumptions.insert(0, ("Kind of each amount of money below", f"{em.UNKNOWN}: {em.ASSUMPTION_WHY}"))
+        if assumptions:
+            # Inputs as stated, never measures: no kind and no gap (section 38.2).
+            assumptions.insert(0, ("What these are", em.ASSUMPTIONS_ARE))
         sections.append((ASSUMPTIONS_HEADING, assumptions))
         sections.append(("Limitations", [("", _quoted(text)) for text in built["limitations"]]))
     sections.append((TOTAL_HEADING, _total(deployment, gaps, held)))

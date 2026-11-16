@@ -1,7 +1,7 @@
-"""Every money figure of the economic-exposure report as a typed measure (roadmap
-AT-6; ``docs/economics/spec-v1.md``, section 38.2).
+"""Every figure of loss or exposure in the economic-exposure report as a typed measure
+(roadmap AT-6; ``docs/economics/spec-v1.md``, section 38.2).
 
-The report (:mod:`.exposure_report`) shows amounts of money. Each is held here as a
+The report (:mod:`.exposure_report`) shows figures of loss and exposure. Each is held here as a
 :class:`mythos_core.measures.Measure`: its kind (one of the core's eight, never one
 of this service's own), its amount as the core's ``Money`` (a ``Decimal`` at the
 currency's minor unit, in one reportable currency), the period it is for, and what
@@ -18,7 +18,7 @@ establish, is a :class:`Figure` with no measure and the reason, and reads so.
   the report already prints (the stored amount at the minor unit); nothing is
   rounded, padded or converted here, and the core refuses an amount that is not at
   the currency's minor unit.
-- **The period is the valuation day.** A modelled figure is valued as of one day
+- **The period is the valuation day alone.** A modelled figure is valued as of one day
   (the run's valuation date; the portfolio's). A simulated year is not a calendar
   year and the stored rows state no first or last day for it, so the period is that
   one day, first and last. A run with no valuation date has no period: its figures
@@ -26,6 +26,10 @@ establish, is a :class:`Figure` with no measure and the reason, and reads so.
 - **What a figure rests on** is the stored inputs of the model run that computed it:
   ``simulation-inputs:<run>`` or ``portfolio-inputs:<portfolio>`` with the run's
   input digest, which the integrity checks already hold the stored rows to.
+- **An assumption is not a measure.** A parameter the run reads (an amount, or an
+  amount per unit, per hour or per year) is an input as someone stated it, not a figure
+  of loss or exposure: the report lists it with its assumptions, as recorded, with no
+  kind (:data:`ASSUMPTIONS_ARE`), and it is never a gap for having none.
 - **Totals go through the core** (:func:`total`): the one place this report may add
   figures is ``mythos_core.measures.total``, which refuses two kinds, two currencies
   and any two modelled exposures. The deployment total is never made here: it is the
@@ -61,21 +65,25 @@ KIND_MEANS: dict[str, str] = {
 UNKNOWN = "unknown"
 #: The rule, as the report states it.
 RULE = (
-    "every amount of money in this report is held as a measure of mythos_core.measures: its kind, its money in one "
-    "currency at the minor unit, the period it is for and the snapshot it rests on. Figures of two kinds are never "
-    "added, nor figures in two currencies, at any rate; a modelled exposure is never added to any figure, another "
-    "modelled exposure included: a total of modelled exposures is a model run's own to state. A figure whose kind is "
-    "not established reads unknown, with the reason, and is never shown under a default kind"
+    "every figure of loss or exposure in this report is held as a measure of mythos_core.measures: its kind, its "
+    "money in one currency at the minor unit, the period it is for and the snapshot it rests on. Figures of two kinds "
+    "are never added, nor figures in two currencies, at any rate; a modelled exposure is never added to any figure, "
+    "another modelled exposure included: a total of modelled exposures is a model run's own to state. A figure whose "
+    "kind is not established reads unknown, with the reason, and is never shown under a default kind"
 )
 PERIOD_RULE = (
-    "a modelled figure is for its valuation day, first and last day the same: a simulated year is not a calendar "
-    "year, and the stored rows state no other day for it"
+    "a modelled figure is for its valuation day alone, first and last day the same: a simulated year is not a "
+    "calendar year, and the stored rows state no other day for it"
 )
-#: Why an assumption's money has no kind (the lead decides: the report does not guess).
-ASSUMPTION_WHY = (
-    "an assumption is an input the model reads (an amount, or an amount per unit, per hour or per year, as the "
-    "customer, an expert, a benchmark or an observation states it), not a figure the core's eight kinds name; it is "
-    "shown as recorded and is never added to any figure"
+BASIS_RULE = (
+    "a modelled figure rests on the stored inputs of the model run that computed it (simulation-inputs for a "
+    "scenario's run, portfolio-inputs for the portfolio's), named by that run's id, with that run's input digest, "
+    "which the integrity checks hold the stored rows to"
+)
+#: What the report says of its assumptions: inputs as stated, never measures (no kind, no gap).
+ASSUMPTIONS_ARE = (
+    "inputs the model reads, as the customer, an expert, a benchmark or an observation states them: not measures of "
+    "loss or exposure; each is shown as recorded, with no kind, and is never added to any figure"
 )
 #: The kind every figure of a model run is, with the core's meaning of it.
 MODELED = f"{measures.MODELED_EXPOSURE}: {KIND_MEANS[measures.MODELED_EXPOSURE]}"
