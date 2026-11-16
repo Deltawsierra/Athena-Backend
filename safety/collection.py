@@ -24,14 +24,29 @@ Bounded, so a stop can never switch the collector off for good: once it has
 been held off for :data:`HOLD_LIMIT` seconds without a break -- stops
 overlapping with no gap, or a response nobody closes or drops -- the holds in
 flight are withdrawn and it runs again; the next stop holds it afresh. Nothing
-here raises, waits on anything but a lock held for a few comparisons, or
-switches on a collector something else switched off. No tracked object is made
-under the lock, so no collection -- and no finalizer that lets a hold go -- can
-start while it is held.
+here raises, waits on anything, or switches on a collector something else
+switched off.
+
+Nothing here waits on its own lock either. A collection can start inside any
+function -- under Python 3.12 a collection that is due runs at the next
+function entry, wherever that is -- and it can finalize a dropped stop
+response, whose finalizer lets that stop's hold go. This module once assumed
+that could not happen while its lock was held, and a stop waited for ever on
+the lock its own thread held (tests/test_no_stop_waits_on_its_own_collector_hold.py).
+So every call takes the lock only if it is free (``acquire(blocking=False)``):
+
+* a stop that finds it busy is served without a hold -- the collector may run
+  in it, as it would with no hold at all -- and lets go of nothing;
+* a check of the limit that finds it busy is left to the next request;
+* a hold let go while it is busy is put in :data:`_LET_GO`, and whoever holds
+  the lock counts it before letting go of the lock (:func:`_leave`), or the
+  next caller does. Only the first letting go of a hold counts: that is decided
+  under the lock.
 """
 
 from __future__ import annotations
 
+import collections
 import gc
 import threading
 import time
@@ -42,12 +57,16 @@ import weakref
 #: or stops overlapping without a gap for this long, reaches it.
 HOLD_LIMIT = 5.0
 
+#: Only ever taken with ``acquire(blocking=False)``: see the module's docstring.
 _LOCK = threading.Lock()
 #: The current epoch (a withdrawal starts a new one, and a hold from an older
 #: one lets go of nothing), the holds in flight in it, whether this module
-#: switched the collector off, and when (monotonic). Only items are assigned
-#: here under _LOCK: no tracked object is made while it is held.
+#: switched the collector off, and when (monotonic). Read and written only by
+#: the holder of _LOCK.
 _STATE = {"epoch": 0, "holds": 0, "switched_off": False, "since": 0.0}
+#: Holds let go while _LOCK was busy, in the order they were let go: counted by
+#: the next holder of _LOCK before it lets go of it. Appending never waits.
+_LET_GO = collections.deque()
 
 
 def _withdraw_if_held_too_long(now) -> None:
@@ -62,7 +81,7 @@ def _withdraw_if_held_too_long(now) -> None:
 
 class _Hold:
     """One stop's hold on the collector. Calling it lets go; only the first
-    call counts."""
+    call counts. Calling it never waits."""
 
     __slots__ = ("epoch", "done", "__weakref__")
 
@@ -71,54 +90,100 @@ class _Hold:
         self.done = False
 
     def __call__(self) -> None:
-        with _LOCK:
-            if self.done:
-                return
-            self.done = True
-            if self.epoch != _STATE["epoch"]:
-                return  # withdrawn: the collector already runs again
+        if self.done:
+            return
+        if not _LOCK.acquire(blocking=False):
+            # Busy -- perhaps in this very thread, when the collector finalizes a
+            # dropped response inside this module. Whoever holds it counts this.
+            _LET_GO.append(self)
+            return
+        try:
+            _let_go(self)
+        finally:
+            _leave()
+
+
+def _let_go(hold) -> None:
+    """Under _LOCK: count ``hold`` as let go, the first time only, and only if
+    it is of the current epoch (a withdrawn hold lets go of nothing)."""
+    if not hold.done:
+        hold.done = True
+        if hold.epoch == _STATE["epoch"]:
             _STATE["holds"] -= 1
-            hand_back = _STATE["holds"] == 0 and _STATE["switched_off"]
-            epoch = _STATE["epoch"]
-        if hand_back:
-            _hand_back(epoch)
+
+
+def _count_let_go() -> None:
+    """Under _LOCK: count the holds let go while it was busy."""
+    while _LET_GO:
+        _let_go(_LET_GO.popleft())
+
+
+def _leave() -> None:
+    """Let go of _LOCK, which the caller holds: first count what was let go
+    while it was held, then, if that was the last hold in flight, hand the
+    collector back."""
+    _count_let_go()
+    hand_back = _STATE["holds"] == 0 and _STATE["switched_off"]
+    epoch = _STATE["epoch"]
+    _LOCK.release()
+    if hand_back:
+        _hand_back(epoch)
 
 
 def _hand_back(epoch) -> None:
     """Collect the young generations, with the collector still off, then switch
     it back on -- unless another stop took hold meanwhile, whose letting go
-    hands it back instead."""
+    hands it back instead. If the lock is busy, its holder hands it back as it
+    lets go of the lock (:func:`_leave`)."""
     try:
         gc.collect(1)
     finally:
-        with _LOCK:
-            if _STATE["epoch"] == epoch and _STATE["holds"] == 0 and _STATE["switched_off"]:
-                _STATE["switched_off"] = False
-                gc.enable()
+        if _LOCK.acquire(blocking=False):
+            try:
+                _count_let_go()
+                if _STATE["epoch"] == epoch and _STATE["holds"] == 0 and _STATE["switched_off"]:
+                    _STATE["switched_off"] = False
+                    gc.enable()
+            finally:
+                _leave()
 
 
 def hold_for_a_stop() -> _Hold:
-    """Hold the collector off for one stop. Returns the call that lets go."""
+    """Hold the collector off for one stop. Returns the call that lets go.
+
+    Never waits: if the lock is busy, the stop is served without a hold, and
+    the call returned lets go of nothing."""
     hold = _Hold()
     now = time.monotonic()
-    with _LOCK:
+    if not _LOCK.acquire(blocking=False):
+        hold.done = True
+        return hold
+    try:
         _withdraw_if_held_too_long(now)
+        _count_let_go()
         if _STATE["holds"] == 0 and not _STATE["switched_off"] and gc.isenabled():
             gc.disable()
             _STATE["switched_off"] = True
             _STATE["since"] = now
         _STATE["holds"] += 1
         hold.epoch = _STATE["epoch"]
+    finally:
+        _leave()
     return hold
 
 
 def withdraw_if_held_too_long() -> None:
     """Switch the collector back on if it has been held off for HOLD_LIMIT:
     called on every request that is not a stop, so a hold nobody let go ends
-    without waiting for another stop. A clock read and a few comparisons."""
+    without waiting for another stop. A clock read and a few comparisons; if
+    the lock is busy, the next request checks."""
     now = time.monotonic()
-    with _LOCK:
+    if not _LOCK.acquire(blocking=False):
+        return
+    try:
         _withdraw_if_held_too_long(now)
+    finally:
+        _leave()
 
 
 def let_go_when_answered(response, hold) -> None:
