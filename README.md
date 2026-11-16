@@ -1046,23 +1046,40 @@ revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered
   (`scope:revision:<n>:added:<kind>:<ref>`) and reads `AUDIT_INCOMPLETE`, never `PASS`.
   What the row recorded is served beside it (`recorded`); the row is not rewritten.
 - **An added item stays an open gap until a step recorded under that revision links
-  evidence for it.** The evidence is `Evidence` of the finding's own deployment, linked as
-  every evidence link is. It names an item through the asset its finding is attached to
-  (`Finding.asset`); one item's evidence covers that item and no other. Until every added
-  item has such evidence, both recovered states are held back: the step names each
-  uncovered item among its gaps and reads `AUDIT_INCOMPLETE`. Evidence names no workflow,
-  so a workflow a revision adds stays open.
+  something that names it.** An item counts when a revision after the first added it and
+  it has been in scope ever since. The step records which kind of link names each
+  (`scope_items`), and a reader never takes one for another:
+  - `evidence`: `Evidence` of the finding's own deployment whose finding is attached to
+    that asset (`Finding.asset`). Something was found there and is linked.
+  - `permit`: a linked Action Gate permit of that workflow, resolved as every permit is.
+  - `coverage`: the step's coverage manifest lists the asset (source `asset:<uuid>`) as a
+    required source and observes it in full, and was posted at or after the revision that
+    added the asset, by the server's clock. The asset was looked at and nothing was found.
+    A source that is missing, not fully observed or not declared, a manifest posted before
+    the revision, or a time that cannot be read, covers nothing.
+
+  One item's link covers that item and no other; another deployment's link is refused.
+  Until every such item is named, both recovered states are held back: the step names
+  each uncovered item among its gaps and reads `AUDIT_INCOMPLETE`.
 - **An empty step moves nothing.** After a recovered step that no longer stands, a step is
   recorded only when it answers something of what took the state away (a scope declared
-  where there was none, evidence for an added item) or a blocker stands. Any other is a
+  where there was none, a link that names an added item, a later revision with nothing
+  open) or a blocker stands: a failure is never left unrecorded. Any other is a
   409 (`nothing_moved`) that names what is still open. The step that does move returns to
   `under_investigation` under the current revision and names the step it sets aside
   (`reopens`). After `restored_with_restrictions` that is S1's reopen. S1 lets nothing
   follow `recovery_accepted`, not even a reopen: the rule "a scope revision reopens an
   accepted recovery" belongs in `mythos_core.status` and is not there yet, so S1's step
   check is not asked about the accepted step and runs from the new one on.
-- **A narrower scope.** A revision that only removes items holds nothing back and lifts
-  nothing: it never advances a state by itself.
+- **A narrowing lifts the gap for the item it removes, openly.** The item is no longer a
+  gap, and every step derived after it lists it (`scope_items.removed`): both revision
+  numbers, who removed it and why. A revision that removes an item names who declared it.
+  It is still a new revision: it records no step and advances nothing by itself, and a
+  recovered step taken before it stays set aside (`scope:revision:<n>:supersedes:<k>`)
+  until a step is recorded under it. An item removed and added again counts from when it
+  was added again.
+- **Not covered:** the first declared scope's items are not tied one by one. Only items
+  added later are.
 - **Rows from before this change** name no revision and are not rewritten. They read
   `scope:not_declared`: one that recorded a recovered state reads `AUDIT_INCOMPLETE` until
   a scope is declared and steps are recorded under it.

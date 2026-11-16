@@ -3858,9 +3858,10 @@ class FindingViewSet(
         accepts is the authenticated request user, never a field. The state, its
         conditions and its release are derived, and a body naming them is refused. A
         step that moves nothing -- links changed and no state with them -- is a 409. So
-        is one that, after the incident's scope has widened, links evidence for none of
-        the items a revision added (SP-3): each stays an open gap until evidence of this
-        deployment names it."""
+        is one that, after the incident's scope has widened, links nothing that names
+        an item a revision added (SP-3): each stays an open gap until a link of this
+        deployment names it -- evidence of a finding on that asset, a permit of that
+        workflow, or the asset observed in a coverage manifest posted since."""
         finding = self.get_object()
         if request.method != "POST":
             return Response(recovery_record.finding_record(finding))

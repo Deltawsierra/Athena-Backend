@@ -21,6 +21,11 @@ class Migration(migrations.Migration):
             name="scope_revision",
             field=models.PositiveIntegerField(blank=True, null=True),
         ),
+        migrations.AddField(
+            model_name="recoveryrecord",
+            name="scope_items",
+            field=models.JSONField(blank=True, null=True),
+        ),
         migrations.CreateModel(
             name="IncidentScopeRevision",
             fields=[

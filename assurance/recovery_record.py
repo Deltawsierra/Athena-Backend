@@ -67,25 +67,40 @@ holds only for that revision:
   what the row recorded beside it. A row from before SP-3 names no revision and reads the
   same way, as ``scope:not_declared``.
 - *An added item stays an open gap until a step recorded under that revision links
-  evidence for it.* The evidence is ``Evidence`` of the finding's own deployment, linked
-  as every evidence link is, and it names an item through the asset its finding is
-  attached to (``Finding.asset``, kept on the link by :func:`resolve`). One item's
-  evidence covers that item and no other. Until every added item has such evidence, both
+  something that names it* (:func:`scope_items`). An item counts when it is in the
+  step's scope, a revision after the first added it, and it has been in scope ever since.
+  Three kinds of link name one, and the step records which did (``scope_items``):
+
+  ============  =========================================================================
+  ``evidence``  ``Evidence`` of the deployment whose finding is attached to that asset
+                (``Finding.asset``, kept on the link by :func:`resolve`): something was
+                found there, and it is linked. No recency rule.
+  ``permit``    a linked Action Gate permit of that workflow, resolved as every permit is.
+  ``coverage``  the step's coverage manifest lists the asset (source ``asset:<uuid>``) as
+                a required source and observes it in full, and the manifest was posted
+                at or after the revision that added the asset, by the server's clock
+                (kept on the links as ``coverage_recorded_at``). It says the asset was
+                looked at and nothing was found; it never reads as found and fixed. A
+                source that is missing, not fully observed or not declared, a manifest
+                posted before the revision, or a time that cannot be read, covers nothing.
+  ============  =========================================================================
+
+  One item's link covers that item and no other. Until every such item is named, both
   recovered states are held back: the step names each uncovered item among its gaps and
-  reads ``AUDIT_INCOMPLETE``. Evidence names no workflow (a finding is attached to an
-  asset, never to a workflow), so a workflow a revision adds stays open.
-- *After a recovered step that no longer stands*, a step is recorded only when it answers
-  something of what took the state away (a scope declared where there was none; evidence
-  for an added item) or a blocker stands. An empty step, or one whose evidence names none
-  of the added items, moves nothing (``nothing_moved``). The step that does move returns
-  to ``under_investigation`` under the current revision and names the step it sets aside
-  (``reopens``). After ``restored_with_restrictions`` that is S1's reopen, checked by
-  S1. S1 lets nothing follow ``recovery_accepted``, not even a reopen: the rule "a scope
-  revision reopens an accepted recovery" belongs in ``mythos_core.status`` and is not
-  there yet, so after an accepted step S1's step check is not asked about that step,
-  and runs from the new one on.
-- *A narrower scope.* A revision that only removes items holds nothing back and lifts
-  nothing: it never advances a state by itself.
+  reads ``AUDIT_INCOMPLETE``.
+- *A narrowing lifts the gap for the item it removes, openly.* The item is no longer a
+  gap, and ``scope_items`` lists it as removed: both revision numbers, who removed it and
+  why. The first declared scope's items are not tied one by one; only items added later are.
+- *After a recovered step that no longer stands* (any later revision sets it aside, a
+  narrowing included), a step is recorded only when it answers something of what took the
+  state away, or a blocker stands: a failure is never left unrecorded. A step whose links
+  name none of the items still open moves nothing (``nothing_moved``). The step that
+  does move returns to ``under_investigation`` under the current revision and names the
+  step it sets aside (``reopens``). After ``restored_with_restrictions`` that is S1's
+  reopen, checked by S1. S1 lets nothing follow ``recovery_accepted``, not even a reopen:
+  the rule "a scope revision reopens an accepted recovery" belongs in
+  ``mythos_core.status`` and is not there yet, so after an accepted step S1's step check
+  is not asked about that step, and runs from the new one on.
 
 **Residual uncertainty** is a list of statements, each with its sources: every open
 ``Unknown`` of the finding, every coverage gap, a scope that is not declared, every
@@ -99,6 +114,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import datetime
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -215,7 +231,7 @@ def _coverage_holds(manifest: cov.Manifest) -> tuple[list[str], bool]:
 # ------------------------------------------------------------------ the links
 
 
-def resolve(finding, body=None, previous=None) -> tuple[dict, dict]:
+def resolve(finding, body=None, previous=None, now=None) -> tuple[dict, dict]:
     """``(links, coverage)`` for a step of ``finding``'s recovery: what ``body`` posts,
     with what it leaves out carried from ``previous``, each resolved in the finding's own
     deployment. Refuses a link that is another deployment's, or does not verify now."""
@@ -337,6 +353,11 @@ def resolve(finding, body=None, previous=None) -> tuple[dict, dict]:
         "gaps": _list(given["gaps"], "gaps"),
         "restrictions": _list(given["restrictions"], "restrictions"),
         "uncertainty": _uncertainty(given["residual_uncertainty"], sources),
+        # When the step's coverage manifest was posted, by the server's clock: now for
+        # one posted with this step, as carried for one carried from the step before.
+        "coverage_recorded_at": (now or timezone.now()).isoformat() if "coverage" in body else before.get(
+            "coverage_recorded_at"
+        ),
     }
     data = body["coverage"] if "coverage" in body else (previous.coverage if previous is not None else None)
     return links, _manifest_json(manifest_of(finding, data))
@@ -415,29 +436,82 @@ def _condition_texts(conditions: list[dict]) -> list[str]:
     return [f"{c['condition']}:{c['witness']['kind']}:{c['witness']['ref']}" for c in conditions]
 
 
-def named(links: dict) -> set[tuple[str, str]]:
-    """The scope items the evidence a step links names: the asset each piece of evidence's
-    finding is attached to (:func:`resolve`). Evidence names no workflow: a finding is
-    attached to an asset, never to a workflow. Pure."""
-    return {(incident_scope.ASSET, one["asset"]) for one in links.get("evidence", []) if one.get("asset")}
+#: The kinds of link that name a scope item: SP-1's own witness kinds.
+EVIDENCE, PERMIT, COVERAGE = "evidence", "permit", "coverage"
 
 
-def scope_holds_of(scope_revision, revisions, links: dict) -> list[str]:
+def _at_or_after(stamp, instant) -> bool:
+    """Whether ``stamp`` (an ISO instant kept on the links) is at or after ``instant``.
+    False when either cannot be read."""
+    try:
+        return datetime.fromisoformat(stamp) >= instant
+    except (TypeError, ValueError):
+        return False
+
+
+def scope_items(links: dict, manifest: cov.Manifest, scope_revision, revisions) -> dict:
+    """What a step derived under ``scope_revision`` and resting on ``links`` and
+    ``manifest`` says of the items its scope gained and lost:
+
+    - ``added``: each item of its scope that a revision after the first added and that
+      has been in scope ever since, with the links that name it (``covered_by``, each
+      ``{kind, ref}``): ``evidence`` of a finding attached to that asset; a ``permit`` of
+      that workflow; ``coverage`` -- the manifest lists the asset as a required source,
+      observes it in full, and was posted at or after the revision that added it. None
+      named is an open gap.
+    - ``removed``: each item a revision added and a later one removed, with both revision
+      numbers, who removed it and why. Disclosed; not a gap.
+
+    Pure."""
+    standing = None if scope_revision is None else incident_scope.since(revisions, scope_revision)
+    if not standing:
+        return {"added": [], "removed": []}
+    first = revisions[0].revision
+    declared_at = {row.revision: getattr(row, "declared_at", None) for row in revisions}
+    missing = cov.coverage_ratio(manifest).missing
+    added = []
+    for (kind, ref), revision in standing.items():
+        if revision <= first:
+            continue
+        by = []
+        if kind == incident_scope.ASSET:
+            by += [
+                {"kind": EVIDENCE, "ref": one["uuid"]}
+                for one in links.get("evidence", []) if isinstance(one, dict) and one.get("asset") == ref
+            ]
+            source = f"{kind}:{ref}"
+            if missing.get(source) == () and _at_or_after(links.get("coverage_recorded_at"), declared_at[revision]):
+                by.append({"kind": COVERAGE, "ref": source})
+        elif kind == incident_scope.WORKFLOW:
+            by += [
+                {"kind": PERMIT, "ref": one["outcome_id"]}
+                for one in links.get("permits", []) if isinstance(one, dict) and one.get("workflow") == ref
+            ]
+        added.append({"revision": revision, "kind": kind, "ref": ref, "covered_by": by})
+    return {"added": added, "removed": incident_scope.removed(revisions, scope_revision)}
+
+
+def scope_holds_of(scope_revision, revisions, links: dict, manifest: cov.Manifest) -> list[str]:
     """Each thing about the incident's scope that holds a recovered state back for a step
-    derived under ``scope_revision`` and resting on ``links``, named: no declared scope,
-    an unreadable one, each item a later revision added, and each item a revision up to
-    its own added that the step links no evidence for. Pure."""
+    derived under ``scope_revision`` and resting on ``links`` and ``manifest``, named: no
+    declared scope, an unreadable one, a later revision, and each item its own scope
+    gained that nothing it links names. Pure."""
     return [
         *incident_scope.holds(scope_revision, revisions),
-        *incident_scope.uncovered(scope_revision, revisions, named(links)),
+        *(
+            incident_scope.gap(item["revision"], item["kind"], item["ref"])
+            for item in scope_items(links, manifest, scope_revision, revisions)["added"] if not item["covered_by"]
+        ),
     ]
 
 
 def lapsed(row, revisions) -> list[str]:
     """Each thing about the incident's scope that takes ``row``'s recovered state away,
     named (:func:`scope_holds_of`): empty when ``row`` is not a recovered state, or the
-    scope revision it was derived under still stands. Pure."""
-    return scope_holds_of(row.scope_revision, revisions, row.links) if row.state in RECOVERED else []
+    scope revision it was derived under is current. Pure."""
+    if row.state not in RECOVERED:
+        return []
+    return scope_holds_of(row.scope_revision, revisions, row.links, manifest_of(row.finding, row.coverage))
 
 
 def derive(
@@ -451,7 +525,7 @@ def derive(
     ``previous`` that the witnesses support. Pure."""
     facts = _facts(links, accepted)
     holds, complete = _coverage_holds(manifest)
-    scope_holds = scope_holds_of(scope_revision, revisions, links)
+    scope_holds = scope_holds_of(scope_revision, revisions, links, manifest)
     blocked = bool(facts[EFFECT_NOT_APPLIED])
 
     def supported(state, *, holds_count=True):
@@ -521,6 +595,7 @@ def derive(
         # A pass never rests on a scope that holds anything back, complete coverage or not.
         "release": st.AUDIT_INCOMPLETE if scope_holds and release == st.PASS else release,
         "residual_uncertainty": residual,
+        "scope_items": scope_items(links, manifest, scope_revision, revisions),
     }
 
 
@@ -537,6 +612,7 @@ def _stored(row) -> dict:
     return {
         "state": row.state, "reopens": row.reopens, "conditions": row.conditions, "gaps": row.gaps,
         "restrictions": row.restrictions, "release": row.release, "residual_uncertainty": row.residual_uncertainty,
+        "scope_items": row.scope_items,
     }
 
 
@@ -580,7 +656,7 @@ def draft(finding, *, version, links, coverage=None, accepted_by=None, accepted_
         return None
     row.state, row.reopens, row.conditions = derived["state"], derived["reopens"], derived["conditions"]
     row.gaps, row.restrictions, row.release = derived["gaps"], derived["restrictions"], derived["release"]
-    row.residual_uncertainty = derived["residual_uncertainty"]
+    row.residual_uncertainty, row.scope_items = derived["residual_uncertainty"], derived["scope_items"]
     return row
 
 
@@ -605,7 +681,7 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
             raise RecoveryRefused("not_the_owner", "only the deployment's owner accepts its recovery")
         if accept_until <= now:
             raise RecoveryRefused("acceptance_ended", "an acceptance names an end in the future")
-    links, coverage = resolve(finding, body, previous)
+    links, coverage = resolve(finding, body, previous, now)
     steps = []
     try:
         with transaction.atomic():
@@ -629,7 +705,8 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
                 "nothing_moved",
                 f"nothing moved: step {previous.version} ({previous.state}) no longer stands under the incident's "
                 f"scope, and this step answers none of what took it away: {lapse}. An item a revision added stays "
-                "open until a step links evidence that names it",
+                "open until a step links something that names it: evidence of a finding on that asset, a permit of "
+                "that workflow, or the asset observed in a coverage manifest posted since",
             )
         raise RecoveryRefused(
             "nothing_moved",
@@ -668,6 +745,10 @@ def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION) -> dict:
         "release": row.release if stands else st.AUDIT_INCOMPLETE,
         "scope_revision": row.scope_revision,
         "scope_gaps": scope_gaps,
+        # As recorded: each item the scope gained, with the kind of link that names it
+        # (finding evidence, a permit, or a coverage observation with nothing found), and
+        # each item it lost, with who removed it and why. None on a row from before SP-3.
+        "scope_items": row.scope_items,
         "recorded": {"state": row.state, "gaps": row.gaps, "release": row.release},
         "residual_uncertainty": row.residual_uncertainty,
         "links": row.links,
@@ -708,7 +789,8 @@ def served_steps(steps: list, revisions: list) -> list[dict]:
     derived under and what holds it back now (:func:`served`)."""
     held_at, out = st.UNDER_INVESTIGATION, []
     for step in steps:
-        out.append(served(step, scope_holds_of(step.scope_revision, revisions, step.links), held_at))
+        holds = scope_holds_of(step.scope_revision, revisions, step.links, manifest_of(step.finding, step.coverage))
+        out.append(served(step, holds, held_at))
         if step.state not in RECOVERED:
             held_at = step.state
     return out

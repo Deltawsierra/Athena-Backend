@@ -29,23 +29,27 @@ The kinds are this backend's own records, as the recovery record's witnesses are
 kinds, and none is invented here. A route has no record of its own in this backend, so a
 route is in scope as the assets on it.
 
-**What a recovery reads of it** (:func:`holds`, :func:`uncovered`). A recovered state
-holds only for the revision its step was derived under (:mod:`assurance.recovery_record`).
-A revision *adds* when it holds an item the revision it supersedes does not (:func:`added`;
-the first revision supersedes none, and adds nothing to an earlier scope). Each thing
-below holds a recovered state back, named:
+**What a recovery reads of it** (:func:`holds`, :func:`since`, :func:`removed`). A
+recovered state holds only for the revision its step was derived under
+(:mod:`assurance.recovery_record`): any later revision, a narrowing included, sets it
+aside until a step is recorded under the new one. Each thing below holds a recovered
+state back, named:
 
 - ``scope:not_declared``: the step was derived with no revision on record, or names one
   that is not on record. No declared scope is unknown, never ok.
-- ``scope:revision:<n>:added:<kind>:<ref>``: revision ``n`` added that item, and either
-  ``n`` is later than the step's revision (:func:`holds`), or the step links no evidence
-  that names the item (:func:`uncovered`). **An added item stays an open gap until a step
-  recorded under that revision links evidence for it.**
+- ``scope:revision:<n>:added:<kind>:<ref>``: the item is in scope, revision ``n`` (after
+  the first) added it and it has been in scope ever since, and either ``n`` is later than
+  the step's revision or the step links nothing that names the item. An item removed and
+  added again counts from when it was added again.
+- ``scope:revision:<n>:supersedes:<k>``: the step was derived under revision ``k``, and
+  ``n`` is current and added nothing that is still in scope.
 - ``scope:unreadable``: a revision's items cannot be read. Unreadable is caution.
 
-A revision that only removes items names nothing here, and lifts nothing: an item a
-revision added stays named whatever a later one removes. So a narrowing never advances a
-state by itself; only a step that links evidence for the item does.
+**A narrowing lifts the gap for the item it removes, openly.** An item a revision added
+and a later one removed is no longer a gap; it is listed with every step derived after it
+(:func:`removed`: both revision numbers, who removed it and why). A revision that removes
+an item names who declared it (``declared_by_required``), as every revision states why.
+The first declared scope's items are not tied one by one: only items added later are.
 
 Reads and writes only this record; nothing a stop or the decision reads.
 """
@@ -201,6 +205,8 @@ def check(row) -> None:
         rests_on = None
     if rests_on is None or row.evidence != resolve_evidence(row.finding, rests_on):
         raise ScopeRefused("malformed", "a scope revision's evidence is the deployment's own")
+    if latest is not None and row.declared_by_id is None and set(_keys(latest.items) or ()) - set(keys):
+        raise ScopeRefused("declared_by_required", "a revision that removes an item names who declared it")
     if latest is not None and set(_keys(latest.items) or ()) == set(keys):
         raise ScopeRefused(
             "nothing_changed", f"nothing changed: revision {current} already holds exactly these items"
@@ -251,47 +257,65 @@ def gap(revision: int, kind: str, ref: str) -> str:
     return f"scope:revision:{revision}:added:{kind}:{ref}"
 
 
-def added(revisions) -> list[tuple[int, str, str]] | None:
-    """Each item a revision added to the one it supersedes, as ``(revision, kind, ref)``,
-    given every revision of an incident, oldest first. The first supersedes none and adds
-    nothing. None when any revision's items cannot be read. Pure."""
-    items, before = [], None
+def _walk(revisions, upto=None):
+    """``(since, removed)`` up to revision ``upto`` (the newest when None), or None when a
+    revision's items cannot be read. See :func:`since` and :func:`removed`."""
+    held, gone, first = {}, [], None
     for row in revisions:
+        if upto is not None and row.revision > upto:
+            break
         keys = _keys(row.items)
         if keys is None:
             return None
-        if before is not None:
-            items += [(row.revision, kind, ref) for kind, ref in keys if (kind, ref) not in before]
-        before = set(keys)
-    return items
+        first = row.revision if first is None else first
+        gone += [
+            {
+                "kind": kind, "ref": ref, "added": added, "removed": row.revision,
+                "removed_by": row.declared_by.username if getattr(row, "declared_by_id", None) else None,
+                "reason": getattr(row, "reason", ""),
+            }
+            for (kind, ref), added in held.items() if (kind, ref) not in keys and added > first
+        ]
+        held = {key: held.get(key, row.revision) for key in keys}
+    return held, gone
+
+
+def since(revisions, upto=None) -> dict | None:
+    """For every item in scope as of revision ``upto`` (the newest when None), by
+    ``(kind, ref)``: the revision since which it has been in scope without a break. An
+    item removed and added again counts from when it was added again. None when a
+    revision's items cannot be read. Pure."""
+    walked = _walk(revisions, upto)
+    return None if walked is None else walked[0]
+
+
+def removed(revisions, upto=None) -> list[dict] | None:
+    """Every item a revision after the first added and a later one removed, up to revision
+    ``upto``: its kind and ref, both revision numbers, who removed it and why. Disclosed
+    with every step derived after it; not a gap. None when a revision's items cannot be
+    read. Pure."""
+    walked = _walk(revisions, upto)
+    return None if walked is None else walked[1]
 
 
 def holds(taken_under, revisions) -> list[str]:
     """Each thing about an incident's scope that holds a recovered state back, named, for
     a step derived under revision ``taken_under`` (None: none was declared), given every
-    revision of the incident, oldest first: no declared scope, an unreadable one, or each
-    item a LATER revision added. Empty when the scope it was derived under still stands.
-    Pure."""
+    revision of the incident, oldest first: no declared scope, an unreadable one, or a
+    LATER revision -- each item one added that is still in scope, or, when none is, the
+    revision that supersedes the step's. Empty when the step's revision is current. Pure."""
     if taken_under is None:
         return [NOT_DECLARED]
-    items = added(revisions)
-    if items is None:
+    standing = since(revisions)
+    if standing is None:
         return [UNREADABLE]
     if taken_under not in {row.revision for row in revisions}:
         return [NOT_DECLARED]
-    return [gap(*item) for item in items if item[0] > taken_under]
-
-
-def uncovered(taken_under, revisions, named) -> list[str]:
-    """Each item a revision up to ``taken_under`` added for which a step derived under
-    ``taken_under`` links no evidence, named: ``named`` is the ``(kind, ref)`` of every
-    item the evidence the step links names. One item's evidence covers that item and no
-    other. Empty where :func:`holds` already answers for the scope itself (none declared,
-    or unreadable). Pure."""
-    items = added(revisions)
-    if taken_under is None or items is None:
+    current = revisions[-1].revision
+    if current == taken_under:
         return []
-    return [gap(*item) for item in items if item[0] <= taken_under and item[1:] not in named]
+    later = [gap(added, kind, ref) for (kind, ref), added in standing.items() if added > taken_under]
+    return later or [f"scope:revision:{current}:supersedes:{taken_under}"]
 
 
 def current_of(revisions) -> int | None:

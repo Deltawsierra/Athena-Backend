@@ -4409,8 +4409,8 @@ class RecoveryRecord(models.Model):
     acceptance, and its residual uncertainty with the sources of each item.
 
     THE STATE IS DERIVED, never typed in: ``state``, ``reopens``, ``conditions`` (each
-    with its witness), ``gaps``, ``restrictions``, ``release`` and
-    ``residual_uncertainty`` are what :func:`assurance.recovery_record.derive` computes
+    with its witness), ``gaps``, ``restrictions``, ``release``,
+    ``residual_uncertainty`` and ``scope_items`` are what :func:`assurance.recovery_record.derive` computes
     from the row's own ``links``, ``coverage`` and acceptance and the step before it,
     and ``save`` refuses a row that says anything else. A declared coverage gap never
     yields a recovered state, and its record's release reads ``AUDIT_INCOMPLETE``.
@@ -4460,6 +4460,10 @@ class RecoveryRecord(models.Model):
     # not a key: the revision is the finding's, so no second key can disagree with it,
     # and nothing here can move or protect a recorded revision. Null: none was declared.
     scope_revision = models.PositiveIntegerField(null=True, blank=True)
+    # Derived with the rest: each item the scope gained, with the links that name it and
+    # of which kind, and each item it lost, with who removed it and why
+    # (assurance.recovery_record.scope_items). Null: a row from before SP-3.
+    scope_items = models.JSONField(null=True, blank=True)
 
     objects = RecoveryRecordQuerySet.as_manager()
 
