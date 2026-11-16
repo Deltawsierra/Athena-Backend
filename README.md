@@ -1425,7 +1425,7 @@ dashboard needs (section 30):
   core will not hold (an amount off the minor unit, a run with no valuation date) is
   still shown, is not a measure, says why, and is a named gap. No amount changed.
 
-  **The report as JSON** (`?output=json`; `mythos.exposure-report/v1`; AT-6b; spec,
+  **The report as JSON** (`?output=json`; `mythos.economics.exposure-report/v1`; AT-6b; spec,
   section 38.3): the same report, as data. It carries every figure as the measure it is
   (kind, money, period, basis, source), the kinds shown in the core's words, the
   assumptions as inputs as stated (each as recorded, with the line that says they are

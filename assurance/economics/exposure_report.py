@@ -90,8 +90,10 @@ RESIDUAL_HEADING = "Residual exposure after controls"
 ASSUMPTIONS_HEADING = "Assumptions and their sources"
 #: The section that states what kind of figure each amount is (section 38.2).
 MEASURES_HEADING = "What kind of figure each amount is"
-#: The report's JSON format (section 38.3), served beside the HTML and the PDF.
-JSON_SCHEMA = "mythos.exposure-report/v1"
+#: The report's JSON format (section 38.3), served beside the HTML and the PDF; named
+#: as every format economics serves is (``mythos.economics.<thing>/v<n>``, as the run
+#: report's and the ROI document's).
+JSON_SCHEMA = "mythos.economics.exposure-report/v1"
 #: Every key of the JSON document, in order.
 JSON_FIELDS = ("schema", "deployment", "title", "status", "scenario", "input_digest", "rule", "period", "basis",
                "kinds", "measures", "assumptions", "not_measured", "digest")
@@ -508,7 +510,7 @@ def document(deployment) -> dict:
 
 
 def json_document(served: dict) -> dict:
-    """The report as JSON (``mythos.exposure-report/v1``, section 38.3), from the same
+    """The report as JSON (``mythos.economics.exposure-report/v1``, section 38.3), from the same
     document the HTML and the PDF render: every figure as the typed measure it is,
     the assumptions as inputs as stated, the rule, the period and the basis, the input
     digest of the run shown, and every gap; with its own digest. Nothing is computed."""

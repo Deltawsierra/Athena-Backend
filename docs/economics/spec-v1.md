@@ -9272,7 +9272,8 @@ Mythos-Core #66); the report holds every figure of loss or exposure it shows as 
 ### 38.3 The report as JSON (AT-6b)
 
 `GET .../exposure-report/?output=json` serves the same document the HTML and the PDF
-render, as `mythos.exposure-report/v1`: canonical JSON with its own `sha256:` digest,
+render, as `mythos.economics.exposure-report/v1` (named as every format economics serves is,
+`mythos.economics.<thing>/v<n>`, as `mythos.economics.roi/v2`): canonical JSON with its own `sha256:` digest,
 answered `no-store` and `nosniff`. Its keys, in order: `schema`, `deployment`, `title`,
 `status`, `scenario` (the version shown and its run, or `null`), `input_digest` (of that
 run), `rule`, `period`, `basis`, `kinds` (each kind shown, in the core's words),

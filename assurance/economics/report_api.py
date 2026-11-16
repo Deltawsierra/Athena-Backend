@@ -79,7 +79,7 @@ conventions, READ-ONLY (it records, recomputes, signs and verifies nothing):
   ``AUDIT_INCOMPLETE``. Every amount of money it shows says what kind of figure it is
   (AT-6, section 38.2): each is held as a ``mythos_core.measures`` measure
   (:mod:`.exposure_measures`), and the report adds no two of them. ``?output=json`` is
-  the same document as ``mythos.exposure-report/v1`` (section 38.3), with its own digest.
+  the same document as ``mythos.economics.exposure-report/v1`` (section 38.3), with its own digest.
 
 The receipt route says whether the receipt's run is current, in headers beside the
 bytes it serves unchanged (``X-Exposure-Freshness``, ``X-Exposure-Stale-Reasons``,

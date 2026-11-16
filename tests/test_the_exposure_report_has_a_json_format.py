@@ -1,5 +1,5 @@
 """Economic Exposure: the deployment's economic-exposure report as JSON,
-``mythos.exposure-report/v1`` (roadmap AT-6b; ``docs/economics/spec-v1.md``, section 38.3).
+``mythos.economics.exposure-report/v1`` (roadmap AT-6b; ``docs/economics/spec-v1.md``, section 38.3).
 
 - ``GET .../exposure-report/?output=json`` serves the same document the HTML and the PDF
   render, as canonical JSON with its own digest, ``no-store`` and ``nosniff``;
@@ -28,6 +28,7 @@ from mythos_core.persona import lint
 
 from assurance.economics import exposure_measures as em
 from assurance.economics import exposure_report, report
+from assurance.economics.engine import remediation as er
 from assurance.models import Deployment
 from safety import degraded, stops
 from tests.test_every_exposure_figure_says_its_kind import _insured
@@ -84,12 +85,15 @@ def _strings(value):
 
 
 def _holds_the_schema(body: dict) -> None:
-    """``body`` is a ``mythos.exposure-report/v1`` document, key by key and type by type."""
+    """``body`` is a ``mythos.economics.exposure-report/v1`` document, key by key and type by type."""
     assert tuple(exposure_report.json_document({"scenario": None, "measures": [], "assumptions": [],
                                                 "not_measured": [], "deployment": "", "title": "",
                                                 "status": ""})) == TOP == exposure_report.JSON_FIELDS
     assert set(body) == set(TOP)
-    assert body["schema"] == exposure_report.JSON_SCHEMA == "mythos.exposure-report/v1"
+    assert body["schema"] == exposure_report.JSON_SCHEMA == "mythos.economics.exposure-report/v1"
+    # Named as every format economics serves is: mythos.economics.<thing>/v<n>.
+    for name in (exposure_report.JSON_SCHEMA, report.REPORT_SCHEMA, er.ROI_SCHEMA):
+        assert re.fullmatch(r"mythos\.economics\.[a-z-]+/v[0-9]+", name), name
     assert UUID.fullmatch(body["deployment"]) and isinstance(body["title"], str) and isinstance(body["status"], str)
     if body["scenario"] is None:
         assert body["input_digest"] is None
@@ -217,5 +221,5 @@ def test_the_json_is_the_same_bytes_writes_nothing_and_another_tenant_gets_nothi
 def test_the_readme_and_the_spec_state_the_json_format():
     readme = " ".join((REPO / "README.md").read_text(encoding="utf-8").split())
     spec = " ".join((REPO / "docs/economics/spec-v1.md").read_text(encoding="utf-8").split())
-    assert "**The report as JSON** (`?output=json`; `mythos.exposure-report/v1`" in readme
+    assert "**The report as JSON** (`?output=json`; `mythos.economics.exposure-report/v1`" in readme
     assert "### 38.3 The report as JSON (AT-6b)" in spec and em.ASSUMPTIONS_ARE in spec
