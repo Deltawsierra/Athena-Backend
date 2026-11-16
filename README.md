@@ -90,6 +90,25 @@ is a settings line reading the owner's key from the environment.
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
+The gateway sends the engine the first `DEFENDER_MAX_BODY_BYTES` (64 KiB) of a body.
+A longer body is "truncated for inspection", and that is a failure: it counts toward
+the gateway's one alert, the ERROR an engine outage raises ("Defender engine
+unavailable for N of the last 60s"). Six routes take signed records larger than that
+as their normal traffic, and each declares its own bound on its action, as the dotted
+name of the constant its own 413 already compares against, never a number:
+`body_bound={"POST": "assurance.observed_effects.MAX_BODY_BYTES"}` (456,634 bytes,
+read from Mythos-Core), and the same for the signed-outcome batch, the reconciliation
+receipt, the Achilles scan result, and the sign-in and delegation records. A body
+within its route's declared bound is logged at INFO as `inspected in part: within the
+route's declared bound` and counted (`DefenderMiddleware.inspected_in_part`); it is
+never a failure. The engine is still sent the same first 64 KiB: its `/defend` states
+no bound of its own, and sending more would put more work before authentication in
+front of requests allowed today. A body over its route's bound (which the route still
+refuses 413 before parsing), one on a route or method that declares no bound, and one
+whose route's bound cannot be read count toward the alert exactly as before, as does
+every other reason a body could not be fully inspected. Stops are judged before any
+of this and never reach it (`tests/test_a_body_within_its_routes_bound_is_not_hidden.py`).
+
 ### Testing against a loopback target (`ATHENA_PENTEST_TEST_TARGETS`)
 
 A scan's target is held to a scope guard (`pentest/views.py`

@@ -1,4 +1,5 @@
 import codecs
+import importlib
 import ipaddress
 import json
 import logging
@@ -14,6 +15,7 @@ import requests
 from django.conf import settings
 from django.core.exceptions import RequestDataTooBig
 from django.http import JsonResponse, UnreadablePostError
+from django.urls import Resolver404, resolve
 from urllib3.exceptions import HTTPError as Urllib3Error
 
 from assurance.oplog import log_later
@@ -1137,6 +1139,61 @@ def _launch_fields(request):
     return _LAUNCH_TARGETS.get(stops_view_name(request))
 
 
+# What the gateway records, in place of the truncation, for a body longer than it
+# sends the engine that is within the bound its route declares for its method. A
+# truncation is a failure, and the failure window is this gateway's one alert, the
+# one an engine outage raises: it says something is being kept from inspection. A
+# signed record that a route takes in at its own bound -- an observed effect of
+# 456,634 bytes, a scan result of 512 KiB -- is that route's normal traffic, and an
+# alert that fires on normal traffic is an alert nobody reads. So such a body is
+# counted and logged under this name, and is never a failure. The engine is sent
+# the same first DEFENDER_MAX_BODY_BYTES as for any other body: its /defend states
+# no bound of its own, and sending more would put more work before authentication
+# and a larger call under the same deadline in front of a request allowed today.
+INSPECTED_IN_PART = "inspected in part: within the route's declared bound"
+
+
+def _route(request):
+    """The route the handler will send ``request`` to, or None: resolved as
+    safety.stops resolves it."""
+    match = getattr(request, "resolver_match", None)
+    if match is None:
+        try:
+            match = resolve(request.path_info, getattr(request, "urlconf", None))
+        except Resolver404:
+            return None
+    return match
+
+
+def declared_body_bound(request):
+    """The body bound the route ``request`` goes to declares for its method, or
+    None when it declares none.
+
+    A route declares it on its action, by method: ``body_bound={"POST":
+    "assurance.observed_effects.MAX_BODY_BYTES"}``, the dotted name of the constant
+    its own 413 compares the declared length against. The constant is read here,
+    when it is needed, never copied: the bound is stated once, where the route
+    states it, and moves when it moves. Nothing is imported until a body is longer
+    than the gateway sends, so the URL conf and a stop load nothing of it.
+
+    Raises when a route declares a bound that does not read as a byte count: the
+    caller counts that body as it counts any other (caution, never a pass)."""
+    match = _route(request)
+    if match is None:
+        return None
+    declared = getattr(match.func, "initkwargs", {}).get("body_bound")
+    if declared is None:
+        return None
+    reference = declared.get((request.method or "").upper())
+    if reference is None:
+        return None
+    module, _dot, name = reference.rpartition(".")
+    bound = getattr(importlib.import_module(module), name)
+    if isinstance(bound, bool) or not isinstance(bound, int) or bound <= 0:
+        raise ValueError(f"{reference} is not a byte count")
+    return bound
+
+
 def _shown(value):
     """A launch field's value as the engine may see it. Not a string (the view
     refuses it): withheld whole, unless it is a number, a boolean or null, which
@@ -1301,6 +1358,10 @@ class DefenderMiddleware:
         # read as "alerted a moment ago" and suppressed the first alert.
         self._last_alert = None
         self._last_outcome_failed = False
+        # Bodies inspected in part within their route's declared bound
+        # (INSPECTED_IN_PART): counted here, under the same lock, and never in the
+        # failure window above.
+        self.inspected_in_part = 0
 
         if not self.operator_key:
             logger.error(
@@ -1352,7 +1413,13 @@ class DefenderMiddleware:
         # A scan launch's target, wherever it is said, reaches the engine as it is
         # shown: no login, no query, `;param` or fragment value (_LAUNCH_TARGETS).
         launch, targets = _launch_fields(request), []
-        body, body_problem = self._get_body(request, launch, targets)
+        body, before, trimmed, after, read = self._read_body(request, launch, targets)
+        if trimmed:
+            # Longer than the engine is sent. Within the bound its route declares,
+            # that is the route's own traffic: counted and logged as inspected in
+            # part, never a failure. Anything else is the failure it always was.
+            trimmed = self._unless_within_bound(request, trimmed, read)
+        body_problem = _joined(_joined(before, trimmed), after)
         # The query string was copied through with no redaction at all, so
         # ?token=... reached the engine in clear while the same value in the
         # body was replaced. One that is not a form is read as text too, and a
@@ -1562,8 +1629,18 @@ class DefenderMiddleware:
         shown as :func:`pentest.models.target_shown` shows it, and each target read
         is added to ``targets``.
         """
+        body, before, trimmed, after, _read = self._read_body(request, launch, targets)
+        return body, _joined(_joined(before, trimmed), after)
+
+    def _read_body(self, request, launch=_NOT_JUDGED, targets=None):
+        """:meth:`_get_body`, its reasons kept apart: ``(body, before, trimmed,
+        after, read)``. ``trimmed`` is the truncation alone, so a body within its
+        route's declared bound can be told from one that is not; ``before`` and
+        ``after`` are every other reason, in the order _get_body joins them;
+        ``read`` is how many bytes of the body were read, or None when it was not
+        read whole (a multipart form, or nothing read)."""
         if request.path.startswith(SENSITIVE_PATHS):
-            return "", None
+            return "", None, None, None, None
         if launch is _NOT_JUDGED:
             launch = _launch_fields(request)
         if targets is None:
@@ -1579,28 +1656,29 @@ class DefenderMiddleware:
             try:
                 fields = list(request.POST.items())
             except Exception as exc:  # noqa: BLE001 - the audit trail must never crash the request it is recording
-                return "", f"multipart body could not be inspected: {exc.__class__.__name__}"
+                return "", f"multipart body could not be inspected: {exc.__class__.__name__}", None, None, None
             if not fields:
-                return "", None
+                return "", None, None, None, None
             if launch:
                 _the_target(fields, launch, targets)
                 fields = [(key, _shown(value) if key in launch else value) for key, value in fields]
-            return self._trim(
+            body, trimmed = self._trim(
                 _said_without(redact(urlencode([(key, value) for key, value in fields]), form=True), targets)
             )
+            return body, None, trimmed, None, None
 
         if content_type and content_type not in INSPECTABLE_TYPES:
-            return "", None
+            return "", None, None, None, None
 
         try:
             raw = request.body
         except (RequestDataTooBig, UnreadablePostError) as exc:
-            return "", f"request body could not be inspected: {exc.__class__.__name__}"
+            return "", f"request body could not be inspected: {exc.__class__.__name__}", None, None, None
         except Exception as exc:  # noqa: BLE001 - the known cases are narrowed above; this is the last resort, and it reports rather than hides
-            return "", f"request body could not be read: {exc.__class__.__name__}"
+            return "", f"request body could not be read: {exc.__class__.__name__}", None, None, None
 
         if not raw:
-            return "", None
+            return "", None, None, None, None
 
         # In the charset the request declares, as the view's parser will read it.
         # Always decoding UTF-8 read `application/json; charset=utf-16` as text
@@ -1639,14 +1717,57 @@ class DefenderMiddleware:
         body, trimmed = self._trim(redacted)
         if trimmed is None and cut:
             trimmed = f"request body was truncated at {prefix} bytes for inspection"
-        problem = _joined(problem, trimmed)
+        after = None
         if doubtful:
             # Redacting to the end of the line may have taken the attack with
             # the secret. A body that lost more than its secrets is not a clean
             # inspection, and a sensitive key planted in front of a payload must
             # not blind the engine in silence.
-            problem = _joined(problem, f"request body {DOUBTFUL_VALUE}")
-        return body, problem
+            after = f"request body {DOUBTFUL_VALUE}"
+        return body, problem, trimmed, after, len(raw)
+
+    def _unless_within_bound(self, request, trimmed, read):
+        """``trimmed`` -- the body's truncation, a failure -- or None when the body is
+        within the bound its route declares for its method: its declared length and
+        the bytes read both at most that bound. That body is recorded as
+        INSPECTED_IN_PART instead, counted and logged, and never in the failure
+        window. Over the bound, on a route or a method that declares none, or with
+        a declared length that is not a number, the truncation is the failure it
+        was. A bound that cannot be read is no bound (caution): the truncation is
+        the failure it was, and says why."""
+        try:
+            bound = declared_body_bound(request)
+        except Exception as exc:  # noqa: BLE001 - an unreadable bound is caution: the body counts as uninspected, never as a pass and never as a refusal
+            return f"{trimmed} (its route's declared bound could not be read: {exc.__class__.__name__})"
+        if bound is None:
+            return trimmed
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            return trimmed
+        if not 0 < declared <= bound or (read is not None and read > bound):
+            return trimmed
+        try:
+            self._record_in_part(request, trimmed, bound)
+        except Exception:  # noqa: BLE001 - an outcome that could not be recorded is not passed over in silence: it counts as before
+            return trimmed
+        return None
+
+    def _record_in_part(self, request, trimmed, bound):
+        """Count and log one body INSPECTED_IN_PART. The failure window, the last
+        outcome and the alert are not touched: this is the route's own traffic."""
+        with self._lock:
+            self.inspected_in_part += 1
+            count = self.inspected_in_part
+        logger.info(
+            "Defender request body %s (%s %s, at most %s bytes): %s; %s so far",
+            INSPECTED_IN_PART,
+            request.method,
+            stops_view_name(request),
+            bound,
+            trimmed,
+            count,
+        )
 
     def _trim(self, text):
         if len(text) > self.max_body_bytes:
