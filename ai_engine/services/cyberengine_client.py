@@ -44,10 +44,12 @@ HEALTH_DEADLINE_SECONDS = 1.5
 MAX_HEALTH_BODY = 4 * 1024
 
 # One /health ask in flight in this process at a time. The ask runs on a thread of
-# its own, so health() can answer at its deadline; an engine that drips its status
-# line and headers holds that thread past it (no read of the body can bound them),
-# and while it does, health() answers at once that nothing is established rather
-# than leaving another thread behind on every readiness probe.
+# its own, so health() can answer at its deadline. The ask ends there too: its
+# connect, status line and headers are sent under the same deadline as a whole
+# (safety.outbound's ``total=``, which shuts the ask's sockets down when it passes),
+# and its body is read against it, so the thread outlives the deadline by one read
+# of a dripped body at most. While an ask is in flight, health() answers at once
+# that nothing is established rather than starting a second one.
 _HEALTH_ASK = threading.BoundedSemaphore(1)
 
 
@@ -544,11 +546,16 @@ class CyberEngineClient:
 
         return body
 
-    def _send_get(self, path: str, *, timeout=None, stream: bool = False) -> requests.Response:
+    def _send_get(self, path: str, *, timeout=None, stream: bool = False, total=None) -> requests.Response:
         """The engine's answer to a GET, whatever its status; raises only when there was
         none. ``timeout`` is ENGINE_TIMEOUT unless the caller names its own. ``stream``:
-        the body is left for the caller to read (health() alone asks for it)."""
+        the body is left for the caller to read (health() alone asks for it).
+        ``total``: seconds the whole send may take, up to the headers when ``stream``
+        is set (safety.outbound's ``total=``; health() alone asks for it). A call
+        that names none is sent exactly as before, with no timer and no thread."""
         streamed = {"stream": True} if stream else {}
+        if total is not None:
+            streamed["total"] = total
         try:
             # The engine's lane (safety.outbound): a redirect followed only while it
             # stays on the engine's host, the environment's proxy and nothing else
@@ -735,10 +742,11 @@ class CyberEngineClient:
 
         And answered by :data:`HEALTH_DEADLINE_SECONDS` in all: an engine that drips
         its answer inside every read timeout is the same failed read at the deadline.
-        The ask runs on a thread of its own (:data:`_HEALTH_ASK`, one at a time), and
-        reads the body against the same deadline, so a dripping body ends the ask and
-        closes its connection there; a status line or headers dripped hold only that
-        one thread, and every ask meanwhile answers at once."""
+        The ask runs on a thread of its own (:data:`_HEALTH_ASK`, one at a time) and
+        ends at the same deadline whichever part is dripped: the connect, status line
+        and headers are sent under it as a whole (``total=``), and the body is read
+        against it, so the ask closes its connection there and no thread is left
+        reading a drip. While one ask is in flight, every other answers at once."""
         deadline = time.monotonic() + HEALTH_DEADLINE_SECONDS
         if not _HEALTH_ASK.acquire(blocking=False):
             why = "an earlier /health ask is still waiting on the engine"
@@ -772,7 +780,18 @@ class CyberEngineClient:
         """health()'s ask, on its own thread: the body read as it arrives, chunk by
         chunk, and no longer than ``deadline``."""
         path = "/health"
-        resp = self._send_get(path, timeout=HEALTH_TIMEOUT, stream=True)
+        late = f"no whole answer to /health within {HEALTH_DEADLINE_SECONDS:g} s"
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise _no_health_answer(late) from requests.ReadTimeout(late)
+        try:
+            resp = self._send_get(path, timeout=HEALTH_TIMEOUT, stream=True, total=left)
+        except EngineError as exc:
+            if isinstance(exc.__cause__, outbound.TotalDeadlineExceeded):
+                # The deadline passed before the headers were whole: the same failed
+                # read health() itself reports at its deadline, in the same words.
+                raise _no_health_answer(late) from requests.ReadTimeout(late)
+            raise
         chunks = []
         size = 0
         with resp:
