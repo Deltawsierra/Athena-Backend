@@ -1298,6 +1298,29 @@ dashboard needs (section 30):
   version it totals is this deployment's and approved; each version it does not total
   is named with its reason, each total carries the portfolio's integrity line (which
   runs it vouches for and which not), and one gap makes it read `AUDIT_INCOMPLETE`.
+  Every amount of money it shows says what kind of figure it is (AT-6; spec, section
+  38.2): each is held as a measure of `mythos_core.measures` -- its kind, its money
+  in one currency at the minor unit, the period it is for and the snapshot it rests
+  on -- and listed under "What kind of figure each amount is". The kinds are the
+  core's eight, in the core's words:
+  - `confirmed_loss`: value lost, as the one who lost it confirms it;
+  - `remediation_expense`: money spent responding and restoring: incident and exceptional costs, as booked;
+  - `revenue_deferral`: revenue the incident delayed or held back: deferred, which is not lost;
+  - `modeled_exposure`: a figure a model computed for a scenario: never booked, and never added to another;
+  - `insurance_promised`: cover stated, committed or claimed, and not yet paid;
+  - `insurance_received`: insurance money actually received;
+  - `funds_frozen`: assets held where they are, and not yet returned;
+  - `funds_returned`: assets actually returned to those they were taken from.
+  Every figure of a run, of a residual run and of the deployment total is a
+  `modeled_exposure`, valued on its valuation day and resting on the stored inputs of
+  the run that computed it; none is ever labelled a booked kind. An assumption's
+  money has no kind established and reads `unknown`, with the reason, shown as
+  recorded. The kinds are never added: a total is `mythos_core.measures.total`'s to
+  make, which refuses two kinds, two currencies and any two modelled exposures, so
+  the report adds no two figures and sets them side by side instead; the deployment
+  total stays the portfolio's own figure, typed and never recomputed. A figure the
+  core will not hold (an amount off the minor unit, a run with no valuation date) is
+  still shown, is not a measure, says why, and is a named gap. No amount changed.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
