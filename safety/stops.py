@@ -780,6 +780,14 @@ NOT_STOPS = {
         "POST": "records the next steps of a finding's recovery and the owner's acceptance: recovery records, "
         "append-only; it starts and stops nothing",
     },
+    # A finding's scope revisions (assurance.incident_scope, SPINE SP-3): every revision
+    # read, and the next one recorded. Its own append-only table; a recovery record reads
+    # it, and it moves no decision, finding or engine.
+    "finding-scope-revisions": {
+        "GET": _READ,
+        "POST": "records the next revision of an incident's scope: scope revisions, append-only; it starts and "
+        "stops nothing",
+    },
     "provider-list": {"GET": _READ, "POST": "creates a provider record: configuration that starts and stops nothing"},
     "provider-detail": {
         "GET": _READ,

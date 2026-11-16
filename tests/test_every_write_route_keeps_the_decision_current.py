@@ -752,6 +752,18 @@ def _recovery_record():
     return dep, lambda c: c.post(f"/api/assurance/findings/{finding.uuid}/recovery-record/", {}, format="json")
 
 
+def _scope_revision():
+    from tests import incident_scopes
+
+    dep = _scanned()
+    finding = _finding(dep)
+    # The asset in scope and the evidence the revision rests on are there before the
+    # write: the revision names them, and writes neither.
+    body = incident_scopes.body(finding, incident_scopes.asset(dep))
+    recompute_decision(dep)
+    return dep, lambda c: c.post(f"/api/assurance/findings/{finding.uuid}/scope-revisions/", body, format="json")
+
+
 def _remediation_assign():
     dep = _scanned()
     finding = _finding(dep)
@@ -1121,6 +1133,11 @@ CANNOT_MOVE = {
         "records the steps of a finding's recovery in their own append-only table; the decision "
         "reads no recovery record, and the step reads the finding, never writes it",
         _recovery_record,
+    ),
+    ("FindingViewSet", "scope_revisions", "post"): (
+        "records the next revision of an incident's scope in its own append-only table; the decision "
+        "reads no scope revision, and the revision reads the assets and evidence it names, never writes them",
+        _scope_revision,
     ),
     ("FindingViewSet", "remediation_assign", "post"): (
         "who does the remediation work, not whether the risk is live",

@@ -31,6 +31,7 @@ from rest_framework.test import APIClient
 
 from assurance.models import ClaimEvidence, Deployment, Evidence, Finding, RecoveryRecord
 from assurance.retest_closure import INCOMPLETE_REPAIR, INCOMPLETE_REPAIR_PATTERNS, record_closure_evidence
+from tests.incident_scopes import declare as declare_scope
 from tests.repair_contracts import agree, replay
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("engine_keyring")]
@@ -181,6 +182,7 @@ def test_a_cross_deployment_write_is_not_found_and_another_deployments_link_is_r
 
 
 def test_only_the_signed_in_owner_accepts_and_no_body_names_who(world):
+    declare_scope(world.incident, by=world.admin)  # SP-3: an acceptance is reached only under a declared scope
     _as(world.owner).post(_step_url(world.incident), {"coverage": COVERED}, format="json")
     for person, body, answer, code in (
         (world.admin, {"accept": _accept()}, 403, "not_the_owner"),

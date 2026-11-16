@@ -122,7 +122,7 @@ from .workflow_chains import (
 )
 from .ripple import assess_ripple
 from .remediation import ContractRequired, IllegalTransition, apply_transition, assign
-from . import recovery_record, repair_contract
+from . import incident_scope, recovery_record, repair_contract
 from . import authority_chain_records
 from . import closure_evidence as evidence_route
 from . import closure_forward
@@ -194,6 +194,11 @@ _RECOVERY_REFUSED = {
     ),
     **dict.fromkeys(("not_the_owner", "no_owner"), status.HTTP_403_FORBIDDEN),
 }
+
+#: The answer to each scope-revision refusal that is not the body's fault (400): a
+#: revision that changes nothing, or does not supersede the current one, is a conflict
+#: with the record as it stands.
+_SCOPE_REFUSED = dict.fromkeys(("nothing_changed", "not_current", "raced"), status.HTTP_409_CONFLICT)
 
 
 def _acceptance_end(value):
@@ -3029,7 +3034,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         """The deployment's recovery records (SPINE SP-1, :mod:`assurance.recovery_record`):
         each incident -- a finding with a recovery record -- with every step oldest first,
         each step's conditions with their witnesses, its gaps, restrictions and release,
-        and its residual uncertainty with the sources of each item. The deployment is
+        its residual uncertainty with the sources of each item, and the scope revision it
+        was derived under beside the incident's current one (SP-3). The deployment is
         read through ``get_object()``, the per-user queryset, so a deployment the person
         cannot read is answered as every other deployment read answers it. ``?offset=``
         pages the incidents. A read: it records, derives and repairs nothing."""
@@ -3839,7 +3845,10 @@ class FindingViewSet(
     def recovery_record_view(self, request, uuid=None):
         """The finding's recovery record (SPINE SP-1, :mod:`assurance.recovery_record`).
 
-        ``GET`` serves every step, oldest first, to any operator who can see the finding.
+        ``GET`` serves every step, oldest first, to any operator who can see the finding:
+        each with the scope revision it was derived under (SP-3), and the incident's
+        current one. A recovered step whose scope no longer stands is not served as
+        recovered (:func:`assurance.recovery_record.served`).
         ``POST`` records the next steps -- admin-only, as every write to the assurance
         record is (:func:`_require_admin`), and attributed to the caller. Body: what the
         step rests on (``evidence``, ``permits``, ``receipts``, ``coverage``, ``gaps``,
@@ -3848,7 +3857,11 @@ class FindingViewSet(
         signed-in person, who must be the deployment's owner. It names no one: who
         accepts is the authenticated request user, never a field. The state, its
         conditions and its release are derived, and a body naming them is refused. A
-        step that moves nothing -- links changed and no state with them -- is a 409."""
+        step that moves nothing -- links changed and no state with them -- is a 409. So
+        is one that, after the incident's scope has widened, links nothing that names
+        an item a revision added (SP-3): each stays an open gap until a link of this
+        deployment names it -- evidence of a finding on that asset, a permit of that
+        workflow, or the asset observed in a coverage manifest posted since."""
         finding = self.get_object()
         if request.method != "POST":
             return Response(recovery_record.finding_record(finding))
@@ -3863,9 +3876,38 @@ class FindingViewSet(
         except recovery_record.RecoveryRefused as exc:
             return Response({"code": exc.code, "detail": str(exc)}, status=_RECOVERY_REFUSED.get(exc.code, 400))
         return Response(
-            {"finding": str(finding.uuid), "steps": [recovery_record.served(step) for step in steps]},
+            {"finding": str(finding.uuid), "steps": recovery_record.recorded_steps(finding, steps)},
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=["get", "post"], url_path="scope-revisions", url_name="scope-revisions")
+    def scope_revisions(self, request, uuid=None):
+        """The finding's scope, versioned (SPINE SP-3, :mod:`assurance.incident_scope`).
+
+        ``GET`` serves every revision, oldest first, to any operator who can see the
+        finding: its items, what it added and removed, why, the evidence it rests on and
+        who declared it; ``current`` is the number of the newest, null when none is
+        declared. ``POST`` records the next revision -- admin-only, as every write to the
+        assurance record is (:func:`_require_admin`), and attributed to the caller. Body:
+        ``{"items": [{"kind": "asset" | "workflow", "ref": ...}], "reason": <why>,
+        "evidence": [<uuid>]}`` and nothing else: the number, the revision it supersedes
+        and who declared it are recorded, never posted. An item or a piece of evidence
+        that is not this deployment's is refused (400) exactly as one that does not
+        exist; a revision that changes nothing is a 409. Nothing is edited or deleted:
+        the revision before stays as recorded. It records no recovery step and moves
+        none; a recovery reads it (:mod:`assurance.recovery_record`)."""
+        finding = self.get_object()
+        if request.method != "POST":
+            return Response(incident_scope.finding_scope(finding))
+        _require_admin(request)
+        if not isinstance(request.data, dict):
+            raise ValidationError({"body": "must be an object"})
+        try:
+            incident_scope.declare(finding, by=request.user, body=request.data)
+        except incident_scope.ScopeRefused as exc:
+            return Response({"code": exc.code, "detail": str(exc)}, status=_SCOPE_REFUSED.get(exc.code, 400))
+        scope = incident_scope.finding_scope(finding)
+        return Response({**scope, "revisions": scope["revisions"][-1:]}, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="remediation/assign")
     def remediation_assign(self, request, uuid=None):

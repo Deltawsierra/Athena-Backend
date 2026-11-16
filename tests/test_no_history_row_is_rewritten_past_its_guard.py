@@ -66,7 +66,7 @@ from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from accounts.models import RoleGrant
-from assurance import gate_approval, observed_effects, recovery_record
+from assurance import gate_approval, incident_scope, observed_effects, recovery_record
 from assurance.economics import models as econ
 from assurance.models import (
     AchillesScanRefusal,
@@ -83,9 +83,12 @@ from assurance.models import (
     Deployment,
     EffectReconciliationReceipt,
     EffectReconciliationRewriteRefused,
+    Evidence,
     Finding,
     IdentityEvidence,
     IdentityEvidenceRewriteRefused,
+    IncidentScopeRevision,
+    IncidentScopeRewriteRefused,
     RecoveryRecord,
     RecoveryRecordRewriteRefused,
     RepairContract,
@@ -122,6 +125,7 @@ APPEND_ONLY = {
     AchillesScanResult: AchillesScanRewriteRefused,
     AchillesScanRefusal: AchillesScanRewriteRefused,
     RecoveryRecord: RecoveryRecordRewriteRefused,
+    IncidentScopeRevision: IncidentScopeRewriteRefused,
     **{
         model: econ.EconomicsRewriteRefused
         for model in (
@@ -214,6 +218,11 @@ class World:
         # A recovery step is the first of its own incident's, so each built one is
         # derived and its build reads nothing (the imposter is built inside a capture).
         self.incidents = {n: self._finding(f"fp-incident-{n}") for n in range(1, 10)}
+        # A scope revision is the first of its own incident's too (incidents of their
+        # own, so that no recovery step above is derived under one), and names this
+        # asset and this evidence, resolved here once so that its build reads nothing.
+        self.scoped = {n: self._finding(f"fp-scoped-{n}") for n in range(1, 10)}
+        self.scope = self._scope(self.finding, self.asset)
         self.rows = {}
         for model, (build, _field, _value) in RECORDS.items():
             self.rows[model] = build(self, 1)
@@ -225,6 +234,16 @@ class World:
             deployment=deployment or self.dep, fingerprint=fingerprint, finding_type="sql_injection",
             title="SQLi", severity="critical",
         )
+
+    @staticmethod
+    def _scope(finding, asset):
+        """What a scope revision of ``finding``'s deployment holds: this asset, resting
+        on one piece of that finding's evidence, each as the record stores it."""
+        evidence = Evidence.objects.create(finding=finding, classification="technically_verified")
+        return {
+            "items": incident_scope.resolve_items(finding, [{"kind": "asset", "ref": str(asset.uuid)}]),
+            "evidence": incident_scope.resolve_evidence(finding, [str(evidence.uuid)]),
+        }
 
     def _economics(self):
         source = _source(recorded_by=self.leaver)
@@ -354,6 +373,13 @@ def _recovery_record(w, n, finding=None):
     return recovery_record.draft(finding, version=1, links=links, recorded_by=w.leaver, recorded_at=NOW)
 
 
+def _scope_revision(w, n, finding=None, scope=None):
+    return IncidentScopeRevision(
+        finding=finding or w.scoped[n], revision=1, reason=f"what the scan reached ({n})", declared_by=w.leaver,
+        declared_at=NOW, **(scope or w.scope),
+    )
+
+
 #: Every append-only record outside economics: an unsaved row of it (the n-th, so
 #: several can be written), the column an upsert would rewrite, and what to.
 RECORDS = {
@@ -369,6 +395,7 @@ RECORDS = {
     AchillesScanRefusal: (_scan_refusal, "reason", "nothing was refused"),
     # Not `state`: every derived field is refused at save unless derived, before the key is.
     RecoveryRecord: (_recovery_record, "recorded_at", NOW - timedelta(days=1)),
+    IncidentScopeRevision: (_scope_revision, "reason", "nothing else was in scope"),
 }
 
 ECONOMICS_ROWS = (
@@ -644,9 +671,9 @@ def test_removing_an_operator_nulls_every_history_column_naming_them_and_nothing
             if field.related_model is User and getattr(row, field.attname) == leaver.pk:
                 named.setdefault(model, []).append(field.attname)
     assert set(named) >= {
-        ApprovalVersion, AuthorityChain, RepairContract, RecoveryRecord, econ.FinancialSource, econ.ModelInventoryEntry,
-        econ.FinancialScenario, econ.ScenarioReview, econ.SensitiveOverride, econ.OverrideApproval,
-        econ.OverrideRevocation,
+        ApprovalVersion, AuthorityChain, RepairContract, RecoveryRecord, IncidentScopeRevision, econ.FinancialSource,
+        econ.ModelInventoryEntry, econ.FinancialScenario, econ.ScenarioReview, econ.SensitiveOverride,
+        econ.OverrideApproval, econ.OverrideRevocation,
     }, named
     before = {model: _stored(row) for model, row in world.rows.items()}
     counts = _counts()
@@ -674,6 +701,11 @@ def test_the_deployments_cascade_still_takes_its_history_and_only_its_own(world)
             row.finding = world._finding("fp-elsewhere", deployment=world.other)
         elif model is RecoveryRecord:
             row = _recovery_record(world, 6, world._finding("fp-incident-elsewhere", deployment=world.other))
+        elif model is IncidentScopeRevision:
+            # Another deployment's incident, its scope that deployment's own asset.
+            theirs = world._finding("fp-scoped-elsewhere", deployment=world.other)
+            asset = Asset.objects.create(deployment=world.other, kind=Asset.Kind.MCP_SERVER, name="crm", identifier="s")
+            row = _scope_revision(world, 6, theirs, world._scope(theirs, asset))
         elif hasattr(row, "deployment_id"):
             row.deployment = world.other
         if model is ToolContract:
@@ -683,6 +715,7 @@ def test_the_deployments_cascade_still_takes_its_history_and_only_its_own(world)
     gone = {model: row.pk for model, row in world.rows.items() if getattr(row, "deployment_id", 0) == world.dep.pk}
     gone[RepairContract] = world.rows[RepairContract].pk
     gone[RecoveryRecord] = world.rows[RecoveryRecord].pk
+    gone[IncidentScopeRevision] = world.rows[IncidentScopeRevision].pk
     assert set(gone) >= set(RECORDS) - {RoleGrant}
 
     world.dep.delete()

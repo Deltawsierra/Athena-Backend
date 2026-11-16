@@ -1023,6 +1023,98 @@ signed-in person's acceptance, refused (403) unless they are the deployment's ow
 names no one. A refused link or field is a 400; a step that changes links and no state,
 or may not follow the last, is a 409 with the reason.
 
+## An incident's scope, versioned (SPINE SP-3)
+
+What an incident is believed to have affected changes during an investigation: a backup
+route is found late, a workflow turns out never to have been called. The scope of an
+incident -- a finding -- is kept as numbered revisions (`IncidentScopeRevision`, migration
+`assurance.0087`, `assurance/incident_scope.py`), one per change. Each holds the items in
+scope, why, the evidence it rests on and who declared it. An item is `{"kind", "ref"}`,
+resolved in the finding's own deployment and refused otherwise: an `asset` (by uuid; its
+`Asset.Kind` is kept beside it) or an approved `workflow` (by slug). A route has no record
+of its own here, so a route is in scope as the assets on it. Every revision after the
+first names the one it `supersedes`, and the earlier one stays exactly as recorded.
+The words are Mythos-Core's (`mythos_core.scope`), read from the core and spelled nowhere
+in this backend's code: the kinds of scope item, the scope holds, a revision's reason and
+the rule that a scope revision reopens an accepted recovery
+(`tests/test_the_scope_words_and_rules_are_mythos_cores.py`). This backend is stricter in
+two things and looser in none: a revision declares only the two kinds it has a record for
+(the core also names `route` and `identity`), and a reason is at most 500 characters (the
+core allows 1000). A stored item whose kind is not one of the core's reads as the core
+reads it: the scope is unreadable, never smaller.
+Append-only, as every history is (`assurance/append_only.py`); on no stop path, and read
+by no decision.
+
+**No recovery outlives the scope it was taken under.** Each recovery step names the
+revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered state
+(`restored_with_restrictions`, `recovery_accepted`) holds only for that revision:
+
+- **No declared scope is unknown, never ok.** With none declared, no step reaches a
+  recovered state: it names `scope:not_declared` among its gaps and reads
+  `AUDIT_INCOMPLETE`.
+- **A wider scope.** When a later revision adds an item, the next read no longer shows the
+  step as recovered. It shows the last state before it that was not a recovered one, names
+  the revision and each added item among the gaps
+  (`scope:revision:<n>:added:<kind>:<ref>`) and reads `AUDIT_INCOMPLETE`, never `PASS`.
+  What the row recorded is served beside it (`recorded`); the row is not rewritten.
+- **An added item stays an open gap until a step recorded under that revision links
+  something that names it.** An item counts when a revision after the first added it and
+  it has been in scope ever since. The step records which kind of link names each
+  (`scope_items`), and a reader never takes one for another:
+  - `evidence`: `Evidence` of the finding's own deployment whose finding is attached to
+    that asset (`Finding.asset`). Something was found there and is linked.
+  - `permit`: a linked Action Gate permit of that workflow, resolved as every permit is.
+  - `coverage`: the step's coverage manifest lists the asset (source `asset:<uuid>`) as a
+    required source and observes it in full, and was posted at or after the revision that
+    added the asset, by the server's clock. The asset was looked at and nothing was found.
+    A source that is missing, not fully observed or not declared, a manifest posted before
+    the revision, or a time that cannot be read, covers nothing.
+
+  One item's link covers that item and no other; another deployment's link is refused.
+  Until every such item is named, both recovered states are held back: the step names
+  each uncovered item among its gaps and reads `AUDIT_INCOMPLETE`.
+- **An empty step moves nothing.** After a recovered step that no longer stands, a step is
+  recorded only when it answers something of what took the state away (a scope declared
+  where there was none, a link that names an added item) or a blocker stands: a failure
+  is never left unrecorded. Any other is a
+  409 (`nothing_moved`) that names what is still open. The step that does move returns to
+  `under_investigation` under the current revision and names the step it sets aside
+  (`reopens`). After `restored_with_restrictions` that is S1's reopen. S1 lets nothing
+  follow `recovery_accepted`, not even a reopen: the rule "a scope revision reopens an
+  accepted recovery" is the core's `mythos_core.scope.check_scope_reopen`, which is asked
+  about the accepted step and the step that reopens it, with each scope hold that stands
+  against the accepted one. S1's step check runs from the new step on.
+- **A narrowing ends the hold for the item it removes, openly.** The hold for an added
+  item stands only while the item is in the current scope and nothing names it. Once a
+  later revision removes it, it is no longer a gap: a recovered step held back only by it
+  stands again with no new step. The read (`scope_removed`) and every step derived after
+  (`scope_items.removed`) list it: both revision numbers, who removed it and why. A
+  revision that only removes items takes no recovered state away by itself and records no
+  step. A revision that removes an item names who declared it, and every revision states
+  why in one printable line. An item removed and added again counts from the revision
+  that added it again.
+- **What cannot be established reads unknown, never empty.** With no scope declared, or a
+  revision that cannot be read, `scope_removed` and a step's `scope_items.added` and
+  `scope_items.removed` are `null`, beside the gap (`scope:not_declared`,
+  `scope:unreadable`). So are `added` and `removed` of a revision on the scope read when
+  its items, or those of the one before it, cannot be read. An empty list says that
+  nothing was added or removed, and is said only of a scope that was read.
+- **Not covered:** the first declared scope's items are not tied one by one. Only items
+  added later are.
+- **Rows from before this change** name no revision and are not rewritten. They read
+  `scope:not_declared`: one that recorded a recovered state reads `AUDIT_INCOMPLETE` until
+  a scope is declared and steps are recorded under it.
+
+`GET /api/assurance/findings/<uuid>/scope-revisions/` serves every revision, oldest first,
+with what each added and removed, and the number of the current one (null when none is
+declared). `POST` on it records the next revision (admin only, attributed to the caller):
+`{"items": [{"kind", "ref"}], "reason", "evidence": [<uuid>]}`. An item or a piece of
+evidence that is not this deployment's is a 400, exactly as one that does not exist; a
+revision that changes nothing is a 409. Both recovery-record reads carry each step's
+`scope_revision` and `scope_gaps` and the incident's current `scope_revision`. All of them
+read through the per-user queryset: a finding the person cannot read is a 404. The `GET`
+is an evidence read and the `POST` an effect (`safety/degraded.py`); neither is a stop.
+
 ## Economic Exposure: the customer parameter set
 
 Economic Exposure estimates what a finding could cost, as a range with its sources
@@ -1819,7 +1911,7 @@ through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
 Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
 pin, from the install pip recorded; otherwise it stops the run with one error naming each
 failed check and what to do. Each run ends with its verdict, for example
-`pin guard <sha>: mythos-core pinned c33571b, imported c33571b from <path>: OK`. Its one
+`pin guard <sha>: mythos-core pinned b42a1d3, imported b42a1d3 from <path>: OK`. Its one
 switch is described under "The shared pin guard" in Mythos-Core's README.
 `ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
 run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.
