@@ -20,8 +20,8 @@ stays readable.
                ``ApprovedWorkflow``, by slug). At least one.
 ``reason``     why the scope is this, in the declarer's words: one printable
                line (``mythos_core.scope.revision_reason``), at most 500 characters.
-               None, or a blank one, is ``reason_required``; any other that is
-               refused is ``malformed`` (the core's codes).
+               None, a blank one or none posted is ``reason_required``; any other
+               that is refused is ``malformed`` (the core's codes).
 ``evidence``   the ``Evidence`` of the deployment's findings it rests on. At least
                one (``evidence_record``'s ``evidence_required``).
 ``declared_by``  the signed-in person who declared it, never a posted field.
@@ -90,6 +90,9 @@ from mythos_core import scope as core
 KINDS = tuple(kind for kind in core.SCOPE_ITEM_KINDS if kind in (core.ASSET, core.WORKFLOW))
 
 POSTED = ("items", "reason", "evidence")
+#: What a body that leaves a part out is refused as: the same code as that part posted
+#: empty, so a client is told which part to send (the first missing, in POSTED's order).
+_MISSING = {"items": "items_required", "reason": "reason_required", "evidence": "evidence_required"}
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _SLUG = re.compile(r"[-a-zA-Z0-9_]{1,200}")
 _MOST = 100
@@ -273,7 +276,9 @@ def declare(finding, *, by=None, body=None):
         )
     missing = [key for key in POSTED if key not in body]
     if missing:
-        raise ScopeRefused("malformed", f"a scope revision names its items, its reason and its evidence: {missing} missing")
+        raise ScopeRefused(
+            _MISSING[missing[0]], f"a scope revision names its items, its reason and its evidence: {missing} missing"
+        )
     items = resolve_items(finding, body["items"])
     evidence = resolve_evidence(finding, body["evidence"])
     latest = IncidentScopeRevision.objects.filter(finding_id=finding.pk).order_by("-revision").first()
