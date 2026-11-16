@@ -443,6 +443,49 @@ def test_an_exited_workers_counts_stay_until_acknowledged_and_the_acknowledgemen
     assert record["report"]["id"] == b_id
 
 
+#: One reading of the clock, in nanoseconds: 715,663.6 microseconds past the second.
+#: As a float of seconds it rounds, to the nearest microsecond, UP to ...715664.
+_ONE_READING_NS = 1_794_834_077_715_663_600
+
+
+@pytest.mark.parametrize("stamped", ["published_at", "acknowledged_at"])
+def test_a_reports_instant_is_never_later_than_the_clock_it_was_read_from(tmp_path, monkeypatch, stamped):
+    """A report says when it was published and when it was acknowledged, and neither
+    instant is ever ahead of the clock.
+
+    Both were made with ``datetime.fromtimestamp(time.time())``, which rounds a float
+    of seconds to the NEAREST microsecond: up, for half of all readings, to an instant
+    the clock has not reached. Where the clock stands still between two readings
+    (Windows, for up to 15.6 ms) the next reading, which Python cuts down to the
+    microsecond, is then EARLIER than the instant just recorded: a record stamped after
+    the reading that followed it. The acknowledgement test above failed on exactly that,
+    by one microsecond, on Windows.
+
+    The clock is held at one reading here, as a coarse clock holds it, so the test says
+    the same thing on every platform."""
+    standing_clock = types.SimpleNamespace(
+        time=lambda: _ONE_READING_NS / 1e9,
+        time_ns=lambda: _ONE_READING_NS,
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+    )
+    monkeypatch.setattr(worker_reports, "time", standing_clock)
+    # What ``datetime.now(datetime.UTC)`` answers for that reading: cut, never rounded.
+    whole, rest = divmod(_ONE_READING_NS, 1_000_000_000)
+    the_clock = datetime.datetime.fromtimestamp(whole, datetime.UTC).replace(microsecond=rest // 1000)
+    assert the_clock.microsecond == 715_663
+
+    directory = str(tmp_path)
+    assert worker_reports.publish({"stderr_lines_lost": 0}, exited=True, directory=directory) is True
+    report_id = worker_reports.worker_id()
+    record = json.loads((tmp_path / (report_id + worker_reports.SUFFIX)).read_text(encoding="utf-8"))
+    if stamped == "acknowledged_at":
+        record = worker_reports.acknowledge(report_id, by="operator-ann", directory=directory)
+    instant = datetime.datetime.fromisoformat(record[stamped])
+    assert instant <= the_clock, f"{stamped} is {instant - the_clock} ahead of the clock it was read from"
+    assert instant == the_clock, "the instant is the reading itself, cut to the microsecond"
+
+
 @pytest.mark.django_db
 def test_a_stale_report_is_acknowledged_as_stale(reports, monkeypatch):
     b = reports.worker_b(lost=1)

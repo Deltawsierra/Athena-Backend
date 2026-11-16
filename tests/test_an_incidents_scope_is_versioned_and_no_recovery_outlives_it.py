@@ -322,7 +322,11 @@ def test_a_revision_names_its_items_its_reason_and_its_evidence_and_changes_some
         ({**good, "reason": "SECOND-LINE\x00"}, "malformed"),
         ({**good, "reason": ["SECOND-LINE"]}, "malformed"),
         ({**good, "reason": 7}, "malformed"),
-        ({key: good[key] for key in ("items", "evidence")}, "malformed"),
+        # A part left out is refused as that part posted empty: the client is told which.
+        ({key: good[key] for key in ("items", "evidence")}, "reason_required"),
+        ({key: good[key] for key in ("reason", "evidence")}, "items_required"),
+        ({key: good[key] for key in ("items", "reason")}, "evidence_required"),
+        ({}, "items_required"),
         ({**good, "items": [{"kind": "route", "ref": str(primary.uuid)}]}, "malformed"),
         ({**good, "items": [{**scopes.item(primary), "asset_kind": "model"}]}, "malformed"),
         ({**good, "items": [scopes.item(primary), scopes.item(primary)]}, "malformed"),

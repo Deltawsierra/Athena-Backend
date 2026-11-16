@@ -172,6 +172,11 @@ is judged a stop until its response is closed (or, never closed, dropped); the
 last stop to let go collects the young generations, and the collector runs
 again. A hold lasts at most `safety.collection.HOLD_LIMIT` (5 s) without a break,
 so overlapping stops or a response nobody closes cannot switch it off for good.
+The hold never waits, either: under Python 3.12 a collection can run inside the
+hold's own bookkeeping and let an earlier stop's hold go there, so its lock is only
+ever taken if it is free. A stop that finds it busy is served without a hold, and a
+hold let go while it is busy is counted by the next caller
+(`tests/test_no_stop_waits_on_its_own_collector_hold.py`).
 
 ### The failsafe service token
 
@@ -461,8 +466,8 @@ those tools as well as the digest, or the answer is `409`. Any other `include` v
 Deploy order for observed effect v5: this backend is merged AND deployed before Achilles
 signs a version 5 record. An engine that signs v5 at a backend that does not read it is
 refused every record, and an intake refusal is terminal: the engine keeps the record
-marked refused and never sends it again. Mythos-Core#83 is merged before this backend's
-pin of it.
+marked refused and never sends it again. Mythos-Core#83, the core this backend pins for
+it, is merged (16 Nov 2026).
 
 Deploy order for G6, the gate verifying the tool contract it dispatches under:
 1. Athena-Backend first: it serves `?include=tools` and accepts

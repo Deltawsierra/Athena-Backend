@@ -365,8 +365,9 @@ zopfli==0.2.3.post1
 # What the pin since b42a1d3 (Mythos-Core#81) adds:
 #
 # Mythos-Core#83 -- the 320d685 pin, one commit on b42a1d3: the head of that pull
-# request's branch, which is part of the core's main once it is merged (this pin must not
-# be merged here before it is). mythos_core.observed_effect is the one definition of the
+# request, merged on 16 Nov 2026 and so on the core's main (#82's merge, 12c6433, carries
+# it there; #82 adds mythos_core.recovery_receipt, which this pin does not include).
+# mythos_core.observed_effect is the one definition of the
 # observed-effect record (versions 1 to 5) and of its reconciliation receipt (versions 1
 # and 2): the fields of every version, one validator, one verifier, the refusal codes,
 # the keyed reference, the largest version 5 document (MAX_EVIDENCE_BYTES) and what a
