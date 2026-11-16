@@ -4409,11 +4409,18 @@ class RecoveryRecord(models.Model):
     acceptance, and its residual uncertainty with the sources of each item.
 
     THE STATE IS DERIVED, never typed in: ``state``, ``reopens``, ``conditions`` (each
-    with its witness), ``gaps``, ``restrictions``, ``release`` and
-    ``residual_uncertainty`` are what :func:`assurance.recovery_record.derive` computes
+    with its witness), ``gaps``, ``restrictions``, ``release``,
+    ``residual_uncertainty`` and ``scope_items`` are what :func:`assurance.recovery_record.derive` computes
     from the row's own ``links``, ``coverage`` and acceptance and the step before it,
     and ``save`` refuses a row that says anything else. A declared coverage gap never
     yields a recovered state, and its record's release reads ``AUDIT_INCOMPLETE``.
+
+    THE SCOPE IT WAS DERIVED UNDER (SPINE SP-3): ``scope_revision`` is the number of the
+    incident's :class:`IncidentScopeRevision` current when the step was recorded, null
+    when none was declared, and ``save`` refuses a row that names any other. A recovered
+    state holds only for that revision, and only while the step links evidence for every
+    item a revision added to the scope. A row from before SP-3 has none, and reads as
+    one whose scope was not declared.
 
     APPEND-ONLY: the model refuses an update or a delete of a recorded step, or a fresh
     instance carrying its key, and its queryset a bulk one or an upsert. Its keys have
@@ -4449,6 +4456,14 @@ class RecoveryRecord(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     recorded_at = models.DateTimeField(default=timezone.now)
+    # The number of the incident's scope revision the step was derived under. A number,
+    # not a key: the revision is the finding's, so no second key can disagree with it,
+    # and nothing here can move or protect a recorded revision. Null: none was declared.
+    scope_revision = models.PositiveIntegerField(null=True, blank=True)
+    # Derived with the rest: each item the scope gained, with the links that name it and
+    # of which kind, and each item it lost, with who removed it and why
+    # (assurance.recovery_record.scope_items). Null: a row from before SP-3.
+    scope_items = models.JSONField(null=True, blank=True)
 
     objects = RecoveryRecordQuerySet.as_manager()
 
@@ -4476,3 +4491,90 @@ class RecoveryRecord(models.Model):
 
     def __str__(self) -> str:
         return f"recovery step {self.version} ({self.state}) of finding {self.finding_id}"
+
+
+# ---------------------------------------------------------------------------
+# An incident's scope, versioned (SPINE SP-3): one row per revision
+# ---------------------------------------------------------------------------
+
+
+class IncidentScopeRewriteRefused(ValueError):
+    """A recorded scope revision was asked to change or go away. The record is
+    append-only: a change of scope is a NEW revision, and the one before stays."""
+
+
+class IncidentScopeRevisionQuerySet(HistoryQuerySet):
+    """Refuses a bulk update, a bulk delete and an upsert of a recorded revision, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
+
+    refused = IncidentScopeRewriteRefused
+    rewritten = "A recorded scope revision is never rewritten; a change of scope is a new revision."
+    deleted = "A recorded scope revision is never deleted."
+
+
+class IncidentScopeRevision(models.Model):
+    """One revision of an incident's scope (SPINE SP-3, :mod:`assurance.incident_scope`).
+
+    The incident is a :class:`Finding`; its scope is its rows, oldest first, the latest
+    current. Each row is what is believed affected as of that revision: ``items``, each
+    ``{kind, ref}`` resolved in the finding's own deployment (an ``asset`` or an approved
+    ``workflow``); why (``reason``); the ``evidence`` it rests on; and who declared it.
+    ``revision`` counts from 1, and every revision after the first names the one it
+    ``supersedes``, the revision before it (``mythos_core.evidence_record``'s word and
+    rule). ``save`` refuses a row whose items or evidence are another deployment's, that
+    does not supersede the current revision, or that changes nothing.
+
+    APPEND-ONLY: the model refuses an update or a delete of a recorded revision, or a
+    fresh instance carrying its key, and its queryset a bulk one or an upsert. Its keys
+    have no reverse accessor. Two writes still reach a recorded row, both through the
+    base manager, which stays Django's plain one: the finding's cascade removes it, and
+    removing an account nulls ``declared_by`` -- a stop, never held back by this record.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    # No reverse accessor: nothing reads one, and one would move a recorded revision.
+    # The deployment is the finding's, so no second column can disagree with it.
+    finding = models.ForeignKey(Finding, on_delete=models.CASCADE, related_name="+")
+    revision = models.PositiveIntegerField()
+    # The revision before this one; null for the first.
+    supersedes = models.PositiveIntegerField(null=True, blank=True)
+    items = models.JSONField(default=list)
+    reason = models.TextField()
+    evidence = models.JSONField(default=list)
+    # SET_NULL, so removing an account is never held back by a revision it declared.
+    declared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    declared_at = models.DateTimeField(default=timezone.now)
+
+    objects = IncidentScopeRevisionQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["finding_id", "revision"]
+        constraints = [
+            models.UniqueConstraint(fields=["finding", "revision"], name="uq_incident_scope_finding_revision"),
+            models.CheckConstraint(
+                condition=models.Q(revision=1, supersedes__isnull=True)
+                | models.Q(revision__gt=1, supersedes=models.F("revision") - 1),
+                name="incident_scope_supersedes_the_one_before",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        from .incident_scope import check
+
+        refusal = IncidentScopeRewriteRefused(
+            "A recorded scope revision is history and is never rewritten; record the next revision as a new row."
+        )
+        # An INSERT and nothing else (assurance.append_only), and only of the next
+        # revision, whose every item and piece of evidence is the deployment's own.
+        kwargs = insert_only(self, kwargs, refusal)
+        check(self)
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise IncidentScopeRewriteRefused("A recorded scope revision is history and is never deleted.")
+
+    def __str__(self) -> str:
+        return f"scope revision {self.revision} of finding {self.finding_id}"

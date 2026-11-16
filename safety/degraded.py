@@ -234,6 +234,9 @@ ROUTES = {
     "finding-assignable": {"GET": _R},
     "finding-repair-contracts": {"GET": _R, "POST": _E},
     "finding-recovery-record": {"GET": _R, "POST": _E},
+    # An incident's scope revisions (SPINE SP-3): the history read; the next revision
+    # recorded. Read by no stop and by no decision.
+    "finding-scope-revisions": {"GET": _R, "POST": _E},
     "provider-list": {"GET": _R, "POST": _E},
     "provider-detail": {"GET": _R, "PUT": _E, "PATCH": _E},
     "provider-assertion-list": {"GET": _R, "POST": _E},
