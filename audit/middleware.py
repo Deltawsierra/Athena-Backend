@@ -8,7 +8,7 @@ import time
 import uuid
 from array import array
 from bisect import bisect_left, bisect_right
-from urllib.parse import unquote_plus, urlencode
+from urllib.parse import quote_plus, unquote_plus, urlencode
 
 import requests
 from django.conf import settings
@@ -18,7 +18,7 @@ from urllib3.exceptions import HTTPError as Urllib3Error
 
 from assurance.oplog import log_later
 from safety import collection, outbound
-from safety.stops import is_stop
+from safety.stops import is_stop, view_name as stops_view_name
 
 logger = logging.getLogger(__name__)
 
@@ -1115,6 +1115,134 @@ _ANSWER_CHUNK = 4096
 _ANSWER_LIMIT = 64 * 1024
 
 
+# A scan launch names its target in its body: the routes that launch a scan, by URL
+# name, and the field each reads its target from. The key-based redaction above
+# never touched that field -- "url" names no secret -- so a target's login, its
+# `?api_key=`, its `;jsessionid=` and its fragment went to the engine as typed.
+# The engine scores path, method, query and body for attack structure; it has no
+# use for a credential, so the target reaches it as pentest.models.target_shown
+# shows it everywhere else (#219): scheme, host, port and path as given, the login
+# `[withheld]`, every query, `;param` and fragment value `•••`.
+_LAUNCH_TARGETS = {
+    "pentest:run_pentest_scan": ("url",),
+    "pentest:run_llm_pentest_scan": ("base_url",),
+}
+
+
+_NOT_JUDGED = object()
+
+
+def _launch_fields(request):
+    """The fields a scan launch names its target in, or None for any other route."""
+    return _LAUNCH_TARGETS.get(stops_view_name(request))
+
+
+def _shown(value):
+    """A launch field's value as the engine may see it. Not a string (the view
+    refuses it): withheld whole, unless it is a number, a boolean or null, which
+    carries nothing."""
+    from pentest.models import WITHHELD_VALUE, target_shown
+
+    if isinstance(value, str):
+        return target_shown(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return WITHHELD_VALUE
+
+
+def _the_target(items, fields, targets):
+    """Add to ``targets`` the target the view reads from these pairs: the last value
+    of its field, as its parser keeps it, when that is a string. One per body, so
+    withholding it wherever else it is said (:func:`_said_without`) costs one pass
+    however many duplicates a body carries."""
+    value = next((value for key, value in reversed(items) if key in fields), None)
+    if isinstance(value, str) and value not in targets:
+        targets.append(value)
+
+
+def _form_targets_shown(text, fields, targets):
+    """A form body or query string with each pair naming a target shown, every other
+    pair as it was sent."""
+    out, pairs = [], []
+    for chunk in text.split("&"):
+        key, sep, value = chunk.partition("=")
+        if sep and unquote_plus(key) in fields:
+            pairs.append((unquote_plus(key), unquote_plus(value)))
+            shown = _shown(unquote_plus(value))
+            if shown != unquote_plus(value):
+                chunk = f"{key}={quote_plus(shown)}"
+        out.append(chunk)
+    _the_target(pairs, fields, targets)
+    return "&".join(out)
+
+
+def _json_targets_shown(text, fields, targets):
+    """A JSON body with the value of every key naming a target shown, at any depth
+    and in every duplicate; ValueError when it is not JSON."""
+    outermost = []
+
+    def pairs(items):
+        # Objects close inside out: the last one is the body itself.
+        outermost[:] = items
+        return {key: (_shown(value) if key in fields else value) for key, value in items}
+
+    parsed = json.loads(text, object_pairs_hook=pairs)
+    if isinstance(parsed, dict):
+        _the_target(outermost, fields, targets)
+    return json.dumps(parsed, separators=(",", ":"))
+
+
+def _launch_targets_shown(text, fields, form, targets):
+    """A scan launch's body with its target shown, read as the view's parser reads
+    it: a form pair by pair, anything that opens like JSON as JSON. None when it is
+    neither; the caller then withholds every URL in it (:func:`_urls_shown`)."""
+    try:
+        if form and _is_form(text):
+            return _form_targets_shown(text, fields, targets)
+        if _STRUCTURED.match(text):
+            return _json_targets_shown(text, fields, targets)
+    except (ValueError, TypeError, RecursionError):
+        pass
+    return None
+
+
+# A URL in text: a scheme, then `://` as written or JSON-escaped (`:\/\/`), up to the
+# first blank, quote or angle bracket. The view refuses a target with no scheme.
+# A scheme starts only where a run of scheme characters starts, and the run is
+# taken whole: tried from inside a run, 64 KiB of letters took 3.5 s, quadratic,
+# before authentication (test_the_text_fallback_is_linear_in_the_body).
+_URL_IN_TEXT = re.compile(r"""(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*+:(?:\\?/){2}[^\s"'<>]*+""")
+
+
+def _urls_shown(text, cut=False):
+    """``text`` with every URL in it shown as a target is. For a launch body the
+    target cannot be read from -- one that is neither a form nor JSON, or longer
+    than the gateway parses -- so whichever URL is its target is withheld. When
+    ``text`` was ``cut`` from a longer body, a URL the cut runs through is withheld
+    whole: cut inside its login, it shows no ``@`` to end the login at."""
+    from pentest.models import WITHHELD_VALUE, target_shown
+
+    def shown(found):
+        if cut and found.end() == len(text):
+            return WITHHELD_VALUE
+        return target_shown(found.group(0).replace("\\/", "/"))
+
+    return _URL_IN_TEXT.sub(shown, text)
+
+
+def _said_without(text, targets):
+    """``text`` with what each target carries withheld wherever else it is said
+    (``pentest.models.target_said``: the target in any spelling, its values, its
+    login). Never raises; withholding fails towards saying less."""
+    if not targets:
+        return text
+    from pentest.models import target_said
+
+    for target in targets:
+        text = target_said(text, target)
+    return text
+
+
 def _decoded(raw, encoding):
     """``raw`` in ``encoding``, or ``None`` if it is not read here.
 
@@ -1221,14 +1349,19 @@ class DefenderMiddleware:
 
         collection.withdraw_if_held_too_long()
         meta = getattr(request, "audit_metadata", {})
-        body, body_problem = self._get_body(request)
+        # A scan launch's target, wherever it is said, reaches the engine as it is
+        # shown: no login, no query, `;param` or fragment value (_LAUNCH_TARGETS).
+        launch, targets = _launch_fields(request), []
+        body, body_problem = self._get_body(request, launch, targets)
         # The query string was copied through with no redaction at all, so
         # ?token=... reached the engine in clear while the same value in the
         # body was replaced. One that is not a form is read as text too, and a
         # value that text had to redact to its end is reported like the body's.
-        query, _cut, query_doubtful = redact_within(
-            request.META.get("QUERY_STRING", ""), form=True
-        )
+        query = request.META.get("QUERY_STRING", "")
+        if launch:
+            query = _form_targets_shown(query, launch, targets)
+        query, _cut, query_doubtful = redact_within(query, form=True)
+        query = _said_without(query, targets)
         if query_doubtful:
             body_problem = _joined(body_problem, f"query string {DOUBTFUL_VALUE}")
 
@@ -1414,7 +1547,7 @@ class DefenderMiddleware:
         except (requests.RequestException, Urllib3Error, OSError, ValueError) as exc:
             return None, f"engine answer could not be read: {exc.__class__.__name__}"
 
-    def _get_body(self, request):
+    def _get_body(self, request, launch=_NOT_JUDGED, targets=None):
         """
         The part of the body worth inspecting, and why it was skipped.
 
@@ -1424,9 +1557,17 @@ class DefenderMiddleware:
         DATA_UPLOAD_MAX_MEMORY_SIZE raised, was swallowed, and reached the
         engine as an empty body: padding a payload past that limit walked past
         inspection with nothing logged.
+
+        A scan launch's (``launch``: the fields it names its target in) target is
+        shown as :func:`pentest.models.target_shown` shows it, and each target read
+        is added to ``targets``.
         """
         if request.path.startswith(SENSITIVE_PATHS):
             return "", None
+        if launch is _NOT_JUDGED:
+            launch = _launch_fields(request)
+        if targets is None:
+            targets = []
 
         content_type = (request.META.get("CONTENT_TYPE") or "").split(";")[0].strip().lower()
 
@@ -1441,8 +1582,11 @@ class DefenderMiddleware:
                 return "", f"multipart body could not be inspected: {exc.__class__.__name__}"
             if not fields:
                 return "", None
+            if launch:
+                _the_target(fields, launch, targets)
+                fields = [(key, _shown(value) if key in launch else value) for key, value in fields]
             return self._trim(
-                redact(urlencode([(key, value) for key, value in fields]), form=True)
+                _said_without(redact(urlencode([(key, value) for key, value in fields]), form=True), targets)
             )
 
         if content_type and content_type not in INSPECTABLE_TYPES:
@@ -1477,9 +1621,21 @@ class DefenderMiddleware:
         # than that prefix is reported as truncated even when what is left after
         # redaction happens to fit.
         prefix = 4 * self.max_body_bytes
-        redacted, cut, doubtful = redact_within(
-            text, form=content_type == "application/x-www-form-urlencoded", limit=prefix
-        )
+        form = content_type == "application/x-www-form-urlencoded"
+        cut_first = False
+        if launch:
+            # Before redaction, which can cut a URL apart and leave its tail. A body
+            # past the prefix is read in the prefix alone, as redaction reads it.
+            shown = None
+            if len(text) > prefix:
+                text, cut_first = text[:prefix], True
+            else:
+                shown = _launch_targets_shown(text, launch, form, targets)
+            text = _urls_shown(text, cut=cut_first) if shown is None else shown
+        redacted, cut, doubtful = redact_within(text, form=form, limit=prefix)
+        cut = cut or cut_first
+        # Before the cut to what is kept, so what is withheld stays inside it.
+        redacted = _said_without(redacted, targets)
         body, trimmed = self._trim(redacted)
         if trimmed is None and cut:
             trimmed = f"request body was truncated at {prefix} bytes for inspection"
