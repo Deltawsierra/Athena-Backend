@@ -18,8 +18,9 @@ Pure: no Django, no database, no clock, no numpy. Two halves:
   the scenario as it is and the residual run with the option's control effect --
   the expected annual exposure of each, the expected reduction, the first-year
   investment, the risk-adjusted ROI and the payback period, each with the reason
-  it is not meaningful where it is not (never a negative or infinite payback), and
-  the tail reduction at P90 and P95. Money at the currency's minor unit, half-even;
+  it is not meaningful where it is not (never a negative or infinite payback), and,
+  at P90 and P95, the two runs' percentiles and the difference between them (a
+  difference of two percentiles, not a percentile of the reduction). Money at the currency's minor unit, half-even;
   the ROI and the payback to fixed places, half-even. Computed from the runs' full
   precision; nothing rounded is computed with again.
 
@@ -47,8 +48,16 @@ from .provenance import SourceType
 
 #: The option's canonical document.
 OPTION_SCHEMA = "mythos.economics.remediation-option/v1"
-#: The ROI document a scenario's option is served as.
-ROI_SCHEMA = "mythos.economics.roi/v1"
+#: The ROI document a scenario's option is served as (spec, section 28.11). v2 is v1,
+#: its money figures held as measures (``measures``), the pairs it sets against each
+#: other (``side_by_side``) and what each figure nets (``nets``), with one key renamed:
+#: a tail's ``reduction`` -- the current run's percentile less the residual run's, a
+#: difference of two percentiles and not a percentile of the reduction -- is
+#: ``difference_of_percentiles``, its value unchanged. Nothing reads a v1 document back.
+ROI_SCHEMA = "mythos.economics.roi/v2"
+ROI_SCHEMA_V1 = "mythos.economics.roi/v1"
+#: Every ROI schema ever served, oldest first.
+ROI_SCHEMAS: tuple[str, ...] = (ROI_SCHEMA_V1, ROI_SCHEMA)
 #: How a retest record is cited: the digest of this document of it.
 RETEST_CITATION_SCHEMA = "mythos.economics.retest-citation/v1"
 
@@ -460,11 +469,13 @@ def economics(current: Line, residual: Line, investment: Mapping[str, Decimal], 
                    "above zero")
 
     def tail(now: Decimal | None, after: Decimal | None, why: str) -> dict:
+        # The current run's percentile less the residual run's: v1 served it as
+        # "reduction"; it is a difference of two percentiles, named so (v2).
         if now is None or after is None:
-            return {"current": _shown(now, currency), "residual": _shown(after, currency), "reduction": None,
-                    "not_reported": why}
+            return {"current": _shown(now, currency), "residual": _shown(after, currency),
+                    "difference_of_percentiles": None, "not_reported": why}
         return {"current": _shown(now, currency), "residual": _shown(after, currency),
-                "reduction": _shown(compute(lambda: now - after), currency), "not_reported": None}
+                "difference_of_percentiles": _shown(compute(lambda: now - after), currency), "not_reported": None}
 
     return {
         "current_expected_annual_exposure": _shown(current.expected_annual, currency),
@@ -537,6 +548,8 @@ __all__ = [
     "REFUSALS",
     "RETEST_CITATION_SCHEMA",
     "ROI_SCHEMA",
+    "ROI_SCHEMAS",
+    "ROI_SCHEMA_V1",
     "VETO_STATEMENT",
     "Line",
     "Option",

@@ -279,6 +279,7 @@ jobs:
             tests/test_the_engine_health_check_holds_a_total_deadline.py \
             tests/test_every_llm_scan_registers_its_model.py \
             tests/test_economics_exposure_report.py \
+            tests/test_the_exposure_report_has_a_json_format.py \
             tests/test_a_demoted_operators_grant_stops_proving.py \
             tests/test_the_backend_sign_in_emits_signed_identity_records.py \
             tests/test_the_revocation_waits_for_the_answer_under_asgi.py \
