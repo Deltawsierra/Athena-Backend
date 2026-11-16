@@ -2053,7 +2053,7 @@ through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
 Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
 pin, from the install pip recorded; otherwise it stops the run with one error naming each
 failed check and what to do. Each run ends with its verdict, for example
-`pin guard <sha>: mythos-core pinned 12c6433, imported 12c6433 from <path>: OK`. Its one
+`pin guard <sha>: mythos-core pinned a27774d, imported a27774d from <path>: OK`. Its one
 switch is described under "The shared pin guard" in Mythos-Core's README.
 `ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
 run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.
