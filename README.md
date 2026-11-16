@@ -466,8 +466,8 @@ those tools as well as the digest, or the answer is `409`. Any other `include` v
 Deploy order for observed effect v5: this backend is merged AND deployed before Achilles
 signs a version 5 record. An engine that signs v5 at a backend that does not read it is
 refused every record, and an intake refusal is terminal: the engine keeps the record
-marked refused and never sends it again. Mythos-Core#83 is merged before this backend's
-pin of it.
+marked refused and never sends it again. Mythos-Core#83, the core this backend pins for
+it, is merged (16 Nov 2026).
 
 Deploy order for G6, the gate verifying the tool contract it dispatches under:
 1. Athena-Backend first: it serves `?include=tools` and accepts
