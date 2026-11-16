@@ -181,7 +181,9 @@ def test_a_failed_readback_is_a_blocker_and_a_reopen_names_what_it_reopens():
 
     blocked = rr.record(finding, body={"permits": [permit], "receipts": [failed]})[-1]
     assert blocked.state == st.RECOVERY_INCOMPLETE
-    assert blocked.gaps == [f"effect_not_applied:receipt:{failed}"]
+    # SP-4: recorded by nobody, so no person vouches for the incident; the permit and the
+    # receipt are signed records, which an engine's key vouches for.
+    assert blocked.gaps == [f"effect_not_applied:receipt:{failed}", f"support:incident_recorded:finding:{finding.uuid}"]
 
     applied = record_reconciliation(dep, WF, permit, "applied").receipt_id
     proposed = rr.record(finding, body={"receipts": [applied]})

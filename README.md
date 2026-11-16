@@ -1087,6 +1087,37 @@ signed-in person's acceptance, refused (403) unless they are the deployment's ow
 names no one. A refused link or field is a 400; a step that changes links and no state,
 or may not follow the last, is a 409 with the reason.
 
+## The recovery record says what a recovery receipt could say (SPINE SP-4, part 2a)
+
+Mythos-Core#82 defines the recovery receipt (`mythos_core.recovery_receipt`,
+`mythos.recovery-receipt/v1`). Before this service issues one, its record says nothing a
+receipt could not (migration `assurance.0088`: five nullable fields, no row written):
+
+- **The release is the core's** `release_status(state, gap, held_back_from,
+  acceptance_carries)`, recorded and on every read; this service has no release rule of
+  its own. A gap holds a pass back, whatever it is: an accepted step with a posted gap
+  reads `AUDIT_INCOMPLETE`. Each step names the recovered state it is held back from
+  (`held_back_from`), or none.
+- **An acceptance ends.** Every read compares the reader's instant with `accepted_until`:
+  an accepted step whose acceptance has ended is served at the state before it, its
+  release `FAIL`, and its `standing` is the core's word `acceptance_ended` (each step's
+  standing is one of the core's five, in the core's order). The row is not rewritten.
+- **Who vouches for every witness** (`support`, the core's entry shape): the engine and
+  its key for a permit or a receipt; otherwise the named person who recorded the step that
+  linked it, with that step's time (`user:<id>`). Nobody nameable is a gap
+  (`support:<condition>:<kind>:<ref>`) with what would close it (`gaps_named`, the core's
+  `voucher_words`); each sentence a reader prints is the core's `support_sentence`. A row
+  from before 0088 names no voucher, and reads every witness as such a gap.
+- **Names, not prose.** A posted restriction or gap is a name in the core's grammar
+  (`not_a_name` otherwise, 400); one spelled as a gap the record derives is `not_posted`.
+  A stored one that is not a name is shown as it is and named among the gaps by a pointer
+  (`unnamed:restriction:<i>`). Each person is also a reference that outlives the account
+  (`recorded_by_ref`, `accepted_by_ref`, a scope revision's `declared_by_ref`).
+
+`tests/test_the_recovery_record_says_what_a_receipt_could.py` holds all of it to the core,
+with its vector file (`tests/vectors/recovery-receipt-v1.json`, byte for byte the core's),
+and builds, signs and verifies a receipt of each step with the vectors' test key.
+
 ## An incident's scope, versioned (SPINE SP-3)
 
 What an incident is believed to have affected changes during an investigation: a backup
@@ -1953,7 +1984,7 @@ through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
 Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
 pin, from the install pip recorded; otherwise it stops the run with one error naming each
 failed check and what to do. Each run ends with its verdict, for example
-`pin guard <sha>: mythos-core pinned 320d685, imported 320d685 from <path>: OK`. Its one
+`pin guard <sha>: mythos-core pinned 12c6433, imported 12c6433 from <path>: OK`. Its one
 switch is described under "The shared pin guard" in Mythos-Core's README.
 `ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
 run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.

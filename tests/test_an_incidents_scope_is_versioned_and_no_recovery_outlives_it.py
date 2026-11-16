@@ -94,6 +94,25 @@ def _added(number, record) -> str:
     return f"scope:revision:{number}:added:{item['kind']}:{item['ref']}"
 
 
+#: The conditions whose witness a person vouches for (SPINE SP-4): every one but the signed
+#: permit and receipt, and the owner's acceptance, which is the acceptance.
+PERSON_VOUCHED = ("incident_recorded", "evidence_linked", "repair_agreed", "repair_tested")
+
+
+def _unvouched(step, *conditions) -> list[str]:
+    """The gap the witness of each of ``conditions`` leaves on ``step`` (a recorded row)
+    when the step was recorded by nobody: no person vouches for it (SP-4)."""
+    return [
+        f"support:{c['condition']}:{c['witness']['kind']}:{c['witness']['ref']}"
+        for name in conditions for c in step.conditions if c["condition"] == name
+    ]
+
+
+def _named_by(kind, ref) -> str:
+    """The gap a link that names an added item leaves when nobody vouches for it (SP-4)."""
+    return f"support:scope_item_named:{kind}:{ref}"
+
+
 def _read(finding):
     return rr.finding_record(finding)
 
@@ -510,7 +529,7 @@ def test_a_readable_scope_says_what_it_gained_and_lost_even_when_it_holds_nothin
 def test_with_no_declared_scope_no_step_reaches_a_recovered_state_and_it_says_so(recovered):
     finding = _incident()
     dep, owner = finding.deployment, finding.deployment.owner
-    _repaired_and_tested(finding)
+    closure = _repaired_and_tested(finding)
     if recovered == st.RECOVERY_ACCEPTED:
         asked = {"by": owner, "body": {"coverage": COVERED}, "accept_until": _until()}
     else:
@@ -524,7 +543,13 @@ def test_with_no_declared_scope_no_step_reaches_a_recovered_state_and_it_says_so
     assert _states(steps) == [st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED]
     held = steps[-1]
     assert held.scope_revision is None
-    assert held.gaps == [NOT_DECLARED] and held.release == st.AUDIT_INCOMPLETE
+    # SP-4: the restore is recorded by nobody, so no person vouches for its witnesses.
+    nobody = [] if recovered == st.RECOVERY_ACCEPTED else [
+        f"support:incident_recorded:finding:{finding.uuid}",
+        f"support:repair_agreed:repair_contract:{finding.repair_contracts.get().uuid}",
+        f"support:repair_tested:closure_evidence:{closure.uuid}",
+    ]
+    assert held.gaps == [NOT_DECLARED, *nobody] and held.release == st.AUDIT_INCOMPLETE
     assert {"statement": NOT_DECLARED, "sources": [{"kind": "scope", "ref": f"finding:{finding.uuid}"}]} in (
         held.residual_uncertainty
     )
@@ -657,7 +682,7 @@ def test_an_empty_step_never_re_derives_a_recovered_state_under_a_wider_scope():
 
     read = _read(finding)
     assert read["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
-    assert read["steps"][-1]["gaps"] == [_added(2, backup)]
+    assert read["steps"][-1]["gaps"] == [*_unvouched(restored, *PERSON_VOUCHED), _added(2, backup)]
     assert read["steps"][-1]["recorded"]["state"] == st.RESTORED_WITH_RESTRICTIONS
 
     with pytest.raises(rr.RecoveryRefused) as refused:
@@ -684,7 +709,8 @@ def test_an_empty_step_never_re_derives_a_recovered_state_under_a_wider_scope():
     # the item among their gaps, and none is a recovered state.
     without = rr.record(finding, body={"evidence": []})
     assert _states(without) == [st.REPAIR_PROPOSED, st.REPAIR_TESTED]
-    assert without[-1].gaps == [_added(2, backup)] and without[-1].release == st.AUDIT_INCOMPLETE
+    assert without[-1].gaps == [_added(2, backup), *_unvouched(without[-1], *PERSON_VOUCHED)]
+    assert without[-1].release == st.AUDIT_INCOMPLETE
 
 
 def test_evidence_for_one_added_item_covers_that_item_and_no_other():
@@ -701,7 +727,8 @@ def test_evidence_for_one_added_item_covers_that_item_and_no_other():
     # It answered for one item, so the steps are recorded; the other holds the restore back.
     assert _states(again) == [st.UNDER_INVESTIGATION, st.REPAIR_PROPOSED, st.REPAIR_TESTED]
     held = again[-1]
-    assert held.gaps == [_added(2, modem)] and held.release == st.AUDIT_INCOMPLETE
+    assert held.gaps == [_added(2, modem), *_unvouched(held, *PERSON_VOUCHED), _named_by("evidence", one.uuid)]
+    assert held.release == st.AUDIT_INCOMPLETE
     assert not RecoveryRecord.objects.filter(finding=finding, scope_revision=2, state__in=sorted(rr.RECOVERED)).exists()
     read = _read(finding)
     assert read["current"] == {"version": 7, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
@@ -714,7 +741,10 @@ def test_evidence_for_one_added_item_covers_that_item_and_no_other():
 
     other = scopes.evidence_naming(modem)
     (restored,) = rr.record(finding, body={"evidence": [str(one.uuid), str(other.uuid)]})
-    assert (restored.state, restored.scope_revision, restored.gaps) == (st.RESTORED_WITH_RESTRICTIONS, 2, [])
+    assert (restored.state, restored.scope_revision, restored.gaps) == (
+        st.RESTORED_WITH_RESTRICTIONS, 2,
+        [*_unvouched(restored, *PERSON_VOUCHED), _named_by("evidence", one.uuid), _named_by("evidence", other.uuid)],
+    )
 
 
 def test_an_item_added_before_any_recovery_is_an_open_gap_until_evidence_names_it():
@@ -794,7 +824,7 @@ def test_a_permit_of_that_workflow_names_it():
     refund = ApprovedWorkflow.objects.create(deployment=dep, slug=WF, name="Refund")
     declare_scope(finding, primary, refund)
     open_gap = f"scope:revision:2:added:workflow:{WF}"
-    assert _read(finding)["steps"][-1]["gaps"] == [open_gap]
+    assert _read(finding)["steps"][-1]["gaps"] == [*_unvouched(restored, *PERSON_VOUCHED), open_gap]
 
     # The step links a signed gate decision of that workflow, resolved now as every
     # permit is: it names the workflow, and the step under the new revision says so.
@@ -884,7 +914,8 @@ def test_an_added_asset_on_which_nothing_was_found_is_named_by_a_look_recorded_a
 
     # Looked at again, after it was added: named, as a look that found nothing.
     again = rr.record(finding, body={"coverage": _looked_at(backup)})
-    assert _states(again)[-1] == st.RESTORED_WITH_RESTRICTIONS and again[-1].gaps == []
+    assert _states(again)[-1] == st.RESTORED_WITH_RESTRICTIONS
+    assert again[-1].gaps == [*_unvouched(again[-1], *PERSON_VOUCHED), _named_by("coverage", f"asset:{backup.uuid}")]
     look = {"kind": "coverage", "ref": f"asset:{backup.uuid}"}
     assert again[-1].scope_items == {
         "added": [{"revision": 2, "kind": "asset", "ref": str(backup.uuid), "covered_by": [look]}], "removed": [],
@@ -936,7 +967,8 @@ def test_a_failed_read_back_is_recorded_whatever_the_scope():
 
     assert _states(steps) == [st.UNDER_INVESTIGATION, st.RECOVERY_INCOMPLETE]
     assert steps[0].reopens == str(restored.uuid)
-    assert steps[-1].gaps == [f"effect_not_applied:receipt:{failed}"] and steps[-1].release == st.FAIL
+    assert steps[-1].gaps == [f"effect_not_applied:receipt:{failed}", *_unvouched(steps[-1], *PERSON_VOUCHED)]
+    assert steps[-1].release == st.FAIL
 
 
 def _gone(record, added, removed, by, reason) -> dict:
