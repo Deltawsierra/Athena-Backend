@@ -186,7 +186,8 @@ jobs:
   # Windows meets that shape for real, so only this job proves no error says it.
   # And the identity emitter's own tests: a demoted operator's role grant stops proving,
   # its revocation is signed only once the stop is answered, and the reconcile never
-  # extends a lease.
+  # extends a lease -- under the ASGI entry point too (config.asgi), where a slow
+  # revocation never holds back a stop.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -276,6 +277,7 @@ jobs:
             tests/test_economics_exposure_report.py \
             tests/test_a_demoted_operators_grant_stops_proving.py \
             tests/test_the_backend_sign_in_emits_signed_identity_records.py \
+            tests/test_the_revocation_waits_for_the_answer_under_asgi.py \
             tests/test_economics_run_cap.py::test_no_stop_route_takes_a_slot \
             tests/test_economics_run_cap.py::test_every_handler_that_runs_a_monte_carlo_takes_a_slot \
             tests/test_economics_run_cap.py::test_no_management_command_runs_a_monte_carlo_uncapped \
