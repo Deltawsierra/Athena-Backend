@@ -54,7 +54,9 @@ release is ``PASS`` only for ``recovery_accepted`` (``status.release_may_pass``)
 
 **Scope (SPINE SP-3).** Each step names the revision of the incident's scope it was
 derived under (``scope_revision``; :mod:`assurance.incident_scope`), and a recovered state
-holds only for that revision:
+holds only for that revision. The words below are ``mythos_core.scope``'s (Mythos-Core#80),
+read from the core: the kinds of scope item, the scope holds, and the rule that a scope
+revision reopens an accepted recovery:
 
 - *No declared scope is unknown, never ok.* With no revision on record a step cannot reach
   a recovered state: it is held back as a coverage gap holds it, names
@@ -103,9 +105,11 @@ holds only for that revision:
   does move returns to ``under_investigation`` under the current revision and names the
   step it sets aside (``reopens``). After ``restored_with_restrictions`` that is S1's
   reopen, checked by S1. S1 lets nothing follow ``recovery_accepted``, not even a reopen:
-  the rule "a scope revision reopens an accepted recovery" belongs in
-  ``mythos_core.status`` and is not there yet, so after an accepted step S1's step check
-  is not asked about that step, and runs from the new one on.
+  the rule "a scope revision reopens an accepted recovery" is the core's
+  ``mythos_core.scope.check_scope_reopen``, and after an accepted step that rule is asked
+  instead, with each scope hold that stands against the accepted step: the new step is
+  ``under_investigation``, names the accepted one in ``reopens``, and at least one hold
+  stands. S1's step check runs from the new step on.
 
 **Residual uncertainty** is a list of statements, each with its sources: every open
 ``Unknown`` of the finding, every coverage gap, a scope that is not declared, every
@@ -124,6 +128,7 @@ from datetime import datetime
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from mythos_core import coverage as cov
+from mythos_core import scope as core_scope
 from mythos_core import status as st
 
 from . import composition, effect_reconciliation, incident_scope, observed_outcomes, retest_closure
@@ -486,7 +491,7 @@ def scope_items(links: dict, manifest: cov.Manifest, scope_revision, revisions) 
         if revision <= first:
             continue
         by = []
-        if kind == incident_scope.ASSET:
+        if kind == core_scope.ASSET:
             by += [
                 {"kind": EVIDENCE, "ref": one["uuid"]}
                 for one in links.get("evidence", []) if isinstance(one, dict) and one.get("asset") == ref
@@ -494,7 +499,7 @@ def scope_items(links: dict, manifest: cov.Manifest, scope_revision, revisions) 
             source = f"{kind}:{ref}"
             if missing.get(source) == () and _at_or_after(links.get("coverage_recorded_at"), declared_at[revision]):
                 by.append({"kind": COVERAGE, "ref": source})
-        elif kind == incident_scope.WORKFLOW:
+        elif kind == core_scope.WORKFLOW:
             by += [
                 {"kind": PERMIT, "ref": one["outcome_id"]}
                 for one in links.get("permits", []) if isinstance(one, dict) and one.get("workflow") == ref
@@ -509,13 +514,14 @@ def scope_holds_of(scope_revision, revisions, links: dict, manifest: cov.Manifes
     declared scope, an unreadable one, and each item its own scope gained that nothing
     it links names. Where what the scope gained cannot be established, the first two
     name it. Pure."""
-    return [
+    # Each hold once: one the core cannot name reads ``scope:unreadable`` from both.
+    return list(dict.fromkeys((
         *incident_scope.holds(scope_revision, revisions),
         *(
             incident_scope.gap(item["revision"], item["kind"], item["ref"])
             for item in scope_items(links, manifest, scope_revision, revisions)["added"] or () if not item["covered_by"]
         ),
-    ]
+    )))
 
 
 def lapsed(row, revisions) -> list[str]:
@@ -562,9 +568,12 @@ def derive(
     lapse = [] if previous is None else lapsed(previous, revisions)
     if lapse and not blocked and all(hold in scope_holds for hold in lapse):
         return None
-    # S1 lets nothing follow an accepted recovery, not even a reopen: after one, S1's
-    # step check is not asked about the accepted step. The new step still names it.
-    follows = None if lapse and previous.state in st.RECOVERY_TERMINAL else previous
+    # S1 lets nothing follow an accepted recovery, not even a reopen. That a scope
+    # revision reopens one is the core's rule (``mythos_core.scope.check_scope_reopen``):
+    # after an accepted step whose scope no longer stands, that rule is asked about it,
+    # with each scope hold that stands against it, and S1's step check about no step.
+    reopened = previous if lapse and previous.state in st.RECOVERY_TERMINAL else None
+    follows = None if reopened is not None else previous
     state = st.UNDER_INVESTIGATION if lapse else _step(None if previous is None else previous.state, supported)
     if state is None:
         return None
@@ -585,7 +594,9 @@ def derive(
         )
         if follows is not None:
             st.check_recovery_step(_as_recovery(follows), recovery)
-    except st.RecoveryError as exc:
+        if reopened is not None:
+            core_scope.check_scope_reopen(_as_recovery(reopened), recovery, lapse)
+    except (st.RecoveryError, core_scope.ScopeError) as exc:
         raise RecoveryRefused(exc.code, str(exc)) from None
     gate = st.PASS if st.release_may_pass([recovery]) or held else st.FAIL
     release = cov.release_given_coverage(manifest, gate)
