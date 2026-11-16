@@ -361,4 +361,29 @@ zopfli==0.2.3.post1
 # action_assurance are byte for byte what they were, and outcome.py and
 # evidence_record.py change in a comment only. The pin guard stays ON
 # (DEPENDENCY_PIN_GUARD is set nowhere).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@b42a1d3f06df8b0c20622f4d4be4604a95310358
+#
+# What the pin since b42a1d3 (Mythos-Core#81) adds:
+#
+# Mythos-Core#83 -- the 320d685 pin, one commit on b42a1d3: the head of that pull
+# request's branch, which is part of the core's main once it is merged (this pin must not
+# be merged here before it is). mythos_core.observed_effect is the one definition of the
+# observed-effect record (versions 1 to 5) and of its reconciliation receipt (versions 1
+# and 2): the fields of every version, one validator, one verifier, the refusal codes,
+# the keyed reference, the largest version 5 document (MAX_EVIDENCE_BYTES) and what a
+# reader says of an older record. assurance/observed_effects.py and
+# assurance/effect_reconciliation.py kept a copy of those rules by hand and now ask the
+# core for every one of them (tests/test_the_observed_effect_is_mythos_cores.py). The
+# module is data and predicates: it reads no environment, file or clock and holds no key.
+# It is read here at its first use, by the two evidence routes and the reads behind them,
+# and never with the URL conf, so nothing a stop loads or waits on changes.
+# Carried, not reached: mythos_core.action_assurance.record gains two optional fields on
+# the assurance record (process_state, business_consequence), with two names added to
+# the package's exports. This service builds no assurance record; its one import of the
+# package is tests/test_every_operation_says_how_it_degrades.py, which reads
+# action_assurance.decision.HOLD, and decision.py is byte for byte what it was. Every
+# other module of the core is byte for byte what it was at b42a1d3 (the diff of src/
+# touches only observed_effect.py, action_assurance/__init__.py and
+# action_assurance/record.py), and so are pinguard.py and templates/pin_bootstrap.py, so
+# tests/pin_bootstrap.py is unchanged. The pin guard stays ON (DEPENDENCY_PIN_GUARD is
+# set nowhere).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@320d68559b752e8365616d9f12585d2b46c814bc
