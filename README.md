@@ -1084,6 +1084,12 @@ revision it was derived under (`RecoveryRecord.scope_revision`), and a recovered
   step. A revision that removes an item names who declared it, and every revision states
   why in one printable line. An item removed and added again counts from the revision
   that added it again.
+- **What cannot be established reads unknown, never empty.** With no scope declared, or a
+  revision that cannot be read, `scope_removed` and a step's `scope_items.added` and
+  `scope_items.removed` are `null`, beside the gap (`scope:not_declared`,
+  `scope:unreadable`). So are `added` and `removed` of a revision on the scope read when
+  its items, or those of the one before it, cannot be read. An empty list says that
+  nothing was added or removed, and is said only of a scope that was read.
 - **Not covered:** the first declared scope's items are not tied one by one. Only items
   added later are.
 - **Rows from before this change** name no revision and are not rewritten. They read

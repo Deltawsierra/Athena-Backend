@@ -348,16 +348,19 @@ def served(row, before=None, *, current) -> dict:
     """One revision as its read serves it: what it holds as recorded, what it added to
     and removed from the revision ``before`` it (everything it holds is added when there
     is none), whether it is the current one, and who declared it (``None`` when nobody
-    is on record)."""
-    now, was = _keys(row.items) or [], (_keys(before.items) or []) if before is not None else []
+    is on record). ``added`` and ``removed`` are None, never an empty list, when its
+    items or those of the revision before it cannot be read: what it changed is then
+    not known."""
+    now, was = _keys(row.items), _keys(before.items) if before is not None else []
+    known = now is not None and was is not None
     return {
         "ref": str(row.uuid),
         "revision": row.revision,
         "supersedes": row.supersedes,
         "current": row.revision == current,
         "items": row.items,
-        "added": [{"kind": kind, "ref": ref} for kind, ref in now if (kind, ref) not in was],
-        "removed": [{"kind": kind, "ref": ref} for kind, ref in was if (kind, ref) not in now],
+        "added": [{"kind": kind, "ref": ref} for kind, ref in now if (kind, ref) not in was] if known else None,
+        "removed": [{"kind": kind, "ref": ref} for kind, ref in was if (kind, ref) not in now] if known else None,
         "reason": row.reason,
         "evidence": row.evidence,
         "declared_by": row.declared_by.username if row.declared_by_id else None,

@@ -281,6 +281,10 @@ def test_the_record_itself_refuses_another_deployments_item_whoever_writes_it():
     mistyped = [{**own_items[0], "asset_kind": "model"}]
     with pytest.raises(scope.ScopeRefused):
         IncidentScopeRevision(finding=finding, revision=1, items=mistyped, reason="x", evidence=own_evidence).save()
+    # A scope that holds nothing is refused at save as it is when declared.
+    with pytest.raises(scope.ScopeRefused) as refused:
+        IncidentScopeRevision(finding=finding, revision=1, items=[], reason="x", evidence=own_evidence).save()
+    assert refused.value.code == "items_required"
     assert _revisions(finding) == []
 
 
@@ -454,6 +458,49 @@ def test_an_added_item_is_named_only_by_the_right_kind_of_link_of_its_own_deploy
     assert (open_gap in rr.scope_holds_of(2, _TWO, links, manifest)) is (not _NAMES[(item, link)])
     # The first scope's own item is not tied one by one.
     assert ("asset", "a") not in {(one["kind"], one["ref"]) for one in items["added"]}
+
+
+_UNKNOWN = {"added": None, "removed": None}
+
+
+@pytest.mark.parametrize(
+    ("taken_under", "revisions"),
+    [
+        (None, []),
+        (None, [_rev(1, "a")]),
+        # It names a revision that is not among them.
+        (3, [_rev(1, "a"), _rev(2, "a", "b")]),
+        (1, []),
+        # A revision at or before its own cannot be read.
+        (2, [_rev(1, "a"), SimpleNamespace(revision=2, items="b")]),
+        (2, [SimpleNamespace(revision=1, items=[{"kind": "asset"}]), _rev(2, "a")]),
+    ],
+)
+def test_what_a_scope_gained_and_lost_reads_unknown_where_it_cannot_be_established(taken_under, revisions):
+    """No declared scope, or one that cannot be read: not known. Never an empty list,
+    which would say that nothing was added and nothing was removed."""
+    manifest = rr.manifest_of(SimpleNamespace(uuid="f-1"), _looked())
+    assert rr.scope_items({}, manifest, taken_under, revisions) == _UNKNOWN
+    # Unknown never reads as nothing to name: the scope's own hold stands beside it.
+    assert set(rr.scope_holds_of(taken_under, revisions, {}, manifest)) & {NOT_DECLARED, "scope:unreadable"}
+
+
+def test_a_readable_scope_says_what_it_gained_and_lost_even_when_it_holds_nothing_now():
+    manifest = rr.manifest_of(SimpleNamespace(uuid="f-1"), _looked())
+    # Readable as of its own revision, whatever a later one holds: known.
+    later = [_rev(1, "a"), SimpleNamespace(revision=2, items="b")]
+    assert rr.scope_items({}, manifest, 1, later) == {"added": [], "removed": []}
+    assert rr.scope_holds_of(1, later, {}, manifest) == ["scope:unreadable"]
+    # A scope that holds nothing now gained nothing, and still lists what it lost.
+    # (Declaring one is refused, so only a row written past the guard is one.)
+    who = SimpleNamespace(username="alice")
+    emptied = SimpleNamespace(revision=3, items=[], declared_by=who, declared_by_id=7, reason="the last one was a false alarm")
+    gone = {
+        "kind": "asset", "ref": "b", "added": 2, "removed": 3, "removed_by": "alice",
+        "reason": "the last one was a false alarm",
+    }
+    first_emptied = [_rev(1, "a"), _rev(2, "a", "b"), emptied]
+    assert rr.scope_items({}, manifest, 3, first_emptied) == {"added": [], "removed": [gone]}
 
 
 # ------------------------------------------- no declared scope is unknown, never ok
@@ -1067,6 +1114,12 @@ def test_a_scope_revision_that_cannot_be_read_is_caution_never_ok():
     read = _read(finding)
     assert read["current"] == {"version": 4, "state": st.REPAIR_TESTED, "release": st.AUDIT_INCOMPLETE}
     assert read["steps"][-1]["gaps"] == ["scope:unreadable"]
+    # What the scope gained and lost is not known, and each read says so beside the gap:
+    # never an empty list, which would say that nothing was removed.
+    assert read["scope_revision"] == 2 and read["scope_removed"] is None
+    first, unreadable = scope.finding_scope(finding)["revisions"]
+    assert (first["added"], first["removed"]) == ([scopes.item(scopes.asset(finding.deployment))], [])
+    assert (unreadable["added"], unreadable["removed"]) == (None, None)
     # And nothing a step can link answers it: no step is recorded, and none recovers.
     before = _history(finding)
     with pytest.raises(rr.RecoveryRefused) as refused:
@@ -1082,6 +1135,13 @@ def test_a_scope_revision_that_cannot_be_read_is_caution_never_ok():
     _repaired_and_tested(other)
     held = rr.record(other, by=other.deployment.owner, body={"coverage": COVERED}, accept_until=_until())[-1]
     assert (held.state, held.gaps, held.release) == (st.REPAIR_TESTED, ["scope:unreadable"], st.AUDIT_INCOMPLETE)
+    assert (held.scope_revision, held.scope_items) == (2, _UNKNOWN)
+    assert _read(other)["steps"][-1]["scope_items"] == _UNKNOWN
+    # With no scope declared at all, nothing is known of what one gained or lost.
+    undeclared = _incident("undeclared")
+    (opened,) = rr.record(undeclared)
+    assert (opened.scope_revision, opened.scope_items) == (None, _UNKNOWN)
+    assert (_read(undeclared)["scope_revision"], _read(undeclared)["scope_removed"]) == (None, None)
 
 
 # ---------------------------------------------------------------------- the routes

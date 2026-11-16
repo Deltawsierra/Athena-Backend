@@ -467,10 +467,17 @@ def scope_items(links: dict, manifest: cov.Manifest, scope_revision, revisions) 
     - ``removed``: each item a revision added and a later one removed, with both revision
       numbers, who removed it and why. Disclosed; not a gap.
 
+    Both are None, never an empty list, where they cannot be established: no scope was
+    declared, the step names a revision that is not among them, or a revision up to its
+    own cannot be read. An empty list says that nothing was added, or nothing removed,
+    and that is said only of a scope that was read. A readable scope that holds nothing
+    now gained nothing and still lists what it lost.
+
     Pure."""
-    standing = None if scope_revision is None else incident_scope.since(revisions, scope_revision)
-    if not standing:
-        return {"added": [], "removed": []}
+    declared = scope_revision is not None and scope_revision in {row.revision for row in revisions}
+    standing = incident_scope.since(revisions, scope_revision) if declared else None
+    if standing is None:
+        return {"added": None, "removed": None}
     first = revisions[0].revision
     declared_at = {row.revision: getattr(row, "declared_at", None) for row in revisions}
     missing = cov.coverage_ratio(manifest).missing
@@ -499,13 +506,14 @@ def scope_items(links: dict, manifest: cov.Manifest, scope_revision, revisions) 
 def scope_holds_of(scope_revision, revisions, links: dict, manifest: cov.Manifest) -> list[str]:
     """Each thing about the incident's scope that holds a recovered state back for a step
     derived under ``scope_revision`` and resting on ``links`` and ``manifest``, named: no
-    declared scope, an unreadable one, a later revision, and each item its own scope
-    gained that nothing it links names. Pure."""
+    declared scope, an unreadable one, and each item its own scope gained that nothing
+    it links names. Where what the scope gained cannot be established, the first two
+    name it. Pure."""
     return [
         *incident_scope.holds(scope_revision, revisions),
         *(
             incident_scope.gap(item["revision"], item["kind"], item["ref"])
-            for item in scope_items(links, manifest, scope_revision, revisions)["added"] if not item["covered_by"]
+            for item in scope_items(links, manifest, scope_revision, revisions)["added"] or () if not item["covered_by"]
         ),
     ]
 
@@ -752,7 +760,9 @@ def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION) -> dict:
         "scope_gaps": scope_gaps,
         # As recorded: each item the scope gained, with the kind of link that names it
         # (finding evidence, a permit, or a coverage observation with nothing found), and
-        # each item it lost, with who removed it and why. None on a row from before SP-3.
+        # each item it lost, with who removed it and why. Each list is None where it
+        # could not be established (no declared scope, or an unreadable one). The whole
+        # value is None on a row from before SP-3.
         "scope_items": row.scope_items,
         "recorded": {"state": row.state, "gaps": row.gaps, "release": row.release},
         "residual_uncertainty": row.residual_uncertainty,
@@ -811,8 +821,10 @@ def _incident(finding, steps: list, revisions: list) -> dict:
         # The incident's current scope revision; None when no scope is declared.
         "scope_revision": incident_scope.current_of(revisions),
         # Every item a revision added and a later one removed: both revision numbers, who
-        # removed it and why. Disclosed with the record; never a gap.
-        "scope_removed": incident_scope.removed(revisions) or [],
+        # removed it and why. Disclosed with the record; never a gap. None, never an
+        # empty list, when no scope is declared or a revision cannot be read: an empty
+        # list says that nothing was removed, and that is then not known.
+        "scope_removed": incident_scope.removed(revisions) if revisions else None,
         # As the last step reads now, never as a recovered state its scope has left behind.
         "current": None if last is None else {"version": last["version"], "state": last["state"], "release": last["release"]},
         "steps": read,
