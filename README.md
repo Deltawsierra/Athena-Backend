@@ -350,7 +350,7 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
 - `observed_effect`: signed by Achilles' observed-effect key (observer
   `achilles-effect`, a key that signs nothing else): the dispatch that carried a
   permitted action out saw its provider complete it. Recorded only with its
-  `mythos.observed-effect` evidence document (v1, v2, v3 or v4), through
+  `mythos.observed-effect` evidence document (v1 to v5), through
   `POST /api/assurance/deployments/<uuid>/observed-effects/` and the observed-effect
   service's credential (`assurance/observed_effects.py`); it proves an authority
   chain's `produces` hop when the document names that chain's tool and gate decision.
@@ -365,11 +365,63 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   `contract_digest_contradicts_gate`), and the effect's read
   (`GET .../chain-outcomes/`) serves `approval_recipients` as signed: each says
   whether the approval was recipient-bound (`"bound"`) or legacy (`"unbound"`), and
-  it is `null` on every row that is not a v4 observed effect.
+  it is `null` on every row that is not a v4 or v5 observed effect.
+
+  **The format is Mythos-Core's.** The document, versions 1 to 5, and the reconciliation
+  receipt below, versions 1 and 2, are defined once, in `mythos_core.observed_effect`:
+  the fields of every version, the validator, the verifier, the refusal codes and the
+  largest size. This backend kept a copy of those rules by hand and now keeps none:
+  `assurance/observed_effects.py` and `assurance/effect_reconciliation.py` ask the core for
+  every check, and a refusal says the core's code first (`plain_digest: ...`). The
+  conformance vectors in `tests/vectors/` are the core's files, byte for byte. A stored
+  v1 to v4 record and a stored v1 receipt read exactly as they did
+  (`tests/test_the_observed_effect_is_mythos_cores.py`).
+
+  **Version 5 adds**, to v4:
+  - `action_ref` in place of `action_digest`, and `observed.response_ref` in place of
+    `observed.response_digest`: keyed references (`hmac-sha256:` and 64 hex) that only the
+    holder of the engine's chain key can compute. A plain digest lets whoever reads it
+    confirm a guess at the action or the answer; a v5 document holding one, or a field of
+    a plain digest's name, is refused (`plain_digest`).
+  - `keyed_under`: `{"chain": "v2", "chain_key": <16 hex>}`, the id of that key, which
+    holds nothing of the key.
+  - `execution`: exactly `{"state": "accepted", "basis": "observed"}`. The provider
+    acknowledged the action; no record says `committed`.
+  - `dispatch.verified.tool_binding`: `null`, or the tool the permit was decided for, its
+    registry generation, its effect, the population's `target_count` and its bound
+    `max_targets`, the population as a keyed `targets_ref`, and each approval it rests on
+    with its own population, limit per window and what was `counted`.
+  - `permit_digest` is unchanged and plain: it covers the issuer's MAC.
+
+  **What this backend checks of a v5 record, and what it cannot.** It does not hold the
+  chain key. It checks the signature, the exact fields, the links to the gate decision,
+  the dispatch and the permit, that two records of one dispatch under one key id carry
+  the same reference, that the binding names the document's tool and that its population
+  is within its bound. It cannot test a guess at the action, the answer or the targets,
+  and no route here takes a text and says whether it matches. `GET .../chain-outcomes/`
+  serves `effect_reading` on an observed effect's row (`null` on every other row), in the
+  core's words: `digests` (`plain digests`, or `keyed: not checkable here`),
+  `digests_served` (an older record's plain digests are `withheld from this reader`),
+  `action_reference`, `response_reference` and `keyed_under` (v5), `execution` (an older
+  record: `accepted, from the recorded 2xx; this version has no execution field`),
+  `tool_binding` and `tool_binding_reading` (an older record: `no tool binding
+  recorded`, never "within its bound"), and `findings`. A record is judged, never refused,
+  for what happened: a binding whose bound is larger than the bound of an approval it
+  rests on is taken in, because it is evidence, and carries the finding
+  `binding_bound_over_approval`.
+
+  **The intake's bound.** One body is at most one envelope and one document of the
+  largest size the core's rules allow a v5 document: `MAX_PAYLOAD_B64` +
+  `MAX_EVIDENCE_BYTES` = 456,634 bytes (it was 81,920), both read from the core, for this
+  route only. A byte more is `413` before the body is parsed. The bound is on the bytes
+  as posted: the core's number is the canonical size (UTF-8, no spaces), so the engine
+  posts a record that way.
 - `effect_reconciliation` (F1): a dispatch whose provider answer was lost has no
   observed effect; Achilles asks the provider's readback what became of it and signs
-  each answer with the same observed-effect key as a `mythos.effect-reconciliation/v1`
-  receipt, under a payload type of its own, so a receipt is never an outcome and no
+  each answer with the same observed-effect key as a `mythos.effect-reconciliation`
+  receipt (v1, or v2 for a dispatch first signed as v5: `action_ref`,
+  `readback.response_ref` and `keyed_under` in place of the plain digests), under a
+  payload type of its own, so a receipt is never an outcome and no
   outcome is a receipt. Posted as `{"envelope": ...}` to
   `POST /api/assurance/deployments/<uuid>/effect-reconciliations/` with the
   observed-effect service's credential (`assurance/effect_reconciliation.py`); stored
@@ -377,7 +429,13 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   `409`), and kept even before its gate decision is on record. Read back into the
   `produces` hop of the chain that cites its gate decision: `committed` proves it
   (`readback`), `failed` breaks it (`effect_not_produced`), `unknown` leaves it
-  unproven, and conflicting or mismatched evidence proves nothing. The authority-chains
+  unproven, and conflicting or mismatched evidence proves nothing. A v2 receipt and a v5
+  effect of one dispatch are compared by the core (`compare_refs`): the same reference
+  under one key id agrees; a different one is a mismatch; two key ids, or a keyed
+  reference beside a plain digest, cannot be compared, which is never equal and never a
+  conflict (`reconciliation_cannot_compare`: the receipt binds nothing and the hop reads
+  unproven). A mismatch of plain digests says that they differ and no longer quotes
+  them. The authority-chains
   read serves each chain's receipts (`reconciliations`). No keyring, or none with the
   `achilles-effect` key, answers `503` and takes nothing in.
 - `unclassified`: signed by a trusted key for an engine not listed above.
@@ -399,6 +457,12 @@ identifier, `[]` for an approval binding none -- exactly the set the digest was 
 over, read in the same transaction, and the history row the version names must record
 those tools as well as the digest, or the answer is `409`. Any other `include` value is
 `400` (`unknown_include`). Without it the answer is byte for byte what it was.
+
+Deploy order for observed effect v5: this backend is merged AND deployed before Achilles
+signs a version 5 record. An engine that signs v5 at a backend that does not read it is
+refused every record, and an intake refusal is terminal: the engine keeps the record
+marked refused and never sends it again. Mythos-Core#83 is merged before this backend's
+pin of it.
 
 Deploy order for G6, the gate verifying the tool contract it dispatches under:
 1. Athena-Backend first: it serves `?include=tools` and accepts

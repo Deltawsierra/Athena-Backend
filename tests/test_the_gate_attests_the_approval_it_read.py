@@ -347,9 +347,15 @@ def test_this_backend_verifies_the_v3_conformance_vector_achilles_signed():
     key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(v["effect_key_phrase"].encode()).digest())
     raw = oc.raw_public_key(key)
     assert raw.hex() == v["effect_public_key_hex"]
-    verdict = oc.verify_outcome(_envelope(v["envelope"]), {oc.key_id_for(raw): oc.TrustedKey(raw, v["effect_engine"])})
+    keyring = {oc.key_id_for(raw): oc.TrustedKey(raw, v["effect_engine"])}
+    verdict = oc.verify_outcome(_envelope(v["envelope"]), keyring)
     assert verdict.verdict == oc.AUTHENTIC, verdict.reason
-    assert observed_effects.examine(verdict.outcome, v["evidence"]) == ""
+    # The envelope and the keyring go with them: what the evidence must be is the core's
+    # to say (mythos_core.observed_effect.verify_observed_effect), over the envelope itself.
+    assert (
+        observed_effects.examine(verdict.outcome, v["evidence"], envelope=_envelope(v["envelope"]), keyring=keyring)
+        == ""
+    )
     assert v["evidence"]["schema"] == observed_effects.EVIDENCE_SCHEMA == "mythos.observed-effect/v3"
 
     class Row:

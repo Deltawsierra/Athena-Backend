@@ -326,12 +326,14 @@ def test_a_v4_document_with_exactly_its_four_verified_fields_is_recorded(service
     assert sent.status_code == 201, sent.content
     row = WorkflowChainOutcome.objects.get(effect_dispatch_id=evidence["dispatch_id"])
     assert row.effect_evidence == evidence
-    # v1 to v3 stay readable beside it.
+    # v1 to v3 stay readable beside it, and v5 (the core's definition, Mythos-Core#83) is
+    # read too: the tuple gained its fifth member with the pin that defines it.
     assert observed_effects.EVIDENCE_SCHEMAS == (
         "mythos.observed-effect/v1",
         "mythos.observed-effect/v2",
         "mythos.observed-effect/v3",
         "mythos.observed-effect/v4",
+        "mythos.observed-effect/v5",
     )
 
 

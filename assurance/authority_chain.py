@@ -503,6 +503,12 @@ REASONS: Mapping[str, str] = {
         "a reconciliation receipt names the chain's gate decision, which is not on record here as a permit: it "
         "is stored, and proves nothing until it binds"
     ),
+    "reconciliation_cannot_compare": (
+        "a reconciliation receipt about the chain's dispatch refers to its action in a way that cannot be set "
+        "beside another record of the same dispatch -- two keyed references under different key ids, or a keyed "
+        "reference beside a plain digest -- so whether they name one action is unknown: never equal, never a "
+        "conflict, and the receipt binds nothing"
+    ),
     "effect_instant_unknown": (
         "the chain cites no observed effect whose signed document says when the effect happened, so no "
         "sign-in or delegation can be placed against it"
@@ -1007,8 +1013,15 @@ class ObservedEffect:
     observed_at: datetime | None = None
     dispatch: DispatchState | None = None
     #: The digest the permit covers of the canonical action: what a reconciliation
-    #: receipt of the same dispatch must name too.
+    #: receipt of the same dispatch must name too. A v1 to v4 document's; ``""`` for a
+    #: v5 one, which holds no plain digest of its action.
     action_digest: str = ""
+    #: A v5 document's keyed reference to its action and the key it is keyed under, as
+    #: ``(chain, chain_key)``: the id of the engine's chain key, which this backend does
+    #: not hold. ``""`` and ``None`` for v1 to v4. Two references are compared only by
+    #: the core (:func:`_same_action`).
+    action_ref: str = ""
+    keyed_under: tuple[str, str] | None = None
 
 
 #: A reconciliation receipt's conclusion: the one status vocabulary's words
@@ -1021,7 +1034,7 @@ RECONCILED_UNKNOWN = "unknown"
 
 @dataclass(frozen=True)
 class Reconciliation:
-    """A ``mythos.effect-reconciliation/v1`` receipt IN FORCE -- its envelope verifies
+    """A ``mythos.effect-reconciliation`` receipt (version 1 or 2) IN FORCE -- its envelope verifies
     now under the key the keyring files under ``achilles-effect``, and the row's columns
     are what it signs (:func:`assurance.effect_reconciliation.in_force`) -- as the rule
     reads it: one provider readback's answer about one attempt of one dispatch.
@@ -1030,7 +1043,9 @@ class Reconciliation:
     ``attempt`` is 1 for the dispatch itself and higher for a retry under the same key,
     each re-gated: ``gate_outcome_id``, ``permit_digest`` and ``dispatched_at`` are that
     attempt's. ``conclusion`` is :data:`RECONCILED_COMMITTED`, :data:`RECONCILED_FAILED`
-    or :data:`RECONCILED_UNKNOWN`; ``answer`` the readback's own word."""
+    or :data:`RECONCILED_UNKNOWN`; ``answer`` the readback's own word. A version 1
+    receipt names its action by ``action_digest``; a version 2 one by ``action_ref`` and
+    ``keyed_under`` (as an :class:`ObservedEffect` does), with ``action_digest`` ``""``."""
 
     receipt_id: str
     deployment: str
@@ -1048,6 +1063,8 @@ class Reconciliation:
     conclusion: str
     provider: str
     read_at: datetime
+    action_ref: str = ""
+    keyed_under: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -2520,14 +2537,52 @@ def _cited_effect(chain: Chain, inputs: Inputs) -> ObservedEffect | None:
 
 
 def _dispatch_fields(r: Reconciliation) -> dict:
-    """What every record of one dispatch names alike, whichever attempt it is of."""
+    """What every record of one dispatch names alike, whichever attempt it is of. How
+    each refers to its action is compared apart (:func:`_same_action`)."""
     return {
         "deployment": r.deployment,
         "workflow": r.workflow,
         "tool": f"{r.tool_kind} {r.tool_identifier!r}",
         "action": r.action,
-        "action_digest": r.action_digest,
     }
+
+
+def _same_action(mine, theirs, where: str) -> tuple[str, str]:
+    """Whether two records of one dispatch -- a receipt and an observed effect, or two
+    receipts -- refer to the same action: ``(mismatch, cannot compare)``, both ``""``
+    when they do.
+
+    Two plain digests (a v1 to v4 document, a version 1 receipt) are compared as they
+    always were. They are no longer QUOTED: a plain digest of an action lets whoever
+    reads it confirm a guess at the action, and no reader of a chain is entitled to that
+    (the core's words, ``plain digests: withheld from this reader``). A keyed reference
+    (a v5 document, a version 2 receipt) is compared by the core alone
+    (``mythos_core.observed_effect.compare_refs``): the same under one key id agrees,
+    different under one key id is a mismatch, and anything else -- two key ids, or a
+    keyed reference beside a plain digest, which an engine that signs a receipt in the
+    version of its dispatch never produces -- CANNOT BE COMPARED: never equal, and never
+    a conflict. This backend does not hold the key, so it tests no guess either way."""
+    # Imported here: this module is the rule and loads with the URL conf; the core's
+    # definition of the record is read when a chain's receipts are.
+    from mythos_core import observed_effect as core
+
+    if not mine.action_ref and not theirs.action_ref:
+        if mine.action_digest == theirs.action_digest:
+            return "", ""
+        return f"action_digest differs from the one {where} names ({core.PLAIN_DIGESTS_WITHHELD})", ""
+
+    def keyed(record) -> dict | None:
+        return None if record.keyed_under is None else dict(zip(("chain", "chain_key"), record.keyed_under, strict=True))
+
+    verdict = core.compare_refs(mine.action_ref or None, keyed(mine), theirs.action_ref or None, keyed(theirs))
+    if verdict == core.SAME:
+        return "", ""
+    if verdict == core.DIFFERENT:
+        return f"action_ref {mine.action_ref}; {where} names {theirs.action_ref}, under the same key id", ""
+    return "", (
+        f"action reference: {core.CANNOT_COMPARE} with {where} (two key ids, or a keyed reference beside a plain "
+        "digest): whether the two name one action is unknown"
+    )
 
 
 def _attempt_fields(r: Reconciliation) -> dict:
@@ -2535,11 +2590,16 @@ def _attempt_fields(r: Reconciliation) -> dict:
     return {"attempt": r.attempt, "permit_digest": r.permit_digest, "dispatched_at": _when(r.dispatched_at)}
 
 
-def _receipt_problems(r: Reconciliation, chain: Chain, i: int, inputs: Inputs, index: _Index, about, effects) -> list[str]:
+def _receipt_problems(
+    r: Reconciliation, chain: Chain, i: int, inputs: Inputs, index: _Index, about, effects
+) -> tuple[list[str], list[str]]:
     """Every way receipt ``r`` does not match what the record holds for its dispatch:
     the chain it would prove (deployment, workflow, tool, action), its gate decision on
-    record, the observed effect of the same dispatch, and the other receipts of it."""
+    record, the observed effect of the same dispatch, and the other receipts of it. And,
+    apart, every record of the dispatch its action reference cannot be compared with
+    (:func:`_same_action`): unknown, which is neither a match nor a mismatch."""
     problems: list[str] = []
+    uncompared: list[str] = []
     if r.deployment != inputs.deployment:
         problems.append(f"deployment {r.deployment!r}, not this one ({inputs.deployment or 'unnamed'})")
     if r.workflow != chain.workflow:
@@ -2573,9 +2633,11 @@ def _receipt_problems(r: Reconciliation, chain: Chain, i: int, inputs: Inputs, i
             "workflow": outcome.workflow,
             "tool": f"{effect.tool_kind} {effect.tool_identifier!r}",
             "action": effect.action,
-            "action_digest": effect.action_digest,
         }
         problems.extend(f"{name} {mine[name]!r}; {where} names {value!r}" for name, value in theirs.items() if mine[name] != value)
+        differs, unknown = _same_action(r, effect, where)
+        problems.extend([differs] if differs else [])
+        uncompared.extend([unknown] if unknown else [])
         if effect.gate_outcome_id == r.gate_outcome_id and effect.permit_digest != r.permit_digest:
             problems.append(f"permit_digest {r.permit_digest}; {where}, of the same attempt, names {effect.permit_digest}")
     for other in about:
@@ -2584,6 +2646,9 @@ def _receipt_problems(r: Reconciliation, chain: Chain, i: int, inputs: Inputs, i
         where = f"receipt {other.receipt_id} of the same dispatch"
         theirs = _dispatch_fields(other)
         problems.extend(f"{name} {mine[name]!r}; {where} names {theirs[name]!r}" for name in mine if mine[name] != theirs[name])
+        differs, unknown = _same_action(r, other, where)
+        problems.extend([differs] if differs else [])
+        uncompared.extend([unknown] if unknown else [])
         if other.gate_outcome_id == r.gate_outcome_id:
             own, same = _attempt_fields(r), _attempt_fields(other)
             problems.extend(
@@ -2593,7 +2658,7 @@ def _receipt_problems(r: Reconciliation, chain: Chain, i: int, inputs: Inputs, i
             )
         elif other.attempt == r.attempt:
             problems.append(f"attempt {r.attempt}; {where} names the same attempt under gate decision {other.gate_outcome_id}")
-    return problems
+    return problems, uncompared
 
 
 def _listed(names: list[str]) -> str:
@@ -2615,10 +2680,14 @@ def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int |
     deployment, the chain's workflow, the tool its invokes hop names and the action its
     performs hop names; its gate decision is on record as a signed permit for that
     workflow; and it agrees with every other record of its dispatch -- the observed
-    effect and the other receipts -- on the tool, the action and the action digest, and,
-    for the same attempt, on the permit digest, the attempt and the instant it left. Any
-    mismatch reads ``reconciliation_mismatch`` and nothing about the dispatch proves. A
-    receipt whose gate decision is not on record yet is kept, and binds once it is.
+    effect and the other receipts -- on the tool, the action and the action digest (or,
+    for a v5 document and a version 2 receipt, the keyed action reference under one key
+    id), and, for the same attempt, on the permit digest, the attempt and the instant it
+    left. Any mismatch reads ``reconciliation_mismatch`` and nothing about the dispatch
+    proves. A receipt whose action reference CANNOT BE COMPARED with another record of
+    its dispatch (:func:`_same_action`) binds nothing either, and reads
+    ``reconciliation_cannot_compare``: unknown is never a match, and it is no conflict.
+    A receipt whose gate decision is not on record yet is kept, and binds once it is.
 
     CONFLICT (``effect_evidence_conflicts``): one attempt read both applied (an observed
     effect, or a ``committed`` receipt) and not applied (a ``failed`` one); two attempts
@@ -2678,11 +2747,15 @@ def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int |
 
     bindings: list[ReceiptBinding] = []
     mismatched: list[ReceiptBinding] = []
+    unknown: list[ReceiptBinding] = []
     for r in about:
-        problems = _receipt_problems(r, chain, i, inputs, index, about, effects)
+        problems, uncompared = _receipt_problems(r, chain, i, inputs, index, about, effects)
         if problems:
-            binding = ReceiptBinding(r, False, "; ".join(problems))
+            binding = ReceiptBinding(r, False, "; ".join(problems + uncompared))
             mismatched.append(binding)
+        elif uncompared:
+            binding = ReceiptBinding(r, False, "; ".join(uncompared))
+            unknown.append(binding)
         elif r.gate_outcome_id not in inputs.outcomes:
             binding = ReceiptBinding(
                 r,
@@ -2703,6 +2776,23 @@ def readback(chain: Chain, inputs: Inputs, index: _Index | None = None, i: int |
                     UNPROVEN,
                     "reconciliation_mismatch",
                     f"{named}. A receipt that does not match the record proves nothing about dispatch {dispatch}",
+                ),
+            ),
+        )
+    if unknown:
+        # Unknown is unknown, never ok: nothing about the dispatch is read as proven by a
+        # receipt while one of its records cannot be set beside another. And never a
+        # conflict: the hop is unproven, not broken.
+        named = " | ".join(f"receipt {b.receipt.receipt_id}: {b.why}" for b in unknown)
+        return Readback(
+            dispatch,
+            kept,
+            (
+                Reading(
+                    UNPROVEN,
+                    "reconciliation_cannot_compare",
+                    f"{named}. A receipt that cannot be compared with the record binds nothing about dispatch "
+                    f"{dispatch}: it is neither a match nor a conflict",
                 ),
             ),
         )

@@ -384,7 +384,12 @@ def test_this_backend_verifies_the_conformance_vector_achilles_signed():
     keyring = {oc.key_id_for(raw): oc.TrustedKey(raw, v["effect_engine"])}
     verdict = oc.verify_outcome(_envelope(v["envelope"]), keyring)
     assert verdict.verdict == oc.AUTHENTIC, verdict.reason
-    assert observed_effects.examine(verdict.outcome, v["evidence"]) == ""
+    # The envelope and the keyring go with them: what the evidence must be is the core's
+    # to say (mythos_core.observed_effect.verify_observed_effect), over the envelope itself.
+    assert (
+        observed_effects.examine(verdict.outcome, v["evidence"], envelope=_envelope(v["envelope"]), keyring=keyring)
+        == ""
+    )
     assert oc.evidence_digest_of(v["evidence"]) == v["evidence_digest"] == verdict.outcome["evidence_digest"]
     assert comp.evidence_kind(comp.BASIS_DEMONSTRATED, verdict.outcome["observer"]["engine"]) == (
         comp.EVIDENCE_OBSERVED_EFFECT

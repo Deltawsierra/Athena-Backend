@@ -18,63 +18,52 @@ to ``observed_effect`` and to nothing else. The keyring already refuses one key 
 under two engines, so the outcome key and the effect key can never be one key here.
 
 THE DOCUMENT. The signed outcome names, as its evidence digest, a
-``mythos.observed-effect/v4`` document (:func:`validate_evidence`) -- or a ``v3``,
-``v2`` or ``v1`` one, which stay readable exactly as before -- defined here and in
-Achilles alike and held to the same conformance vectors
-(``tests/vectors/observed-effect-v1.json``, ``-v2.json`` and ``-v3.json`` in both
-repositories) -- no code is shared, and nothing here imports Achilles:
+``mythos.observed-effect`` document, version 1 to 5. Its fields, its rules, its refusal
+codes and its largest size are defined ONCE, in Mythos-Core
+(``mythos_core.observed_effect``), for the engine that signs it and for this backend
+alike. This module keeps none of them: until the core defined it, a copy of those rules
+was kept here by hand and another in Achilles, and the two had drifted. Every name below
+that the rest of this backend calls (:func:`validate_evidence`, :class:`EvidenceRefused`,
+the schema names, :data:`MAX_BODY_BYTES`) is the core's, read at its first use
+(:func:`_core`): the URL conf loads this module for the route's credential, on whatever
+request a worker serves first, a stop included, and the document's rules are not loaded
+with it. The conformance vectors are the core's own files, carried byte for byte
+(``tests/vectors/observed-effect-v1.json`` to ``-v5.json``).
 
-- ``deployment``, ``workflow``: the outcome's own, repeated;
-- ``tool``: ``{"kind", "identifier"}``, the tool the action went through;
-- ``action``, ``action_digest``: the permitted action and the digest its permit covers;
-- ``permit_digest``: ``sha256:`` over the permit as presented;
-- ``dispatch_id``: the dispatch it was observed on, one observation per dispatch;
-- ``gate_outcome_id``: the authorization check the same dispatch signed;
-- ``observed``: ``{"provider", "status_code" (a 2xx), "receipt_id", "response_digest"}``;
-- ``observed_at``: the outcome's own instant;
-- v2 only, ``dispatch``: the state the dispatch ran under, bound at dispatch
-  (:data:`DISPATCH_FIELDS`) -- from Achilles' service, the instant it left, its
-  authority epoch and operator policy at the spend and the permit's; and
-  ``presented``, this backend's approval digest, tool contract digests, served route
-  and sign-in and grant digests the dispatch was made under, which Achilles signs as
-  presented and this backend proves against its own history as of the dispatch
-  instant (:mod:`assurance.authority_chain`). A v1 document records none of it, and
-  the hops read as of dispatch read it as unrecorded.
-- v3 only, ``dispatch.verified`` (:data:`VERIFIED_FIELDS`): what the gate verified
-  ITSELF, never copied from what it was presented -- ``approvals_digest``, a digest
-  of Achilles' own approvals the permit rested on (``null``: none); and
-  ``workflow_approval``, this backend's approval of the workflow in force as the gate
-  READ it from this backend's approval-in-force route at decide time
-  (:mod:`assurance.gate_approval`): ``deployment``, ``workflow``, the approval
-  version's id (``version``, an :class:`~assurance.models.ApprovalVersion` row), its
-  digest and when the gate read it (``read_at``) -- ``null`` when the gate has no
-  link to this backend. ``under_policy`` reads it as gate-attested
-  (:mod:`assurance.authority_chain`); a v2 document, or a v3 one whose reading is
-  null, is read exactly as before, as presented.
-- v4 only (G6), ``dispatch.verified`` holds exactly four fields
-  (:data:`VERIFIED_FIELDS_V4`): v3's two, and ``tool_contract`` -- ``null`` when the
-  gate has no link or the permit names no chain, otherwise ``{"kind", "identifier",
-  "digest"}``, the contract the gate itself verified for the dispatched tool from its
-  dispatch re-read of the approval in force (``?include=tools``); so it names the
-  document's own ``tool``, and only beside a ``workflow_approval`` reading -- and
-  ``approval_recipients``, the approval-recipient entries the permit binds inside its
-  MAC, in the MAC's order, each ``{"obligation", "approval", "recipient",
-  "destination", "tenant"}``: ``recipient`` ``"bound"`` (the approval's MAC binds the
-  destination and tenant it names) or ``"unbound"`` (a legacy approval, which binds
-  neither, both ``null``); ``[]`` when the permit rests on no approval. The nonce is
-  left out on purpose: this backend needs no revocation handle, so an entry carrying
-  one is refused. The order is Achilles' MAC order, which sorts by the nonce too, so it
-  is not re-checked here; the list is kept and served exactly as signed, by the
-  effect's read (``GET .../chain-outcomes/``, ``approval_recipients``). ``invokes``
-  reads ``tool_contract`` as gate-attested (:mod:`assurance.authority_chain`); a v4
-  document whose ``tool_contract`` is null reads exactly as v3 does.
+What each version adds is the core's to say. In short: v2 adds ``dispatch``, the state
+the dispatch ran under and what it was ``presented``; v3 adds ``dispatch.verified``, what
+the gate verified itself; v4 adds the tool contract the gate verified and the permit's
+approval recipients; v5 replaces the plain digests of the action and the answer with
+keyed references (``action_ref``, ``observed.response_ref``, ``keyed_under``), says which
+stage was witnessed (``execution``) and signs the tool binding the permit was decided
+for (``dispatch.verified.tool_binding``). A v5 document holding a plain digest of an
+action, an answer or a population is refused with the core's code (``plain_digest``).
+
+WHAT THIS BACKEND CAN AND CANNOT CHECK OF A v5 DOCUMENT. A keyed reference is keyed
+under the engine's chain key, which this backend does not hold. It checks the signature,
+the exact fields, the links to the gate decision, the dispatch and the permit, that two
+records of one dispatch under one key id carry the same reference (the core's
+``compare_refs``, :mod:`assurance.authority_chain`), that the binding names the
+document's tool and that its population is within its bound. It cannot test a guess at
+the action, the answer or the targets, and says so (:func:`shown`: ``keyed: not
+checkable here``). No route here takes a text and answers whether it matches.
+
+WHAT A READER IS SHOWN (:func:`shown`, served by ``GET .../chain-outcomes/``), in the
+core's words: of a v1 to v4 record, ``plain digests`` that are withheld from this reader,
+``no tool binding recorded`` (never "within its bound") and ``accepted, from the recorded
+2xx; this version has no execution field`` (never "committed"); of a v5 record, its keyed
+references, its key id, its execution as signed and its tool binding. A record is JUDGED,
+never refused, for what happened: a binding whose bound is larger than the bound of an
+approval it rests on is taken in, because it is evidence of what was dispatched, and is
+shown with a named finding (:data:`BINDING_BOUND_OVER_APPROVAL`).
 
 WHAT IS REFUSED, at the route (:func:`examine`, through
 :func:`assurance.observed_outcomes.ingest`): every check a signed outcome already
 meets (authenticity, the deployment, the clock, a reused outcome id, a stale
 replay), and also an envelope signed by any key not mapped to ``observed_effect``;
 an outcome that is not ``held``; evidence that is not the document the signature's
-digest names, or that names another deployment, workflow or instant; and a second
+digest names, or that names another deployment, workflow or instant (each the core's
+``verify_observed_effect``, and each refusal says the core's code first); and a second
 observation of a dispatch already observed. An observed effect posted to the
 generic signed-outcome route is refused there: it is recorded with its document or
 not at all.
@@ -103,7 +92,6 @@ import hashlib
 import hmac
 import logging
 import os
-import re
 import secrets
 from typing import Any
 
@@ -115,89 +103,59 @@ from . import composition
 
 logger = logging.getLogger(__name__)
 
-#: The document a dispatch signs now: v1 and the ``dispatch`` block -- the state the
-#: dispatch ran under, bound at dispatch (part 5 of the 7 Oct decision). v1 stays
-#: readable: it proves ``produces`` as before, and records no dispatch state, so the
-#: hops read as of dispatch (``under_policy``, ``invokes``) read it as unrecorded.
-#: v3 is v2 and ``dispatch.verified``: what the gate verified itself (authority chain
-#: short 3) -- its own approvals' digest, and this backend's workflow approval as the
-#: gate read it in force (:data:`VERIFIED_FIELDS`). v2 and v1 stay readable, exactly
-#: as before. ``EVIDENCE_SCHEMA`` has named v3 since then and still does, so what
-#: reads that name reads exactly what it did; a dispatch signs v4 once Achilles' G6
-#: half ships (:data:`EVIDENCE_SCHEMA_V4`).
-EVIDENCE_SCHEMA = "mythos.observed-effect/v3"
-EVIDENCE_SCHEMA_V3 = EVIDENCE_SCHEMA
-#: v4 (G6) is v3 with ``dispatch.verified`` holding two more fields
-#: (:data:`VERIFIED_FIELDS_V4`): the tool contract the gate verified itself at dispatch,
-#: and the permit's approval-recipient entries without their nonces.
-EVIDENCE_SCHEMA_V4 = "mythos.observed-effect/v4"
-EVIDENCE_SCHEMA_V2 = "mythos.observed-effect/v2"
-EVIDENCE_SCHEMA_V1 = "mythos.observed-effect/v1"
-EVIDENCE_SCHEMAS: tuple[str, ...] = (EVIDENCE_SCHEMA_V1, EVIDENCE_SCHEMA_V2, EVIDENCE_SCHEMA, EVIDENCE_SCHEMA_V4)
-#: The documents whose ``dispatch`` block carries ``verified``.
-VERIFIED_SCHEMAS: frozenset[str] = frozenset({EVIDENCE_SCHEMA_V3, EVIDENCE_SCHEMA_V4})
-#: The tool kinds an ``invokes`` hop may name (``authority_chain.TOOL_NODE_KINDS``),
-#: spelled out so the schema is this module's to read, and pinned equal by test.
-TOOL_KINDS: frozenset[str] = frozenset({"tool", "mcp_server", "skill"})
 
-EVIDENCE_FIELDS = frozenset(
-    {
-        "schema",
-        "deployment",
-        "workflow",
-        "tool",
-        "action",
-        "action_digest",
-        "permit_digest",
-        "dispatch_id",
-        "gate_outcome_id",
-        "observed",
-        "observed_at",
-    }
-)
-TOOL_FIELDS = frozenset({"kind", "identifier"})
-OBSERVED_FIELDS = frozenset({"provider", "status_code", "receipt_id", "response_digest"})
+def _core():
+    """``mythos_core.observed_effect``: the one definition of the document.
+
+    Read at first use, never with this module. The URL conf loads this module (the
+    routes name its credential classes), and it loads on whatever request a worker serves
+    first, a stop included; the document's rules are evidence's, and nothing a stop loads
+    or waits on reads them."""
+    from mythos_core import observed_effect
+
+    return observed_effect
+
+
+#: This module's own names for what the core defines, and how each is read from it.
+#: Resolved by :func:`__getattr__` when a caller reads one, so each is the core's own
+#: object and none is spelled here.
+_FROM_THE_CORE = {
+    "EVIDENCE_SCHEMA_V1": lambda core: core.EVIDENCE_SCHEMA_V1,
+    "EVIDENCE_SCHEMA_V2": lambda core: core.EVIDENCE_SCHEMA_V2,
+    "EVIDENCE_SCHEMA_V3": lambda core: core.EVIDENCE_SCHEMA_V3,
+    "EVIDENCE_SCHEMA_V4": lambda core: core.EVIDENCE_SCHEMA_V4,
+    "EVIDENCE_SCHEMA_V5": lambda core: core.EVIDENCE_SCHEMA_V5,
+    # This name has said v3 since v3 was what a dispatch signed, and what reads it here
+    # reads exactly what it did. It is NOT the core's ``EVIDENCE_SCHEMA``, which names the
+    # newest version: which version an engine signs is the engine's to say, never this
+    # backend's, which reads every one of them.
+    "EVIDENCE_SCHEMA": lambda core: core.EVIDENCE_SCHEMA_V3,
+    "EVIDENCE_SCHEMAS": lambda core: core.EVIDENCE_SCHEMAS,
+    "TOOL_KINDS": lambda core: core.TOOL_KINDS,
+    "MAX_PRESENTED_CONTRACTS": lambda core: core.MAX_PRESENTED_CONTRACTS,
+    "MAX_APPROVAL_RECIPIENTS": lambda core: core.MAX_APPROVAL_RECIPIENTS,
+    "RECIPIENT_BOUND": lambda core: core.RECIPIENT_BOUND,
+    "RECIPIENT_UNBOUND": lambda core: core.RECIPIENT_UNBOUND,
+    "RECIPIENT_ORDER": lambda core: core.RECIPIENT_ORDER,
+    # The core exports no field sets. This one name is kept because the G6 test reads it
+    # (tests/test_the_gate_verifies_the_tool_contract_it_dispatches_under.py); it is the
+    # core's own set, read by its private name at the pinned commit, never typed in.
+    "VERIFIED_FIELDS_V4": lambda core: core._VERIFIED_FIELDS_V4,
+    "EvidenceRefused": lambda core: core.EvidenceRefused,
+    # One envelope (bounded by the core) and one document of the largest size the core's
+    # field rules allow a version 5 document: both numbers are the core's.
+    "MAX_BODY_BYTES": lambda core: oc.MAX_PAYLOAD_B64 + core.MAX_EVIDENCE_BYTES,
+}
+
+
+def __getattr__(name: str):
+    read = _FROM_THE_CORE.get(name)
+    if read is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return read(_core())
+
+
 BODY_FIELDS = frozenset({"envelope", "evidence"})
-#: v2's ``dispatch`` block. From Achilles' service, never its caller: when the effect
-#: left (``dispatched_at``), the gate's authority epoch at the spend and the one the
-#: permit was issued under, and the operator policy the spend found in force and the
-#: one the permit was decided under. ``presented``: this backend's authority the
-#: dispatch was presented under, which Achilles cannot judge and signs as presented,
-#: and which this backend proves against its own history as of ``dispatched_at``
-#: (:mod:`assurance.authority_chain`).
-DISPATCH_FIELDS = frozenset(
-    {"dispatched_at", "epoch", "permit_epoch", "policy_id", "policy_digest", "permit_policy_digest", "presented"}
-)
-PRESENTED_FIELDS = frozenset({"approval_digest", "contracts", "route_fingerprint", "assertion_digest", "grant_digest"})
-CONTRACT_FIELDS = frozenset({"kind", "identifier", "digest"})
-#: v3's ``dispatch.verified``: what the gate verified itself, exactly these fields.
-VERIFIED_FIELDS = frozenset({"approvals_digest", "workflow_approval"})
-#: v4's ``dispatch.verified``: v3's, the tool contract the gate verified for the
-#: dispatched tool, and the permit's approval recipients -- exactly these four.
-VERIFIED_FIELDS_V4 = VERIFIED_FIELDS | {"tool_contract", "approval_recipients"}
-#: One approval-recipient entry of a v4 document: the permit's, without its nonce.
-RECIPIENT_FIELDS = frozenset({"obligation", "approval", "recipient", "destination", "tenant"})
-#: An approval whose MAC binds the destination and tenant it names, and a legacy one
-#: that binds neither -- Achilles' words (``achilles.action_gate.RECIPIENT_BOUND``).
-RECIPIENT_BOUND = "bound"
-RECIPIENT_UNBOUND = "unbound"
-#: The most approval-recipient entries one dispatch may carry: a write bound, as
-#: :data:`MAX_PRESENTED_CONTRACTS` is.
-MAX_APPROVAL_RECIPIENTS = 100
-#: The gate's reading of this backend's workflow approval in force, exactly these.
-READING_FIELDS = frozenset({"deployment", "workflow", "version", "digest", "read_at"})
-_VERSION = re.compile(r"^[1-9][0-9]{0,18}$")
-#: The most tool contracts one dispatch may present (``tool_contract.MAX_TOOLS_PER_WORKFLOW``).
-MAX_PRESENTED_CONTRACTS = 100
-_POLICY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-
-_SLUG = re.compile(r"^[-a-zA-Z0-9_]{1,200}$")
-_TOKEN = re.compile(r"^[-a-zA-Z0-9_.:+]{1,200}$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-_UUID4_HEX = re.compile(r"^[0-9a-f]{32}$")
-_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
-_MAX_TEXT = 200
 
 HEADER = "X-Observed-Effect-Token"
 _META = "HTTP_X_OBSERVED_EFFECT_TOKEN"
@@ -205,277 +163,66 @@ TOKEN_ENV = "ASSURANCE_OBSERVED_EFFECT_TOKEN"
 USER_ENV = "ASSURANCE_OBSERVED_EFFECT_USER"
 #: The shortest credential accepted. A shorter one is treated as unset.
 MIN_TOKEN_LENGTH = 32
-#: One envelope (bounded by mythos_core) and its document.
-MAX_BODY_BYTES = oc.MAX_PAYLOAD_B64 + 16 * 1024
 
-
-class EvidenceRefused(ValueError):
-    """A document that is not a ``mythos.observed-effect`` evidence document (v1 to v4)."""
+#: The named finding of a v5 record whose tool binding's bound (``max_targets``) is
+#: larger than the bound of an approval it rests on. The record is taken in and kept: it
+#: is evidence of what was dispatched, and refusing it would lose that evidence for good
+#: (a refused intake is terminal for the engine). It is judged where it is read.
+BINDING_BOUND_OVER_APPROVAL = "binding_bound_over_approval"
 
 
 # ----------------------------------------------------------------- the document
 
 
-def _text(value: Any, name: str, *, allow_empty: bool = False) -> str:
-    if not isinstance(value, str):
-        raise EvidenceRefused(f"{name} is text, not {type(value).__name__}")
-    if not value and allow_empty:
-        return value
-    if not value or value != value.strip():
-        raise EvidenceRefused(f"{name} is non-empty text with no surrounding whitespace")
-    if len(value) > _MAX_TEXT:
-        raise EvidenceRefused(f"{name} is at most {_MAX_TEXT} characters")
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
-        raise EvidenceRefused(f"{name} contains a control character")
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise EvidenceRefused(f"{name} is not encodable as UTF-8") from exc
-    return value
-
-
-def _match(value: Any, pattern: re.Pattern[str], name: str, what: str) -> str:
-    if not isinstance(value, str) or not pattern.match(value):
-        raise EvidenceRefused(f"{name} is {what}")
-    return value
-
-
-def _optional(value: Any, pattern: re.Pattern[str], name: str, what: str) -> str | None:
-    if value is None:
-        return None
-    return _match(value, pattern, name, f"null or {what}")
-
-
-def _validate_presented(raw: Any) -> None:
-    name = "dispatch.presented"
-    if not isinstance(raw, dict) or set(raw) != PRESENTED_FIELDS:
-        raise EvidenceRefused(f"{name} has exactly the fields {sorted(PRESENTED_FIELDS)}")
-    _optional(raw["approval_digest"], _HEX64, f"{name}.approval_digest", "64 lowercase hex characters")
-    _optional(raw["route_fingerprint"], _HEX64, f"{name}.route_fingerprint", "64 lowercase hex characters")
-    _optional(raw["assertion_digest"], _DIGEST, f"{name}.assertion_digest", "a sha256 digest")
-    _optional(raw["grant_digest"], _DIGEST, f"{name}.grant_digest", "a sha256 digest")
-    contracts = raw["contracts"]
-    if not isinstance(contracts, list) or len(contracts) > MAX_PRESENTED_CONTRACTS:
-        raise EvidenceRefused(f"{name}.contracts is a list of at most {MAX_PRESENTED_CONTRACTS}")
-    keys: list[tuple[str, str]] = []
-    for i, entry in enumerate(contracts):
-        where = f"{name}.contracts[{i}]"
-        if not isinstance(entry, dict) or set(entry) != CONTRACT_FIELDS:
-            raise EvidenceRefused(f"{where} has exactly the fields {sorted(CONTRACT_FIELDS)}")
-        if entry["kind"] not in TOOL_KINDS:
-            raise EvidenceRefused(f"{where}.kind is one of {sorted(TOOL_KINDS)}")
-        _text(entry["identifier"], f"{where}.identifier")
-        _match(entry["digest"], _HEX64, f"{where}.digest", "64 lowercase hex characters")
-        keys.append((entry["kind"], entry["identifier"]))
-    if keys != sorted(set(keys)):
-        raise EvidenceRefused(f"{name}.contracts is sorted by kind and identifier, one entry per tool")
-
-
-def _fullmatch(value: Any, pattern: re.Pattern[str], name: str, what: str) -> str:
-    if not isinstance(value, str) or not pattern.fullmatch(value):
-        raise EvidenceRefused(f"{name} is {what}")
-    return value
-
-
-def _validate_reading(reading: Any, where: str) -> None:
-    """The gate's reading of the approval in force, as v3 and v4 spell it: null, or
-    exactly :data:`READING_FIELDS`, each matched whole."""
-    if reading is None:
-        return
-    if not isinstance(reading, dict) or set(reading) != READING_FIELDS:
-        raise EvidenceRefused(f"{where} is null or has exactly the fields {sorted(READING_FIELDS)}")
-    _fullmatch(reading["deployment"], _TOKEN, f"{where}.deployment", "a deployment token")
-    _fullmatch(reading["workflow"], _SLUG, f"{where}.workflow", "a workflow slug")
-    _fullmatch(reading["version"], _VERSION, f"{where}.version", "a positive decimal version id")
-    _fullmatch(reading["digest"], _HEX64, f"{where}.digest", "64 lowercase hex characters")
-    _fullmatch(reading["read_at"], _INSTANT, f"{where}.read_at", "YYYY-MM-DDTHH:MM:SS.ffffffZ")
-
-
-def _validate_tool_contract(raw: Any, where: str) -> None:
-    """v4's ``tool_contract``: null, or exactly ``{"kind", "identifier", "digest"}`` --
-    a tool kind, the tool's identifier and a 64-hex contract digest, matched whole."""
-    if raw is None:
-        return
-    if not isinstance(raw, dict) or set(raw) != CONTRACT_FIELDS:
-        raise EvidenceRefused(f"{where} is null or has exactly the fields {sorted(CONTRACT_FIELDS)}")
-    if raw["kind"] not in TOOL_KINDS:
-        raise EvidenceRefused(f"{where}.kind is one of {sorted(TOOL_KINDS)}")
-    _text(raw["identifier"], f"{where}.identifier")
-    _fullmatch(raw["digest"], _HEX64, f"{where}.digest", "64 lowercase hex characters")
-
-
-def _validate_recipients(raw: Any, where: str) -> None:
-    """v4's ``approval_recipients``: a list (``[]`` for a permit resting on no
-    approval) of exactly :data:`RECIPIENT_FIELDS` -- no nonce -- each naming its
-    obligation, the approval (``""`` or a ``sha256:`` id), and whether its MAC binds
-    the recipient: ``"bound"`` with the destination and tenant it binds (text, empty
-    allowed), or ``"unbound"`` with both null."""
-    if not isinstance(raw, list) or len(raw) > MAX_APPROVAL_RECIPIENTS:
-        raise EvidenceRefused(f"{where} is a list of at most {MAX_APPROVAL_RECIPIENTS}")
-    for i, entry in enumerate(raw):
-        at = f"{where}[{i}]"
-        if not isinstance(entry, dict) or set(entry) != RECIPIENT_FIELDS:
-            raise EvidenceRefused(f"{at} has exactly the fields {sorted(RECIPIENT_FIELDS)}")
-        _text(entry["obligation"], f"{at}.obligation")
-        if entry["approval"] != "":
-            _fullmatch(entry["approval"], _DIGEST, f"{at}.approval", "empty or a sha256 digest")
-        word = entry["recipient"]
-        if word == RECIPIENT_UNBOUND:
-            if entry["destination"] is not None or entry["tenant"] is not None:
-                raise EvidenceRefused(f"{at} is unbound: a legacy approval binds no destination and no tenant")
-        elif word == RECIPIENT_BOUND:
-            _text(entry["destination"], f"{at}.destination", allow_empty=True)
-            _text(entry["tenant"], f"{at}.tenant", allow_empty=True)
-        else:
-            raise EvidenceRefused(f"{at}.recipient is {RECIPIENT_BOUND!r} or {RECIPIENT_UNBOUND!r}")
-    order = [_recipient_order(entry) for entry in raw]
-    if order != sorted(order):
-        raise EvidenceRefused(f"{where} is sorted by {list(RECIPIENT_ORDER)}")
-
-
-#: The fields v4's ``approval_recipients`` is sorted by, in this order: Achilles'
-#: ``observed_effect.VERIFIED_RECIPIENT_FIELDS``. Never the permit MAC's order, which
-#: is keyed by the nonces the document leaves out.
-RECIPIENT_ORDER: tuple[str, ...] = ("obligation", "approval", "recipient", "destination", "tenant")
-
-
-def _recipient_order(entry: dict) -> tuple[str, ...]:
-    """An entry's sort key, as Achilles' ``observed_effect.recipient_order`` takes it:
-    each field of :data:`RECIPIENT_ORDER` as text, a null as ``""``."""
-    return tuple("" if entry[name] is None else str(entry[name]) for name in RECIPIENT_ORDER)
-
-
-def _validate_verified(raw: Any, schema: str = EVIDENCE_SCHEMA_V3) -> None:
-    """v3's ``dispatch.verified``, exactly as Achilles spells it: ``approvals_digest``
-    null or a ``sha256:`` digest; ``workflow_approval`` null or the gate's reading --
-    its fields matched whole, so a trailing newline is not a digest. v4's: exactly
-    those and ``tool_contract`` and ``approval_recipients``, no more, no fewer."""
-    name = "dispatch.verified"
-    fields = VERIFIED_FIELDS_V4 if schema == EVIDENCE_SCHEMA_V4 else VERIFIED_FIELDS
-    if not isinstance(raw, dict) or set(raw) != fields:
-        raise EvidenceRefused(f"{name} has exactly the fields {sorted(fields)}")
-    if raw["approvals_digest"] is not None:
-        _fullmatch(raw["approvals_digest"], _DIGEST, f"{name}.approvals_digest", "null or a sha256 digest")
-    _validate_reading(raw["workflow_approval"], f"{name}.workflow_approval")
-    if schema != EVIDENCE_SCHEMA_V4:
-        return
-    _validate_tool_contract(raw["tool_contract"], f"{name}.tool_contract")
-    if raw["tool_contract"] is not None and raw["workflow_approval"] is None:
-        raise EvidenceRefused(
-            f"{name}.tool_contract is the contract the gate verified under the approval it read, so it is null "
-            "when workflow_approval is"
-        )
-    _validate_recipients(raw["approval_recipients"], f"{name}.approval_recipients")
-
-
-def _validate_dispatch(block: Any, schema: str = EVIDENCE_SCHEMA_V2) -> None:
-    fields = DISPATCH_FIELDS | {"verified"} if schema in VERIFIED_SCHEMAS else DISPATCH_FIELDS
-    if not isinstance(block, dict) or set(block) != fields:
-        raise EvidenceRefused(f"dispatch has exactly the fields {sorted(fields)}")
-    _match(block["dispatched_at"], _INSTANT, "dispatch.dispatched_at", "YYYY-MM-DDTHH:MM:SS.ffffffZ")
-    _text(block["epoch"], "dispatch.epoch", allow_empty=True)
-    _text(block["permit_epoch"], "dispatch.permit_epoch", allow_empty=True)
-    if block["policy_id"] != "":
-        _match(block["policy_id"], _POLICY_ID, "dispatch.policy_id", "empty or a policy id")
-    for name in ("policy_digest", "permit_policy_digest"):
-        if block[name] != "":
-            _match(block[name], _DIGEST, f"dispatch.{name}", "empty or a sha256 digest")
-    _validate_presented(block["presented"])
-    if schema in VERIFIED_SCHEMAS:
-        _validate_verified(block["verified"], schema)
-
-
 def validate_evidence(document: Any) -> dict[str, Any]:
-    """``document`` if it is a ``mythos.observed-effect/v4`` evidence document -- or a
-    ``v3`` one, whose ``dispatch.verified`` holds two of v4's four fields, a ``v2`` one,
-    which is v3 without ``dispatch.verified``, or a ``v1`` one, which is v2 without its
-    ``dispatch`` block -- else :class:`EvidenceRefused` naming the first thing wrong.
-    Exactly the fields, no more, at every level -- Achilles' own rules, checked against
-    the same vectors."""
-    if not isinstance(document, dict):
-        raise EvidenceRefused("the evidence is an object")
-    schema = document.get("schema")
-    if schema not in EVIDENCE_SCHEMAS:
-        raise EvidenceRefused(f"schema is one of {list(EVIDENCE_SCHEMAS)}")
-    fields = EVIDENCE_FIELDS if schema == EVIDENCE_SCHEMA_V1 else EVIDENCE_FIELDS | {"dispatch"}
-    if set(document) != fields:
-        raise EvidenceRefused(
-            f"a {schema} document has exactly the fields {sorted(fields)}; missing "
-            f"{sorted(fields - set(document))}, unexpected "
-            f"{sorted(str(k) for k in set(document) - fields)}"
-        )
-    if schema != EVIDENCE_SCHEMA_V1:
-        _validate_dispatch(document["dispatch"], schema)
-    _match(document["deployment"], _TOKEN, "deployment", "a deployment token")
-    _match(document["workflow"], _SLUG, "workflow", "a workflow slug")
-    if schema in VERIFIED_SCHEMAS:
-        reading = document["dispatch"]["verified"]["workflow_approval"]
-        if reading is not None and (
-            reading["deployment"] != document["deployment"] or reading["workflow"] != document["workflow"]
-        ):
-            raise EvidenceRefused(
-                "dispatch.verified.workflow_approval names another deployment or workflow than the document's"
-            )
-    tool = document["tool"]
-    if not isinstance(tool, dict) or set(tool) != TOOL_FIELDS:
-        raise EvidenceRefused("tool has exactly the fields kind and identifier")
-    if tool["kind"] not in TOOL_KINDS:
-        raise EvidenceRefused(f"tool.kind is one of {sorted(TOOL_KINDS)}")
-    _text(tool["identifier"], "tool.identifier")
-    if schema == EVIDENCE_SCHEMA_V4:
-        contract = document["dispatch"]["verified"]["tool_contract"]
-        if contract is not None and (contract["kind"], contract["identifier"]) != (tool["kind"], tool["identifier"]):
-            raise EvidenceRefused(
-                "dispatch.verified.tool_contract is the contract of the dispatched tool, and names another tool "
-                "than the document's"
-            )
-    _text(document["action"], "action")
-    _match(document["action_digest"], _HEX64, "action_digest", "64 lowercase hex characters")
-    _match(document["permit_digest"], _DIGEST, "permit_digest", "'sha256:' and 64 hex characters")
-    _match(document["dispatch_id"], _UUID4_HEX, "dispatch_id", "a 32-character hex uuid")
-    _match(document["gate_outcome_id"], _UUID4_HEX, "gate_outcome_id", "a 32-character hex uuid")
-    observed = document["observed"]
-    if not isinstance(observed, dict) or set(observed) != OBSERVED_FIELDS:
-        raise EvidenceRefused(f"observed has exactly the fields {sorted(OBSERVED_FIELDS)}")
-    _match(observed["provider"], _TOKEN, "observed.provider", "a provider name token")
-    code = observed["status_code"]
-    if type(code) is not int or not 200 <= code <= 299:
-        raise EvidenceRefused("observed.status_code is the provider's 2xx: only success is observed")
-    _text(observed["receipt_id"], "observed.receipt_id", allow_empty=True)
-    _match(observed["response_digest"], _DIGEST, "observed.response_digest", "a sha256 digest")
-    _match(document["observed_at"], _INSTANT, "observed_at", "YYYY-MM-DDTHH:MM:SS.ffffffZ")
-    return document
+    """``document`` if it is a ``mythos.observed-effect`` evidence document, version 1
+    to 5, else the core's :class:`EvidenceRefused` with the code of the first rule it
+    breaks. The core's ``validate_evidence``, as a reader calls it: nothing is checked
+    here."""
+    return _core().validate_evidence(document)
 
 
-def examine(outcome: dict, document: Any) -> str:
+def refusal(code: str, reason: str) -> str:
+    """How this backend says a refusal of the core's: the core's code, then its reason.
+    The same form a signed outcome's verdict is already said in (``wrong_type: ...``)."""
+    return f"{code}: {reason}"
+
+
+def examine(outcome: dict, document: Any, *, envelope: Any, keyring) -> str:
     """Why an AUTHENTIC ``outcome`` and the ``document`` posted beside it may not be
-    recorded as an observed effect, or ``""``. The signature's own checks (key,
-    deployment, clock, replay) are :func:`assurance.observed_outcomes.ingest`'s."""
+    recorded as an observed effect, or ``""``.
+
+    The core's ``verify_observed_effect`` decides, over the ``envelope`` itself and under
+    the ``keyring`` it was verified with: the observer, ``held``, the document's rules
+    for its version, the digest the signature names, and the deployment, workflow and
+    instant. A refusal says the core's code first. Which signer's outcome is which kind
+    of evidence is this backend's own mapping
+    (:data:`assurance.composition.SIGNER_EVIDENCE`): it is said beside the core's refusal
+    of another observer's outcome, and it is held on its own, so an outcome is recorded
+    here only when both agree it is an observed effect. The signature's other checks
+    (the deployment it is filed under, the clock, a replay) are
+    :func:`assurance.observed_outcomes.ingest`'s."""
+    verdict = _core().verify_observed_effect(envelope, document, keyring)
     engine = outcome["observer"]["engine"]
     kind = composition.evidence_kind(composition.BASIS_DEMONSTRATED, engine)
-    if kind != composition.EVIDENCE_OBSERVED_EFFECT:
-        return (
+    unmapped = (
+        ""
+        if kind == composition.EVIDENCE_OBSERVED_EFFECT
+        else (
             f"the outcome is signed by {engine!r}'s key, which is mapped to {kind}, not "
             f"{composition.EVIDENCE_OBSERVED_EFFECT}: only an observed-effect key's outcome is "
             "recorded here"
         )
-    if outcome["status"] != oc.HELD:
-        return (
-            f"an observed effect is signed held, for an effect the dispatch saw complete; this one "
-            f"is {outcome['status']!r}"
-        )
-    try:
-        validate_evidence(document)
-    except EvidenceRefused as exc:
-        return f"the evidence is not an observed-effect document ({' or '.join(EVIDENCE_SCHEMAS)}): {exc}"
-    if oc.evidence_digest_of(document) != outcome["evidence_digest"]:
-        return (
-            "the evidence is not the document the signature names: its digest is "
-            f"{oc.evidence_digest_of(document)}, the outcome signs {outcome['evidence_digest']}"
-        )
-    for name in ("deployment", "workflow", "observed_at"):
-        if document[name] != outcome[name]:
-            return f"the evidence's {name} is {document[name]!r}; the outcome signs {outcome[name]!r}"
+    )
+    if not verdict.authentic:
+        said = refusal(verdict.code, verdict.reason)
+        return f"{said}; {unmapped}" if unmapped and verdict.verdict == oc.WRONG_OBSERVER else said
+    if unmapped:
+        return unmapped
+    if verdict.outcome != outcome:
+        # Cannot happen while the caller hands in the envelope it examined. Refused,
+        # never assumed: the outcome recorded is the one the core verified.
+        return "the envelope is not the one whose outcome was examined"
     return ""
 
 
@@ -489,7 +236,7 @@ def evidence_in_force(row, deployment_uuid: str) -> dict | None:
         return None
     try:
         validate_evidence(document)
-    except EvidenceRefused:
+    except _core().EvidenceRefused:
         return None
     if oc.evidence_digest_of(document) != row.evidence_digest:
         return None
@@ -502,17 +249,93 @@ def evidence_in_force(row, deployment_uuid: str) -> dict | None:
     return document
 
 
+def _verified(document: dict) -> dict:
+    """``dispatch.verified`` of a document in force, or ``{}`` for a version that has
+    none. Read by what the document holds: the core has already held it to exactly the
+    fields of its version, so no version is named here."""
+    dispatch = document.get("dispatch")
+    verified = dispatch.get("verified") if isinstance(dispatch, dict) else None
+    return verified if isinstance(verified, dict) else {}
+
+
 def approval_recipients(row, deployment_uuid: str) -> list[dict] | None:
     """The approval-recipient entries the permit of ``row``'s dispatch bound, exactly
-    as a v4 document signs them (``dispatch.verified.approval_recipients``; ``[]`` for a
-    permit resting on no approval) -- read from the document its signed digest names
-    (:func:`evidence_in_force`), never from a column of its own. ``None`` for every
+    as a v4 or v5 document signs them (``dispatch.verified.approval_recipients``; ``[]``
+    for a permit resting on no approval) -- read from the document its signed digest
+    names (:func:`evidence_in_force`), never from a column of its own. ``None`` for every
     other row: a v1, v2 or v3 document records none, and a row with no document in
     force has nothing to say."""
     document = evidence_in_force(row, deployment_uuid)
-    if document is None or document["schema"] != EVIDENCE_SCHEMA_V4:
+    if document is None or "approval_recipients" not in _verified(document):
         return None
-    return [dict(entry) for entry in document["dispatch"]["verified"]["approval_recipients"]]
+    return [dict(entry) for entry in _verified(document)["approval_recipients"]]
+
+
+def binding_findings(document: dict) -> list[dict]:
+    """What this backend finds in the tool binding of a document in force, each a named
+    finding: today one, :data:`BINDING_BOUND_OVER_APPROVAL`, for each approval that
+    names a bound (``max_targets``) smaller than the binding's own. The core holds a
+    binding to its own bound and does not compare it with an approval's; by the gate's
+    arithmetic the binding's is never the larger. A record where it is was still
+    dispatched, so it is kept and judged here, never refused at the intake. ``[]`` for a
+    record with no binding, v1 to v4 among them."""
+    binding = _verified(document).get("tool_binding")
+    if not isinstance(binding, dict):
+        return []
+    found = []
+    for approval in binding["approvals"]:
+        limit = approval["max_targets"]
+        if limit is not None and binding["max_targets"] > limit:
+            found.append(
+                {
+                    "code": BINDING_BOUND_OVER_APPROVAL,
+                    "approval": approval["approval"],
+                    "binding_max_targets": binding["max_targets"],
+                    "approval_max_targets": limit,
+                    "detail": (
+                        f"the tool binding's bound is {binding['max_targets']} targets, larger than the bound "
+                        f"of {limit} that approval {approval['approval']} names: the record is kept as evidence "
+                        "of what was dispatched, and its binding is not within that approval's bound"
+                    ),
+                }
+            )
+    return found
+
+
+def shown(row, deployment_uuid: str) -> dict | None:
+    """What a reader of this backend is shown of ``row``'s observed effect, in the
+    core's words -- or ``None`` when the row has no document in force.
+
+    Read from the document the signed digest names, never from a column. No reader of
+    this API is the key holder or the caller, so a v1 to v4 record's plain digests are
+    withheld (the core's ``withhold_plain_digests``: a copy, the stored record
+    untouched), and a v5 record's keyed references are shown as what they are: not
+    checkable here. Of an older record the words are the core's too: no tool binding was
+    recorded, and it was accepted, from the recorded 2xx."""
+    document = evidence_in_force(row, deployment_uuid)
+    if document is None:
+        return None
+    core = _core()
+    served, told = core.withhold_plain_digests(document)
+    execution = core.execution_reading(document)
+    keyed = "action_ref" in served
+    return {
+        "schema": document["schema"],
+        # What the record carries, and what this reader is told of it.
+        "digests": core.digests_reading(document),
+        "digests_served": told,
+        "action_reference": served["action_ref" if keyed else "action_digest"],
+        "response_reference": served["observed"]["response_ref" if keyed else "response_digest"],
+        "keyed_under": served.get("keyed_under"),
+        "execution": {
+            "state": execution.execution.state,
+            "basis": execution.execution.basis,
+            "words": execution.words,
+        },
+        "tool_binding": _verified(served).get("tool_binding"),
+        "tool_binding_reading": core.tool_binding_reading(document),
+        "findings": binding_findings(document),
+    }
 
 
 # ---------------------------------------------------------------- the body
@@ -529,7 +352,8 @@ class BodyRefused(ValueError):
 def read_body(data: Any) -> tuple[Any, dict]:
     """``(envelope, evidence)`` from ``{"envelope": {...}, "evidence": {...}}``: one
     observed effect per request, exactly those two fields. The envelope is checked
-    by the ingest; the evidence's shape here."""
+    by the ingest; the evidence's shape here, by the core, and a refusal of it says the
+    core's code first."""
     if not isinstance(data, dict):
         raise BodyRefused({"body": "an object with envelope and evidence"})
     unknown = sorted(str(k) for k in set(data) - BODY_FIELDS)
@@ -540,8 +364,8 @@ def read_body(data: Any) -> tuple[Any, dict]:
         )
     try:
         evidence = validate_evidence(data["evidence"])
-    except EvidenceRefused as exc:
-        raise BodyRefused({"evidence": str(exc)}) from None
+    except _core().EvidenceRefused as exc:
+        raise BodyRefused({"evidence": refusal(exc.code, str(exc))}) from None
     return data["envelope"], evidence
 
 
@@ -615,21 +439,23 @@ class IsObservedEffectService(BasePermission):
         return isinstance(getattr(request, "auth", None), ObservedEffectServiceCredential)
 
 
+# The names read from the core at first use (``_FROM_THE_CORE``: the schema names,
+# ``EvidenceRefused``, ``MAX_BODY_BYTES`` and the rest) are this module's too, and are
+# not listed here: a name ``__all__`` lists is one a star import binds when the module
+# is imported, which is exactly when the core is not to be loaded.
 __all__ = [
-    "EVIDENCE_SCHEMA",
-    "EVIDENCE_SCHEMA_V3",
-    "EVIDENCE_SCHEMA_V4",
+    "BINDING_BOUND_OVER_APPROVAL",
     "HEADER",
-    "MAX_BODY_BYTES",
     "TOKEN_ENV",
     "USER_ENV",
     "BodyRefused",
-    "EvidenceRefused",
     "IsObservedEffectService",
     "ObservedEffectServiceAuthentication",
     "approval_recipients",
+    "binding_findings",
     "evidence_in_force",
     "examine",
     "read_body",
+    "shown",
     "validate_evidence",
 ]

@@ -466,7 +466,7 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
     """Verify and record ``envelopes`` for ``deployment``, all or none.
 
     ``evidence``: for the observed-effects route only, the
-    ``mythos.observed-effect`` document (v1 or v2) posted beside each envelope, by position
+    ``mythos.observed-effect`` document (v1 to v5) posted beside each envelope, by position
     (:mod:`assurance.observed_effects`). Then every envelope must be an observed
     effect its document matches, and each is recorded with its document. Without
     it -- the signed-outcome route -- an observed effect is refused: it is recorded
@@ -531,7 +531,9 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 continue
         else:
             document = evidence[index] if index < len(evidence) else None
-            why = observed_effects.examine(outcome, document)
+            # The document's rules, and that it is the one this envelope signs, are the
+            # core's (mythos_core.observed_effect.verify_observed_effect).
+            why = observed_effects.examine(outcome, document, envelope=envelope, keyring=keyring)
             if why:
                 refusals.append(Refusal(index, why))
                 continue
