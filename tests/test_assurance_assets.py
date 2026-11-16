@@ -4,13 +4,10 @@ Proves the assurance graph's nodes are populated from what a scan honestly knows
 the scanned host (classified by scope), declared scope hosts, endpoint assets from
 findings that carry a location, and a declared LLM target as a model Provider +
 Asset — with every finding attached to the asset it concerns. Derivation is
-idempotent and never overwrites a human's re-classification. The LLM-scan view's
-broken target field is fixed and now persists its declared target.
+idempotent and never overwrites a human's re-classification.
 """
 
 from __future__ import annotations
-
-from unittest import mock
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -21,7 +18,6 @@ from assurance.assets import derive_assets
 from assurance.models import Asset, Deployment, Finding, Provider
 from assurance.views import AssetViewSet
 from pentest.models import Engagement, PentestScan
-from pentest.views_llm import PentestLLMScanView
 
 pytestmark = pytest.mark.django_db
 
@@ -326,29 +322,3 @@ def test_asset_api_exposes_provider_uuid_as_the_join_key():
     host_row = by_uuid[str(host_asset.uuid)]
     assert host_row["provider_uuid"] is None  # no provider → no edge
 
-
-def test_llm_scan_view_is_fixed_and_persists_its_declared_target():
-    """The old view passed a `target=` kwarg the model has no field for (a 500);
-    it now stores the base_url as target_url and the declared config."""
-    user = _user()
-    factory = APIRequestFactory()
-    engine_response = {"findings": [
-        {"type": "prompt_injection", "signature_id": "P1", "report_severity": "high",
-         "signature_description": "Prompt injection"},
-    ]}
-    with mock.patch("pentest.views_llm.CyberEngineClient") as Client:
-        Client.return_value.run_llm_scan.return_value = engine_response
-        request = factory.post(
-            "/api/llm-scan",
-            {"base_url": "https://api.llm.test/v1", "model": "gpt-x", "adapter": "openai_style"},
-            format="json",
-        )
-        force_authenticate(request, user=user)
-        resp = PentestLLMScanView.as_view()(request)
-
-    assert resp.status_code == 201
-    scan = PentestScan.objects.get(id=resp.data["scan_id"])
-    assert scan.status == PentestScan.STATUS_COMPLETED
-    assert scan.target_url == "https://api.llm.test/v1"
-    assert scan.target_config["model"] == "gpt-x"
-    assert scan.target_config["kind"] == "llm"

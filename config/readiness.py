@@ -11,7 +11,9 @@ The dependencies, as safety.degraded names them:
 * ``the database`` -- ``SELECT 1`` on a connection of the check's own, and the
   row read back must be the row asked for.
 * ``the engine`` -- the engine's own ``GET /health``, whose contract is a 200 and
-  ``{"status": "ok"}`` (tests/test_engine_contract.py).
+  ``{"status": "ok"}`` (tests/test_engine_contract.py), asked under the client's
+  own short ``HEALTH_TIMEOUT``, never the long timeout a scan is given: a hung
+  engine ends its check inside the bound, ``unknown``, and holds no thread.
 * ``Mythos-Core`` -- the modules this backend loads import, and its status
   vocabulary still spells ``unknown`` the way safety.degraded spells it.
 
@@ -29,6 +31,14 @@ most :data:`DEADLINE_SECONDS` for all of them together; a check still running
 then reads ``unknown``, saying how long it has been asked. A check still running
 from an earlier probe is waited on again, never started a second time, so a hung
 dependency holds one thread however often the probe is polled.
+
+Cached for :data:`CACHE_SECONDS`. A reading a check finished with is served again,
+without asking, until :data:`CACHE_SECONDS` after the check was *asked* -- never
+counted from when it answered -- so a flood of probes costs at most one check per
+dependency per second, and the cache never serves an ``ok`` older than that: a
+cached reading that ages out while an answer waits on another check is asked again
+then. A check still running is never cached: single-flight covers it. Each reading
+carries its ``age_seconds``: how long ago the check it comes from was asked.
 
 Never on a stop's path. It is a read (safety.degraded: evidence_read; safety.stops:
 not a stop). Nothing imports this module but the root URLconf, and no stop, gate or
@@ -50,6 +60,7 @@ because whether this backend can serve is then not established. Both carry
 from __future__ import annotations
 
 import importlib
+import math
 import threading
 import time
 from concurrent.futures import Future, wait
@@ -72,6 +83,10 @@ UNKNOWN = degraded.UNKNOWN
 #: on the dependency it is meant to report is how a load balancer marks a backend
 #: down for its own timeout rather than for the reason.
 DEADLINE_SECONDS = 2.0
+
+#: How long a reading is served again without asking, counted from when its check
+#: was asked. A probe flood costs at most one check per dependency per this long.
+CACHE_SECONDS = 1.0
 
 DATABASE = "the database"
 ENGINE = "the engine"
@@ -99,6 +114,10 @@ class _Answer(Exception):
     """A dependency answered, and its answer was a failure: ``degraded``, with why."""
 
 
+class _NoAnswer(Exception):
+    """A dependency did not answer within its own timeout: ``unknown``, with why."""
+
+
 def _database():
     from django.db import connection
 
@@ -111,13 +130,23 @@ def _database():
 
 
 def _engine():
-    from ai_engine.services.cyberengine_client import CyberEngineClient
+    import requests
+
+    from ai_engine.services.cyberengine_client import HEALTH_TIMEOUT, CyberEngineClient, EngineError
 
     try:
         client = CyberEngineClient.from_settings()
     except RuntimeError:
         return None  # nothing configured to ask
-    answer = client.health()
+    try:
+        answer = client.health()
+    except EngineError as exc:
+        if isinstance(exc.__cause__, requests.Timeout):
+            raise _NoAnswer(
+                f"did not answer /health within its own {sum(HEALTH_TIMEOUT):g} s timeout; "
+                "nothing is established about it"
+            ) from exc
+        raise
     if not isinstance(answer, dict) or answer.get("status") != OK:
         raise _Answer('answered /health, but not {"status": "ok"}')
     return 'answered /health {"status": "ok"}'
@@ -143,6 +172,9 @@ CHECKS = {
 _lock = threading.Lock()
 #: name -> (future, monotonic time it was asked): the check in flight for each dependency.
 _inflight: dict[str, tuple[Future, float]] = {}
+#: name -> (reading, monotonic time its check was asked): the last reading a finished
+#: check gave, served again until CACHE_SECONDS after that time.
+_served: dict[str, tuple[dict, float]] = {}
 
 
 def _run(name, check, future):
@@ -160,22 +192,22 @@ def _run(name, check, future):
             connections.close_all()  # this thread's own connection, and only it
 
 
-def _asked(name, check):
-    """The check in flight for ``name``, started only if none is."""
+def _asked(name, check, at):
+    """The check in flight for ``name``, started (and stamped ``at``) only if none is."""
     with _lock:
         running = _inflight.get(name)
         if running is not None:
             return running
         future = Future()
-        running = _inflight[name] = (future, time.monotonic())
+        running = _inflight[name] = (future, at)
     threading.Thread(target=_run, args=(name, check, future), daemon=True, name=f"readiness: {name}").start()
     return running
 
 
-def _reading(future, asked_at, now):
+def _reading(future, asked_at, now, waited):
     if not future.done():
         return UNKNOWN, (
-            f"did not answer within {DEADLINE_SECONDS:g} s (asked {now - asked_at:.1f} s ago); "
+            f"did not answer within {round(waited, 2):g} s (asked {now - asked_at:.1f} s ago); "
             "nothing is established about it"
         )
     exc = future.exception()
@@ -186,6 +218,8 @@ def _reading(future, asked_at, now):
         return OK, said
     if isinstance(exc, _Answer):
         return DEGRADED, str(exc)
+    if isinstance(exc, _NoAnswer):
+        return UNKNOWN, str(exc)
     kind = getattr(exc, "kind", None)
     http_status = getattr(exc, "status", None)
     if isinstance(kind, str):
@@ -195,16 +229,69 @@ def _reading(future, asked_at, now):
     return DEGRADED, f"failed ({said})"
 
 
+def _fresh(asked_at, now):
+    return now - asked_at < CACHE_SECONDS
+
+
+def _from_cache(reading, asked_at, now):
+    """A cached reading as served at ``now``: as it was while it is fresh; ``unknown``
+    once it is not, so no ``ok`` is ever served past CACHE_SECONDS."""
+    if _fresh(asked_at, now):
+        return reading
+    return {
+        "status": UNKNOWN,
+        "reason": (
+            f"its last reading ({reading['status']}) is {now - asked_at:.1f} s old, past the "
+            f"{CACHE_SECONDS:g} s a reading is served for; nothing newer is established"
+        ),
+    }
+
+
 def check_all():
-    """Every dependency's reading: {name: {"status", "reason"}}, in :data:`CHECKS` order,
-    within :data:`DEADLINE_SECONDS` however the dependencies answer."""
-    asked = {name: _asked(name, check) for name, check in CHECKS.items()}
-    wait([future for future, _at in asked.values()], timeout=DEADLINE_SECONDS)
-    now = time.monotonic()
+    """Every dependency's reading: {name: {"status", "reason", "age_seconds"}}, in
+    :data:`CHECKS` order, within :data:`DEADLINE_SECONDS` however the dependencies
+    answer. A reading a finished check gave is served again while it is fresh; one
+    that ages past CACHE_SECONDS while this answer waits on another check is asked
+    again then, and its new reading served."""
+    started = time.monotonic()
+    deadline = started + DEADLINE_SECONDS
+    with _lock:
+        cached = {name: _served[name] for name in CHECKS if name in _served and _fresh(_served[name][1], started)}
+    asked = {}
+    now = started
+    while True:
+        # Ask every dependency with no fresh reading -- each check stamped with when it
+        # was asked, a cached reading's age counted from its own ask, never its answer.
+        for name, check in CHECKS.items():
+            if name in cached and not _fresh(cached[name][1], now):
+                del cached[name]
+            if name not in cached and name not in asked:
+                asked[name] = _asked(name, check, now)
+        pending = [future for future, _at in asked.values() if not future.done()]
+        if not pending or now >= deadline:
+            break
+        # Until every check asked has answered, the bound is reached, or the first
+        # cached reading ages out (then it is asked again, above).
+        until = min([deadline, *(asked_at + CACHE_SECONDS for _r, asked_at in cached.values())])
+        wait(pending, timeout=max(until - now, 0.0))
+        now = time.monotonic()
+    now = time.monotonic()  # the moment the answer is built
     readings = {}
-    for name, (future, asked_at) in asked.items():
-        state, reason = _reading(future, asked_at, now)
-        readings[name] = {"status": state, "reason": reason}
+    for name in CHECKS:
+        if name in asked:
+            future, asked_at = asked[name]
+            state, reason = _reading(future, asked_at, now, now - started)
+            reading = {"status": state, "reason": reason}
+            if future.done():
+                with _lock:
+                    if name not in _served or _served[name][1] <= asked_at:
+                        _served[name] = (reading, asked_at)
+        else:
+            reading, asked_at = cached[name]
+            # Built a moment after the loop above found it fresh: checked again here.
+            reading = _from_cache(reading, asked_at, now)
+        # In whole milliseconds, rounded down: a reading 0.9996 s old is not "1.0".
+        readings[name] = {**reading, "age_seconds": math.floor((now - asked_at) * 1000) / 1000}
     return readings
 
 
@@ -212,7 +299,8 @@ def check_all():
 @permission_classes([AllowAny])
 # Polled as often as liveness is, by the same load balancer: the default anonymous
 # throttle would answer 429, which reads as an outage. A flood of probes cannot fan
-# out either: each dependency has at most one check in flight (`_asked`).
+# out either: each dependency has at most one check in flight (`_asked`), and a
+# finished check's reading is served again for CACHE_SECONDS (`check_all`).
 @throttle_classes([])
 def readiness(request):
     """Whether every dependency answers; each named with its state and why."""
@@ -243,7 +331,9 @@ def readiness(request):
 
 
 def forget_inflight():
-    """For tests: forget every check in flight, so the next probe asks afresh. A check
-    still running finishes on its own thread, and its answer goes nowhere."""
+    """For tests: forget every check in flight and every cached reading, so the next
+    probe asks afresh. A check still running finishes on its own thread, and its
+    answer goes nowhere."""
     with _lock:
         _inflight.clear()
+        _served.clear()
