@@ -1,5 +1,4 @@
 import codecs
-import importlib
 import ipaddress
 import json
 import logging
@@ -15,9 +14,19 @@ import requests
 from django.conf import settings
 from django.core.exceptions import RequestDataTooBig
 from django.http import JsonResponse, UnreadablePostError
-from django.urls import Resolver404, resolve
 from urllib3.exceptions import HTTPError as Urllib3Error
 
+# Each route's own body bound, imported by name, here, when the gateway is loaded:
+# the very constant the route's 413 compares the declared length against, never a
+# copy and never a number (DECLARED_BODY_BOUNDS, below). Nothing of it is imported or
+# looked up by a name built at runtime while a request is served: an import inside a
+# request can wait on the interpreter's import lock, and this gateway sits beside the
+# stop judgement.
+from assurance.achilles_results import MAX_BODY_BYTES as _SCAN_RESULT_BOUND
+from assurance.effect_reconciliation import MAX_BODY_BYTES as _RECEIPT_BOUND
+from assurance.identity_evidence import MAX_BODY_BYTES as _IDENTITY_RECORD_BOUND
+from assurance.observed_effects import MAX_BODY_BYTES as _OBSERVED_EFFECT_BOUND
+from assurance.observed_outcomes import MAX_BODY_BYTES as _OUTCOME_BATCH_BOUND
 from assurance.oplog import log_later
 from safety import collection, outbound
 from safety.stops import is_stop, view_name as stops_view_name
@@ -1152,45 +1161,33 @@ def _launch_fields(request):
 # and a larger call under the same deadline in front of a request allowed today.
 INSPECTED_IN_PART = "inspected in part: within the route's declared bound"
 
-
-def _route(request):
-    """The route the handler will send ``request`` to, or None: resolved as
-    safety.stops resolves it."""
-    match = getattr(request, "resolver_match", None)
-    if match is None:
-        try:
-            match = resolve(request.path_info, getattr(request, "urlconf", None))
-        except Resolver404:
-            return None
-    return match
+#: The routes that take bodies longer than the engine is sent as their own traffic, by
+#: URL name and method, each to the bound its own 413 compares the declared length
+#: against: the route's constant itself, imported by name above (a test holds that each
+#: value IS the object the route reads). Built once, when the gateway is loaded, and only
+#: read while a request is served. Every route and method not named here declares no
+#: bound, and a longer body on it is the failure it always was.
+DECLARED_BODY_BOUNDS = {
+    ("deployment-observed-chain-outcomes", "POST"): _OUTCOME_BATCH_BOUND,
+    ("deployment-effect-reconciliations", "POST"): _RECEIPT_BOUND,
+    ("deployment-observed-effects", "POST"): _OBSERVED_EFFECT_BOUND,
+    ("deployment-achilles-scan-results", "POST"): _SCAN_RESULT_BOUND,
+    ("deployment-authentications", "POST"): _IDENTITY_RECORD_BOUND,
+    ("deployment-delegations", "POST"): _IDENTITY_RECORD_BOUND,
+}
 
 
 def declared_body_bound(request):
     """The body bound the route ``request`` goes to declares for its method, or
-    None when it declares none.
-
-    A route declares it on its action, by method: ``body_bound={"POST":
-    "assurance.observed_effects.MAX_BODY_BYTES"}``, the dotted name of the constant
-    its own 413 compares the declared length against. The constant is read here,
-    when it is needed, never copied: the bound is stated once, where the route
-    states it, and moves when it moves. Nothing is imported until a body is longer
-    than the gateway sends, so the URL conf and a stop load nothing of it.
-
-    Raises when a route declares a bound that does not read as a byte count: the
-    caller counts that body as it counts any other (caution, never a pass)."""
-    match = _route(request)
-    if match is None:
+    None when it declares none: a read of :data:`DECLARED_BODY_BOUNDS`, by the URL
+    name safety.stops resolves. Raises when the bound held there is not a byte
+    count: the caller counts that body as it counts any other (caution, never a
+    pass)."""
+    bound = DECLARED_BODY_BOUNDS.get((stops_view_name(request), (request.method or "").upper()))
+    if bound is None:
         return None
-    declared = getattr(match.func, "initkwargs", {}).get("body_bound")
-    if declared is None:
-        return None
-    reference = declared.get((request.method or "").upper())
-    if reference is None:
-        return None
-    module, _dot, name = reference.rpartition(".")
-    bound = getattr(importlib.import_module(module), name)
     if isinstance(bound, bool) or not isinstance(bound, int) or bound <= 0:
-        raise ValueError(f"{reference} is not a byte count")
+        raise ValueError("the route's declared bound is not a byte count")
     return bound
 
 

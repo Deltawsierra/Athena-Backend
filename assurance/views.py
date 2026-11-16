@@ -657,15 +657,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     #: opts out of the bound the rest of the API keeps.
     CANDIDATE_PAGE_SIZE = 50
 
-    #: The body bound a route declares for the Defender gateway, by method: the dotted
-    #: name of the constant its own 413 compares the declared length against, never a
-    #: number (``audit.middleware.declared_body_bound``). A body longer than the gateway
-    #: sends the engine but within this bound is the route's own traffic, recorded as
-    #: inspected in part rather than as a failure. None: the route declares none.
-    #: Set on an action as ``body_bound={...}``; DRF takes an action's keyword only when
-    #: the class has the attribute.
-    body_bound = None
-
     def get_queryset(self):
         if view_name(self.request) in STOP_ROUTES:
             # A route a stop is made on (safety.stops: the pause, the dispatch kill
@@ -1986,7 +1977,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # body is not one: with the default parsers a multipart POST reached a 500,
         # because the audit middleware had already consumed the stream as a form.
         parser_classes=[SafeJSONParser],
-        body_bound={"POST": "assurance.observed_outcomes.MAX_BODY_BYTES"},
     )
     def observed_chain_outcomes(self, request, uuid=None):
         """Record chain outcomes from the envelopes an engine SIGNED.
@@ -2084,7 +2074,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ],
         permission_classes=[observed_effects.IsObservedEffectService],
         parser_classes=[SafeJSONParser],
-        body_bound={"POST": "assurance.effect_reconciliation.MAX_BODY_BYTES"},
     )
     def effect_reconciliations(self, request, uuid=None):
         """Record one reconciliation receipt: the ``mythos.effect-reconciliation``
@@ -2177,7 +2166,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ],
         permission_classes=[observed_effects.IsObservedEffectService],
         parser_classes=[SafeJSONParser],
-        body_bound={"POST": "assurance.observed_effects.MAX_BODY_BYTES"},
     )
     def observed_effects(self, request, uuid=None):
         """Record one observed effect: the outcome Achilles signed with its
@@ -2258,8 +2246,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         url_path="achilles-scan-results",
         # JSON only, as on the signed-outcome route: a form body is no signed result.
         parser_classes=[SafeJSONParser],
-        # The POST's bound; the GET reads no body and declares none.
-        body_bound={"POST": "assurance.achilles_results.MAX_BODY_BYTES"},
     )
     def achilles_scan_results(self, request, uuid=None):
         """Take in one Achilles scan result as findings (:mod:`assurance.achilles_results`).
@@ -2465,7 +2451,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ],
         permission_classes=[identity_evidence.IsAuthenticationService],
         parser_classes=[SafeJSONParser],
-        body_bound={"POST": "assurance.identity_evidence.MAX_BODY_BYTES"},
     )
     def authentications(self, request, uuid=None):
         """Record one signed sign-in: the outcome the sign-in collector signed, and the
@@ -2490,7 +2475,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ],
         permission_classes=[identity_evidence.IsDelegationService],
         parser_classes=[SafeJSONParser],
-        body_bound={"POST": "assurance.identity_evidence.MAX_BODY_BYTES"},
     )
     def delegations(self, request, uuid=None):
         """Record one signed delegation record: the outcome the grant collector signed,

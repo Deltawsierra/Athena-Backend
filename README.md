@@ -94,11 +94,13 @@ The gateway sends the engine the first `DEFENDER_MAX_BODY_BYTES` (64 KiB) of a b
 A longer body is "truncated for inspection", and that is a failure: it counts toward
 the gateway's one alert, the ERROR an engine outage raises ("Defender engine
 unavailable for N of the last 60s"). Six routes take signed records larger than that
-as their normal traffic, and each declares its own bound on its action, as the dotted
-name of the constant its own 413 already compares against, never a number:
-`body_bound={"POST": "assurance.observed_effects.MAX_BODY_BYTES"}` (456,634 bytes,
-read from Mythos-Core), and the same for the signed-outcome batch, the reconciliation
-receipt, the Achilles scan result, and the sign-in and delegation records. A body
+as their normal traffic: the observed effect (456,634 bytes, read from Mythos-Core),
+the signed-outcome batch, the reconciliation receipt, the Achilles scan result, and the
+sign-in and delegation records. The gateway holds each one's bound in a table built
+when it is loaded (`audit.middleware.DECLARED_BODY_BOUNDS`), from the route's URL name
+and method to the very constant its own 413 compares against, imported by name from
+the route's module: never a copy and never a number, and nothing is imported or looked
+up by a name built at runtime while a request is served. A body
 within its route's declared bound is logged at INFO as `inspected in part: within the
 route's declared bound` and counted (`DefenderMiddleware.inspected_in_part`); it is
 never a failure. The engine is still sent the same first 64 KiB: its `/defend` states

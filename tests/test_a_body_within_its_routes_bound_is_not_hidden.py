@@ -7,8 +7,9 @@ raises ("Defender engine unavailable for N of the last 60s"). #234 raised the ob
 intake's bound to 456,634 bytes, read from the core, so every valid large version 5 record
 counted toward an alert that means something is being kept from inspection.
 
-A route now declares its own bound on its action (``body_bound``: the dotted name of the
-constant its own 413 compares against). A body within it is recorded as
+The gateway now holds each route's own bound: a table built when it is loaded
+(:data:`audit.middleware.DECLARED_BODY_BOUNDS`), from the route's URL name and method to the very
+constant its own 413 compares against, imported by name. A body within it is recorded as
 :data:`audit.middleware.INSPECTED_IN_PART`: named, counted and logged, never a failure. The
 engine is sent the same first 64 KiB as before: its ``/defend`` states no bound of its own,
 and sending more would put more work before authentication in front of a request allowed
@@ -18,8 +19,10 @@ today. This file holds:
   nothing; ten of them raise no alert, where ten on a route that declares no bound do;
 * over the bound, on a route or a method that declares none, or with a bound that cannot be
   read, a body counts exactly as it did;
-* the bound is read from where the route states it, never typed in, and every declared bound
-  is the one its route refuses past;
+* each bound the gateway holds is the very object its route reads (never a copy, never a
+  number), and every declared bound is the one its route refuses past;
+* the gateway imports nothing and looks nothing up by a name built at runtime, and nothing is
+  imported while a request is served;
 * every other reason on the same body is still a failure, and the engine is sent what it was;
 * no part of this runs on a stop, and nothing is refused or delayed.
 
@@ -29,6 +32,7 @@ On the base (#234 at 691ee0f) the first test fails: the 300 KB record is recorde
 
 from __future__ import annotations
 
+import ast
 import copy
 import io
 import json
@@ -46,7 +50,6 @@ import urllib3
 from django.contrib.auth import get_user_model
 from django.http import HttpResponse
 from django.test import RequestFactory, override_settings
-from django.urls import get_resolver
 from mythos_core import observed_effect as core
 from mythos_core import outcome as oc
 from rest_framework.test import APIClient
@@ -304,13 +307,14 @@ def test_a_body_past_the_prefix_says_the_same_as_before_where_no_bound_is_declar
 
 def test_a_bound_that_cannot_be_read_is_caution_and_says_so(engine, failures, monkeypatch):
     """Unreadable is never within: the body counts as uninspected, and the reason says why."""
-    monkeypatch.setattr(achilles_results, "MAX_BODY_BYTES", "512 KiB")
+    key = ("deployment-achilles-scan-results", "POST")
+    monkeypatch.setitem(gateway.DECLARED_BODY_BOUNDS, key, "512 KiB")
     app = _gateway()
     response = app(_post(SCAN_RESULTS, _json_of(300_000)))
     assert response.content == b"the view ran"
     assert failures == [f"{TRUNCATED} (its route's declared bound could not be read: ValueError)"]
-    for unreadable in (True, 0, -1, None, 1.5e6):
-        monkeypatch.setattr(achilles_results, "MAX_BODY_BYTES", unreadable)
+    for unreadable in (True, 0, -1, 1.5e6):
+        monkeypatch.setitem(gateway.DECLARED_BODY_BOUNDS, key, unreadable)
         with pytest.raises(ValueError):
             gateway.declared_body_bound(_post(SCAN_RESULTS, b"{}"))
     assert app.inspected_in_part == 0
@@ -358,57 +362,84 @@ def test_the_engine_is_sent_what_it_was_sent(engine):
 # ---------------------------------------------- the bound is the route's, read, never typed
 
 
-def test_the_bound_is_read_from_where_the_route_states_it(engine, failures, monkeypatch):
-    """When the core's number moves, the route's bound moves, and the gateway's with it:
-    nothing is typed in anywhere between them."""
-    app = _gateway()
-    assert gateway.declared_body_bound(_post(EFFECTS, b"{}")) == observed_effects.MAX_BODY_BYTES == 456_634
-    monkeypatch.setattr(core, "MAX_EVIDENCE_BYTES", 1_000)
-    assert gateway.declared_body_bound(_post(EFFECTS, b"{}")) == oc.MAX_PAYLOAD_B64 + 1_000
-    app(_post(EFFECTS, _json_of(100_000)))
-    assert failures == [TRUNCATED] and app.inspected_in_part == 0
-    monkeypatch.undo()
-    monkeypatch.setattr(achilles_results, "MAX_BODY_BYTES", 70_000)
-    monkeypatch.setattr("audit.middleware.outbound.post", _engine_allows())
-    app(_post(SCAN_RESULTS, _json_of(100_000)))
-    assert app.inspected_in_part == 0
-    monkeypatch.setattr(achilles_results, "MAX_BODY_BYTES", 200_000)
-    app(_post(SCAN_RESULTS, _json_of(100_000)))
-    assert app.inspected_in_part == 1
-
-
-def _declarations() -> dict[tuple[str, str], str]:
-    """Every bound a route declares, found by walking the URL conf."""
-    found = {}
-
-    def walk(patterns, prefix=""):
-        for entry in patterns:
-            if hasattr(entry, "url_patterns"):
-                walk(entry.url_patterns, f"{prefix}{entry.namespace}:" if entry.namespace else prefix)
-                continue
-            declared = getattr(entry.callback, "initkwargs", {}).get("body_bound")
-            for method, reference in (declared or {}).items():
-                found[(f"{prefix}{entry.name}", method)] = reference
-
-    walk(get_resolver().url_patterns)
-    return found
-
-
-def test_every_declaration_names_the_constant_its_route_compares_against():
-    """Six routes, each declaring its POST's bound as the dotted name of the constant its own
-    413 reads: a name, never a number."""
-    assert _declarations() == DECLARED
+def test_each_bound_in_the_table_is_the_very_object_its_route_reads():
+    """Never a second copy: each value is the route's own constant, the same object its 413
+    compares against (``is``, not ``==``), and the route's 413 reads it by that name."""
+    assert set(gateway.DECLARED_BODY_BOUNDS) == set(DECLARED)
     source = (REPO / "assurance" / "views.py").read_text(encoding="utf-8")
-    for reference in set(DECLARED.values()):
+    for key, reference in DECLARED.items():
         module, name = reference.rsplit(".", 1)
-        local = module.rsplit(".", 1)[1]
-        # The route's own refusal reads the same name.
-        assert f"declared > {local}.{name}:" in source, reference
-        assert isinstance(getattr(sys.modules[module], name), int)
-    assert gateway.declared_body_bound(_post(EFFECTS, b"{}")) == observed_effects.MAX_BODY_BYTES
-    assert gateway.declared_body_bound(_post(SCAN_RESULTS, b"{}")) == achilles_results.MAX_BODY_BYTES
+        assert gateway.DECLARED_BODY_BOUNDS[key] is getattr(sys.modules[module], name), key
+        # The route's own refusal reads that name.
+        assert f"declared > {module.rsplit('.', 1)[1]}.{name}:" in source, reference
+    # The observed-effect bound is the core's two numbers, and one object for them.
+    assert observed_effects.MAX_BODY_BYTES is observed_effects.MAX_BODY_BYTES
+    assert observed_effects.MAX_BODY_BYTES == oc.MAX_PAYLOAD_B64 + core.MAX_EVIDENCE_BYTES == 456_634
+    assert gateway.declared_body_bound(_post(EFFECTS, b"{}")) is observed_effects.MAX_BODY_BYTES
+    assert gateway.declared_body_bound(_post(SCAN_RESULTS, b"{}")) is achilles_results.MAX_BODY_BYTES
     assert gateway.declared_body_bound(_post(SCAN_RESULTS, b"{}", method="GET")) is None
     assert gateway.declared_body_bound(_post(UNDECLARED, b"{}")) is None
+
+
+def test_the_table_holds_names_imported_from_each_route_and_no_number():
+    """Read from the gateway's own source: every value of the table is a name, each imported
+    by name from the route's module at the top of the file, and no value is a number."""
+    tree = ast.parse((REPO / "audit" / "middleware.py").read_text(encoding="utf-8"))
+    imported = {
+        alias.asname or alias.name: f"{node.module}.{alias.name}"
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    (table,) = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign) and [t.id for t in node.targets if isinstance(t, ast.Name)] == ["DECLARED_BODY_BOUNDS"]
+    ]
+    assert isinstance(table, ast.Dict)
+    named = {}
+    for key, value in zip(table.keys, table.values):
+        assert isinstance(value, ast.Name), ast.unparse(value)
+        named[ast.literal_eval(key)] = imported[value.id]
+    assert named == DECLARED
+
+
+def test_the_gateway_reads_the_table_when_a_body_is_longer_than_it_sends(engine, failures, monkeypatch):
+    """The bound a route holds is the one the gateway judges by: a smaller one, and the same
+    body counts toward the alert."""
+    app = _gateway()
+    key = ("deployment-achilles-scan-results", "POST")
+    app(_post(SCAN_RESULTS, _json_of(100_000)))
+    assert failures == [] and app.inspected_in_part == 1
+    monkeypatch.setitem(gateway.DECLARED_BODY_BOUNDS, key, 70_000)
+    app(_post(SCAN_RESULTS, _json_of(100_000)))
+    assert failures == [TRUNCATED] and app.inspected_in_part == 1
+
+
+def test_the_gateway_imports_nothing_and_looks_nothing_up_by_a_runtime_name():
+    """Read from its AST: no importlib, no __import__, and no getattr or hasattr whose name is
+    not written in the call. An import inside a request can wait on the interpreter's import
+    lock, and this gateway sits beside the stop judgement."""
+    tree = ast.parse((REPO / "audit" / "middleware.py").read_text(encoding="utf-8"))
+    wrong = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "importlib" for alias in node.names):
+            wrong.append(f"{node.lineno}: import importlib")
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "importlib":
+            wrong.append(f"{node.lineno}: from importlib")
+        if isinstance(node, ast.Name) and node.id in ("importlib", "__import__", "import_module"):
+            wrong.append(f"{node.lineno}: {node.id}")
+        if isinstance(node, ast.Attribute) and node.attr in ("import_module", "__import__"):
+            wrong.append(f"{node.lineno}: .{node.attr}")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("getattr", "hasattr", "setattr", "delattr")
+            and len(node.args) >= 2
+            and not (isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str))
+        ):
+            wrong.append(f"{node.lineno}: {ast.unparse(node)}")
+    assert wrong == []
 
 
 def _routes_clients(monkeypatch):
@@ -514,25 +545,28 @@ def test_a_body_that_fits_reads_no_bound(engine, monkeypatch):
     assert asked == []
 
 
-def test_neither_the_gateway_nor_a_stop_loads_what_a_route_declares():
-    """Building the gateway and serving a stop through it load nothing a route declares that the
-    URL conf had not loaded already: the core's observed-effect module and the scan-result
-    module are read only when a body on their route is longer than the engine is sent."""
+def test_nothing_is_imported_while_a_request_is_served():
+    """The route's bounds are loaded with the gateway, never while a request is served: once the
+    URL conf and the gateway are loaded, a stop, a body inspected in part, one over its bound and
+    one on a route that declares none load no module at all, the first time or after."""
     probe = (
         "import sys, django; django.setup();"
         "from django.http import HttpResponse; from django.test import RequestFactory;"
-        "import config.urls; before = set(sys.modules); from audit.middleware import DefenderMiddleware;"
+        "import config.urls; from audit.middleware import DefenderMiddleware;"
         "app = DefenderMiddleware(lambda request: HttpResponse('ok'));"
-        f"app(RequestFactory().post('/api/assurance/deployments/{U}/recompute/', data='{{\"paused\": true}}',"
-        " content_type='application/json'));"
-        "added = set(sys.modules) - before;"
-        "declared = {'assurance.observed_effects', 'assurance.observed_outcomes', 'assurance.effect_reconciliation',"
-        " 'assurance.achilles_results', 'assurance.identity_evidence'};"
-        "late = {'mythos_core.observed_effect', 'assurance.achilles_results'};"
-        "sys.exit(3 if added & declared or late & set(sys.modules) else 0)"
+        "app._ask_engine = lambda ctx: None;"
+        f"stop = lambda: RequestFactory().post('/api/assurance/deployments/{U}/recompute/',"
+        " data='{\"paused\": true}', content_type='application/json');"
+        "body = lambda path, size: RequestFactory().post(path, data='x' * size, content_type='application/json');"
+        f"effects, undeclared = '{EFFECTS}', '{UNDECLARED}';"
+        "serve = lambda: [app(stop()), app(body(effects, 300000)), app(body(effects, 456635)), app(body(undeclared, 300000))];"
+        "before = set(sys.modules); serve(); serve();"
+        "loaded = set(sys.modules) - before;"
+        "assert app.inspected_in_part == 2, app.inspected_in_part;"
+        "print(sorted(loaded)); sys.exit(3 if loaded else 0)"
     )
     ran = subprocess.run([sys.executable, "-c", probe], cwd=REPO, env=dict(os.environ), capture_output=True, timeout=120)
-    assert ran.returncode == 0, ran.stderr.decode(errors="replace")[-600:]
+    assert ran.returncode == 0, (ran.stdout.decode(errors="replace")[-600:], ran.stderr.decode(errors="replace")[-600:])
 
 
 def test_the_routes_keep_their_operation_class_and_are_no_stop():
