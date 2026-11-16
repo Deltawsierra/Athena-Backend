@@ -76,7 +76,9 @@ conventions, READ-ONLY (it records, recomputes, signs and verifies nothing):
   recent approved scenario version's exposure, from one run whose stored rows verify,
   as a document a customer can be handed (:mod:`.exposure_report`); with none, it says
   so and shows no figure. Every gap is named, and a report with one reads
-  ``AUDIT_INCOMPLETE``.
+  ``AUDIT_INCOMPLETE``. Every amount of money it shows says what kind of figure it is
+  (AT-6, section 38.2): each is held as a ``mythos_core.measures`` measure
+  (:mod:`.exposure_measures`), and the report adds no two of them.
 
 The receipt route says whether the receipt's run is current, in headers beside the
 bytes it serves unchanged (``X-Exposure-Freshness``, ``X-Exposure-Stale-Reasons``,

@@ -26,6 +26,16 @@ recomputes, signs and verifies nothing, and asks no engine.
   every version it does not total is named with the portfolio's reason, and one run it
   cannot vouch for makes the total read ``AUDIT_INCOMPLETE``.
 
+- **Every figure says what kind it is** (AT-6, section 38.2): each figure of loss or
+  exposure shown is held as a ``mythos_core.measures.Measure`` (:mod:`.exposure_measures`)
+  -- its kind, its money, its period and the snapshot it rests on -- and the report
+  states them under "What kind of figure each amount is". Every figure of a run or of
+  the portfolio is a ``modeled_exposure``. An assumption is not a measure: it is an
+  input as stated, listed with the assumptions as recorded, with no kind and no gap.
+  The report adds no two figures: a total is the core's to make
+  (:func:`.exposure_measures.total`), and the core refuses every sum of modelled
+  exposures. No amount is changed by any of it.
+
 Nothing here is on a stop path: it is reached only from its route in
 :mod:`.report_api`, which imports it inside the view.
 """
@@ -39,6 +49,7 @@ import re
 from mythos_core import status as core_status
 from mythos_core.persona import lint as persona_lint
 
+from . import exposure_measures as em
 from . import report
 from .models import (
     SIMULATION_COMPLETED,
@@ -74,6 +85,11 @@ FIGURE_LABELS = (
     ("severe_plausible", "Severe but plausible"),
 )
 TOTAL_HEADING = "Deployment total"
+EXPOSURE_HEADING = "Exposure"
+RESIDUAL_HEADING = "Residual exposure after controls"
+ASSUMPTIONS_HEADING = "Assumptions and their sources"
+#: The section that states what kind of figure each amount is (section 38.2).
+MEASURES_HEADING = "What kind of figure each amount is"
 TOTAL_RULE = (
     "the deployment's latest portfolio (section 33), as GET .../economics/portfolio/ serves it: its own figures, "
     "never recomputed here; shown only where the portfolio may be totalled, its stored rows verify, and every "
@@ -162,8 +178,20 @@ def select(deployment) -> tuple[tuple[FinancialScenario, dict] | None, list[str]
     return None, passed_over
 
 
-def _lines(summary: dict, label: str, gaps: list[str]) -> list[tuple[str, str]]:
-    """Each line's EAL, P10 to P90 and severe figure, and every one not measured named."""
+def _typed(run: em.ModelRun, section: str, label: str, value: str, named: str, gaps: list[str],
+           held: list[em.Figure]) -> None:
+    """One amount a model run states, held as a measure through the core; one the
+    core will not hold is named as a gap, its kind still the model's."""
+    figure = em.modeled(run, section, label, value)
+    held.append(figure)
+    if figure.measure is None:
+        gaps.append(f"{named}: not held as a measure: {_quoted(figure.why)}")
+
+
+def _lines(summary: dict, label: str, gaps: list[str], run: em.ModelRun, section: str,
+           held: list[em.Figure]) -> list[tuple[str, str]]:
+    """Each line's EAL, P10 to P90 and severe figure, each held as a measure, the
+    line's kind stated above them, and every one not measured named."""
     rows, code = [], summary.get("currency") or ""
     severe = summary.get("severe_percentile")
     for line, name in LINE_LABELS.items():
@@ -171,17 +199,20 @@ def _lines(summary: dict, label: str, gaps: list[str]) -> list[tuple[str, str]]:
         if "p50" not in block:
             gaps.append(f"{label}{name}: not measured: {_quoted(block.get('not_reported'))}")
             continue
+        rows.append((f"{name}: kind", em.MODELED))
         for key, figure in FIGURE_LABELS:
             figure = f"{figure} (P{severe})" if key == "severe_plausible" and severe else figure
             value = block.get(key)
             if value is None:
                 gaps.append(f"{label}{name}, {figure}: not measured: "
                             f"{_quoted((block.get('not_reported') or {}).get(key, 'not reported'))}")
+            else:
+                _typed(run, section, f"{name}: {figure}", value, f"{label}{name}, {figure}", gaps, held)
             rows.append((f"{name}: {figure}", "not measured" if value is None else f"{code} {value}"))
     return rows
 
 
-def _residual(version: FinancialScenario, gaps: list[str]) -> list[tuple[str, str]]:
+def _residual(version: FinancialScenario, gaps: list[str], held: list[em.Figure]) -> list[tuple[str, str]]:
     option = RemediationOption.objects.filter(scenario=version).first()
     run = None if option is None else SimulationResult.objects.residual_runs().filter(
         scenario=version, remediation=option).order_by("-id").first()
@@ -203,7 +234,7 @@ def _residual(version: FinancialScenario, gaps: list[str]) -> list[tuple[str, st
     if built["banner"]:
         gaps.append(f"Residual exposure: {built['banner']}: {_quoted(built['banner_reason'])}")
     summary = {**built["summary"], "currency": built["currency"]["code"]}
-    return rows + _lines(summary, "Residual: ", gaps)
+    return rows + _lines(summary, "Residual: ", gaps, em.scenario_run(built), RESIDUAL_HEADING, held)
 
 
 # ------------------------------------------------------------------ the deployment total
@@ -242,9 +273,22 @@ def _total_integrity(served: dict, members: list[dict], excluded: list[dict], un
             f"{'; '.join(unverified) or 'none'}")
 
 
-def _total(deployment, gaps: list[str]) -> list[tuple[str, str]]:
+def _own_sum(name: str, line: str, members: list[dict], run: em.ModelRun) -> list[tuple[str, str]]:
+    """Whether the total could be a sum of the scenarios' own figures: the core is
+    asked (:func:`.exposure_measures.total`), and it refuses. Nothing is added here."""
+    own = [((member.get("own") or {}).get(line) or {}).get("expected_annual_loss") for member in members]
+    if len(own) < 2 or any(value is None for value in own):
+        return []
+    code = em.why_not_added([em.modeled(run, TOTAL_HEADING, f"{name}, alone", value) for value in own])
+    return [(f"{name}, total: a sum of the scenarios' own figures",
+             f"never made: mythos_core.measures refuses it ({code}); the total is the portfolio's joint run, as served"
+             if code else f"never made: {em.NOT_SUMMED}; the total is the portfolio's joint run, as served")]
+
+
+def _total(deployment, gaps: list[str], typed: list[em.Figure]) -> list[tuple[str, str]]:
     """The deployment total: the latest portfolio's own figures, as its route serves
-    them, or why none is shown. Every gap of the total is named, prefixed, in ``gaps``."""
+    them, each held as a measure and never recomputed, or why none is shown. Every
+    gap of the total is named, prefixed, in ``gaps``."""
     rows: list[tuple[str, str]] = [("Rule", TOTAL_RULE)]
     own: list[str] = []
     module, why = _portfolio_module()
@@ -303,15 +347,20 @@ def _total(deployment, gaps: list[str]) -> list[tuple[str, str]]:
                  and served["excluded_from_totals"] is False and not blockers and "lines" in summary)
         if shown:
             code, severe = served["currency"]["code"], summary.get("severe_percentile")
+            joint = em.portfolio_run(served)
             for line, block in summary["lines"].items():
                 name = f"{LINE_LABELS.get(line, line)}, total"
+                rows.append((f"{name}: kind", em.MODELED))
                 for key, figure in TOTAL_FIGURES:
                     figure = f"{figure} (P{severe})" if key == "severe_plausible" and severe else figure
                     value = block.get(key)
                     if value is None:
                         own.append(f"{name}, {figure}: not measured: "
                                    f"{_quoted((block.get('not_reported') or {}).get(key, 'not reported'))}")
+                    else:
+                        _typed(joint, TOTAL_HEADING, f"{name}: {figure}", value, f"{name}, {figure}", own, typed)
                     rows.append((f"{name}: {figure}", "not measured" if value is None else f"{code} {value}"))
+                rows.extend(_own_sum(LINE_LABELS.get(line, line), line, members, joint))
                 rows.append((f"{name}: integrity", integrity))
             rows.append((LINE_LABELS["market_value"], "not totalled"))
         else:
@@ -324,10 +373,53 @@ def _total(deployment, gaps: list[str]) -> list[tuple[str, str]]:
     return rows
 
 
+def _pairs(held: list[em.Figure]) -> list[str]:
+    """The figures this report sets beside each other -- gross and net, cash and
+    market value, the exposure and its residual, the scenario and the deployment
+    total -- each pair side by side with the core's reason it does not add."""
+    def one(section: str, line: str, figure: str, total: bool = False) -> em.Figure | None:
+        label = f"{LINE_LABELS[line]}{', total' if total else ''}: {figure}"
+        return next((f for f in held if f.section == section and f.label == label and f.measure is not None), None)
+
+    said = []
+    for wanted in ((EXPOSURE_HEADING, "retained_cash", False), (EXPOSURE_HEADING, "market_value", False),
+                   (RESIDUAL_HEADING, "gross_cash", False), (TOTAL_HEADING, "gross_cash", True)):
+        for _key, figure in FIGURE_LABELS:
+            left, right = one(EXPOSURE_HEADING, "gross_cash", figure), one(wanted[0], wanted[1], figure, wanted[2])
+            if left is not None and right is not None:
+                said.append(em.beside(left, right))
+                break
+    return said
+
+
+def _measures(held: list[em.Figure]) -> list[tuple[str, str]]:
+    """What kind of figure each amount of the report is: the rule, each kind shown
+    in the core's words, the pairs set side by side, and every figure as a measure
+    (or why it is not one)."""
+    if not held:
+        return [("Rule", em.RULE), ("", "no figure of loss or exposure is shown")]
+    rows = [("Rule", em.RULE)]
+    rows.extend((kind, em.KIND_MEANS[kind]) for kind in sorted({f.kind for f in held} - {em.UNKNOWN}))
+    unknown = [figure for figure in held if figure.kind == em.UNKNOWN]
+    if unknown:
+        # Each reason once: every figure of unknown kind is then listed without it.
+        reasons = "; ".join(dict.fromkeys(figure.why for figure in unknown))
+        rows.append((em.UNKNOWN, "a figure whose kind is not established: not one of the core's kinds, and never "
+                                 f"shown under one: {reasons}"))
+    rows.append(("Period", em.PERIOD_RULE))
+    rows.append(("Basis", em.BASIS_RULE))
+    rows.extend(("Side by side, never added", text) for text in _pairs(held))
+    rows.extend((f"{figure.section}: {figure.label}",
+                 f"{em.UNKNOWN}; not held as a measure; shown as recorded: {figure.shown}"
+                 if figure.kind == em.UNKNOWN else em.said(figure)) for figure in held)
+    return rows
+
+
 def document(deployment) -> dict:
     """The report of ``deployment``, as plain text in sections; nothing escaped yet."""
     selected, passed_over = select(deployment)
     gaps: list[str] = list(passed_over)
+    held: list[em.Figure] = []
     sections = []
     versions = []
     for version in FinancialScenario.objects.filter(deployment=deployment).order_by("id"):
@@ -356,8 +448,9 @@ def document(deployment) -> dict:
         gaps.extend(f"{entry['kind']} {entry['id']}: {_quoted(entry['reason'])}" for entry in built["unknowns"])
         summary = {**built["summary"], "currency": built["currency"]["code"]}
         exposure = [("Basis", summary["basis"]), ("Currency", f"{built['currency']['code']} ({built['currency']['rounding']})")]
-        sections.append(("Exposure", exposure + _lines(summary, "", gaps)))
-        sections.append(("Residual exposure after controls", _residual(version, gaps)
+        sections.append((EXPOSURE_HEADING, exposure + _lines(summary, "", gaps, em.scenario_run(built),
+                                                             EXPOSURE_HEADING, held)))
+        sections.append((RESIDUAL_HEADING, _residual(version, gaps, held)
                          or [("", "not measured: named under \u201cWhat is not measured\u201d")]))
         integrity, receipt = built["integrity"], built["receipt"]
         checks = f"{len(integrity['checks'])} checks of the stored rows ({', '.join(integrity['checks'])})"
@@ -383,16 +476,21 @@ def document(deployment) -> dict:
                                 f"{entry.get('currency') or entry.get('unit')}; source {entry.get('source_type')}; "
                                 f"evidence {entry.get('evidence_ref') or 'none named'}; effective "
                                 f"{entry.get('effective_date')}"))
-        sections.append(("Assumptions and their sources", assumptions))
+        if assumptions:
+            # Inputs as stated, never measures: no kind and no gap (section 38.2).
+            assumptions.insert(0, ("What these are", em.ASSUMPTIONS_ARE))
+        sections.append((ASSUMPTIONS_HEADING, assumptions))
         sections.append(("Limitations", [("", _quoted(text)) for text in built["limitations"]]))
-    sections.append((TOTAL_HEADING, _total(deployment, gaps)))
+    sections.append((TOTAL_HEADING, _total(deployment, gaps, held)))
+    sections.append((MEASURES_HEADING, _measures(held)))
     sections.insert(0,("Scenarios of this deployment", versions or [("", "no scenario version is recorded")]))
     status = core_status.AUDIT_INCOMPLETE if gaps else COMPLETE
     summary_rows.insert(1, ("Status", f"{status}: {len(gaps)} gaps named under “What is not measured”"
                             if gaps else status))
     sections.insert(0, ("Summary", summary_rows))
     sections.append(("What is not measured", [("", gap) for gap in gaps] or [("", "nothing this report covers")]))
-    return {"title": f"{TITLE}: {deployment.name}", "status": status, "sections": sections}
+    return {"title": f"{TITLE}: {deployment.name}", "status": status, "sections": sections,
+            "measures": em.served(held)}
 
 
 # ------------------------------------------------------------------ rendering: every text escaped
