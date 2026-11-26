@@ -13,6 +13,11 @@ from when the check was asked: a flood of probes costs at most one check per
 dependency per second, and no ``ok`` is ever served older than that -- not after
 the second is up, not counted from the answer instead of the ask, and not after a
 probe waited on a slow check while it held a cached one.
+
+And a probe that starts just inside a reading's second and builds its answer once
+the second is up asks again, inside its bound: a dependency that answers is never
+read ``unknown`` because the probe's own clock moved on (the flood test met exactly
+that on Windows, once: one probe of the flood answered 503 from a ready backend).
 """
 
 from __future__ import annotations
@@ -282,6 +287,80 @@ def test_a_cached_ok_that_ages_while_a_probe_waits_is_asked_again_not_served_sta
     # The reading served is the second check's, not the first's cached ok.
     assert database["age_seconds"] < answered - asks["the database"][0] - readiness.CACHE_SECONDS + 0.1, database
     assert _reading(second, "the engine")["status"] == "unknown"
+
+
+# --- A reading whose second is up as the answer is built -------------------------------------
+
+
+class _Clock:
+    """What config.readiness reads the time from, scripted: each reading of it is the
+    next instant listed, and the last one listed from then on."""
+
+    def __init__(self, *instants):
+        self.instants = list(instants)
+
+    def monotonic(self):
+        return self.instants.pop(0) if len(self.instants) > 1 else self.instants[0]
+
+
+#: When, on the scripted clock, the first probe asks every dependency.
+ASKED = 100.0
+#: When the second probe starts: 1 ms inside the second its cached readings are served for.
+INSIDE = ASKED + readiness.CACHE_SECONDS - 0.001
+
+
+@pytest.mark.parametrize(
+    ("later", "asked_again"),
+    [
+        # The second is up between the probe's start and the moment its answer is built.
+        ([ASKED + readiness.CACHE_SECONDS + 0.001], True),
+        # It is up only after that moment: the answer is built from readings still fresh.
+        ([ASKED + readiness.CACHE_SECONDS - 0.0005, ASKED + readiness.CACHE_SECONDS + 0.001], False),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_a_cached_ok_whose_second_is_up_as_the_answer_is_built_is_asked_again(engine, later, asked_again):
+    """A probe starts 1 ms inside its cached readings' second, with no check to wait on,
+    and builds its answer 2 ms later, once the second is up. Every dependency answers,
+    so the probe asks each again inside its bound and says ready from the new readings:
+    never ``unknown`` because its own clock moved on, and never the aged ``ok``. A probe
+    whose answer is built before the second is up serves what it holds and asks nothing."""
+    client = engine()
+    asks = {}
+    clock = _Clock(ASKED)
+    with mock.patch.dict(readiness.CHECKS, _counted(asks)), mock.patch.object(readiness, "time", clock):
+        first, _took = _ask(client)
+        assert first.status_code == 200, first.content
+        clock.instants = [INSIDE, *later]
+        second, _took = _ask(client)
+    assert second.status_code == 200, second.content
+    _no_ok_older_than_the_cache(second)
+    for name in readiness.CHECKS:
+        assert len(asks[name]) == (2 if asked_again else 1), (name, asks)
+        if asked_again:
+            # The reading served is the second check's own, asked as the answer was built.
+            assert _reading(second, name)["age_seconds"] == 0.0, (name, second.content)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_cached_ok_whose_second_is_up_only_past_the_bound_is_not_asked_again(engine):
+    """The same probe, held so long that its answer is built when its whole bound is
+    spent: nothing is asked past the bound, and the readings, now older than their
+    second, read ``unknown`` -- never the ``ok`` they were."""
+    client = engine()
+    asks = {}
+    clock = _Clock(ASKED)
+    with mock.patch.dict(readiness.CHECKS, _counted(asks)), mock.patch.object(readiness, "time", clock):
+        first, _took = _ask(client)
+        assert first.status_code == 200, first.content
+        clock.instants = [INSIDE, INSIDE + readiness.DEADLINE_SECONDS]
+        second, _took = _ask(client)
+    assert second.status_code == 503, second.content
+    for name in readiness.CHECKS:
+        assert len(asks[name]) == 1, (name, asks)
+        reading = _reading(second, name)
+        assert reading["status"] == "unknown", (name, reading)
+        assert "past the" in reading["reason"], (name, reading)
 
 
 @pytest.mark.parametrize("state", ["ok", "degraded"])
