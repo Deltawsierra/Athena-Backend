@@ -86,7 +86,12 @@ reader's own instant with it, as it compares the incident's current scope with t
 an accepted step whose acceptance has ended by then is served at the last state before it
 that was not a recovered one, held back from nothing, its release computed (``FAIL``), and
 its standing is the core's word for it, ``acceptance_ended``. The row is history and is not
-rewritten. Each step's ``standing`` is the core's word for how it stands now, decided in the
+rewritten. **An ended acceptance can be renewed** (``mythos_core.scope.check_acceptance_reopen``,
+Mythos-Core#85, asked about every step after an accepted one): nothing follows an acceptance
+in force (``terminal``); once it has ended, the owner accepts again under the current scope
+revision, or a step records any state S1 lets follow the state before acceptance. The new
+step is a new row; the ended one stays as it was, superseded.
+Each step's ``standing`` is the core's word for how it stands now, decided in the
 core's order: ``superseded`` (a later step is the latest), ``acceptance_ended``, ``unknown``
 (the scope is behind the step), ``scope_moved`` (a revision since) or ``current``.
 
@@ -131,7 +136,9 @@ revision reopens an accepted recovery:
 - *A narrowing ends the hold for the item it removes, openly.* A hold for an added item
   stands only while the item is in the current scope and nothing names it. Once a later
   revision removes it, it is no longer a gap: a recovered step that was held back only by
-  it stands again with no new step, and the read (``scope_removed``) and every step
+  it stands again with no new step, a step recorded as held back by it no longer lists it
+  (every read takes a held step's scope holds against the current revision, as the record
+  does; with no hold left it is held back from nothing), and the read (``scope_removed``) and every step
   derived after (``scope_items.removed``) list it with both revision numbers, who
   removed it and why. A revision that only removes items takes no recovered state away.
   The first declared scope's items are not tied one by one; only items added later are.
@@ -144,10 +151,11 @@ revision reopens an accepted recovery:
   step it sets aside (``reopens``). After ``restored_with_restrictions`` that is S1's
   reopen, checked by S1. S1 lets nothing follow ``recovery_accepted``, not even a reopen:
   the rule "a scope revision reopens an accepted recovery" is the core's
-  ``mythos_core.scope.check_scope_reopen``, and after an accepted step that rule is asked
-  instead, with each scope hold that stands against the accepted step: the new step is
-  ``under_investigation``, names the accepted one in ``reopens``, and at least one hold
-  stands. S1's step check runs from the new step on.
+  ``mythos_core.scope.check_scope_reopen``, and after an accepted step the core's
+  ``check_acceptance_reopen`` is asked instead, which answers by that rule while a scope
+  hold stands, ended or not, with each hold that stands against the accepted step: the new
+  step is ``under_investigation``, names the accepted one in ``reopens``, and at least one
+  hold stands. S1's step check runs from the new step on.
 
 **Residual uncertainty** is a list of statements, each with its sources: every open
 ``Unknown`` of the finding, every coverage gap, a scope that is not declared, every
@@ -205,12 +213,12 @@ def _receipt():
 def is_name(value) -> bool:
     """Whether ``value`` is a name or an opaque pointer in the core's one grammar (ASCII
     letters, digits and ``._:/+-``, at most 200, starting with a letter or a digit): what a
-    receipt takes for a restriction, a gap, a reference. ``mythos_core.evidence_record``
-    offers no public check for it, so this reads its pattern, as the core's own
-    ``recovery_receipt``, ``provenance`` and ``measures`` do."""
-    from mythos_core.evidence_record import _NAME
+    receipt takes for a restriction, a gap, a reference. The core's own public check,
+    ``mythos_core.evidence_record.is_name`` (Mythos-Core#85), asked each time: nothing here
+    reads the grammar's pattern."""
+    from mythos_core import evidence_record
 
-    return type(value) is str and _NAME.fullmatch(value) is not None
+    return evidence_record.is_name(value)
 
 
 def instant(value) -> str | None:
@@ -654,13 +662,23 @@ def scope_holds_of(scope_revision, revisions, links: dict, manifest: cov.Manifes
     derived under ``scope_revision`` and resting on ``links`` and ``manifest``, named: no
     declared scope, an unreadable one, and each item its own scope gained that nothing
     it links names. Where what the scope gained cannot be established, the first two
-    name it. Pure."""
+    name it.
+
+    Read against the current revision, the newest of ``revisions``: an item the step's own
+    scope gained holds it back only while it is in the current scope, in it since that
+    same revision. One a later revision removed is no longer a gap, for a step held back
+    by it as for a recovered one; one removed and added again is held by the revision that
+    added it again, as every item a later revision adds is (``incident_scope.holds``).
+    Where the current scope cannot be read, every hold of the step's own scope stands.
+    So a read of any step and the record of a new one name the same holds. Pure."""
+    now = incident_scope.since(revisions)
     # Each hold once: one the core cannot name reads ``scope:unreadable`` from both.
     return list(dict.fromkeys((
         *incident_scope.holds(scope_revision, revisions),
         *(
             incident_scope.gap(item["revision"], item["kind"], item["ref"])
-            for item in scope_items(links, manifest, scope_revision, revisions)["added"] or () if not item["covered_by"]
+            for item in scope_items(links, manifest, scope_revision, revisions)["added"] or ()
+            if not item["covered_by"] and (now is None or now.get((item["kind"], item["ref"])) == item["revision"])
         ),
     )))
 
@@ -823,9 +841,73 @@ def release_of(*, state, gaps, held_back_from, acceptance_carries) -> str:
         raise RecoveryRefused(exc.code, str(exc)) from None
 
 
+# ------------------------------------------------------ after an accepted step
+
+
+def before_acceptance_of(row):
+    """The step an accepted ``row``'s acceptance followed: the last step before it that is
+    not itself an acceptance. A renewal follows an ended acceptance, so the state before
+    acceptance is still the one the first acceptance of the run followed. None for a step
+    that is not accepted, or when no such step is on record. One query."""
+    from .models import RecoveryRecord
+
+    if row is None or row.state != st.RECOVERY_ACCEPTED:
+        return None
+    return (
+        RecoveryRecord.objects.filter(finding_id=row.finding_id, version__lt=row.version)
+        .exclude(state=st.RECOVERY_ACCEPTED).order_by("-version").first()
+    )
+
+
+def acceptance_reopen(before, after, **asked) -> None:
+    """``mythos_core.scope.check_acceptance_reopen`` (Mythos-Core#85), asked as the core
+    takes it (``before_acceptance``, ``expires_at``, ``at``, ``holds``, ``scope_revision``,
+    ``current_revision``), its refusal this module's: :class:`RecoveryRefused` with the
+    core's code, whichever of the core's two rules answered. Pure."""
+    try:
+        core_scope.check_acceptance_reopen(before, after, **asked)
+    except (core_scope.AcceptanceReopenError, core_scope.ScopeError) as exc:
+        raise RecoveryRefused(exc.code, str(exc)) from None
+
+
+def after_acceptance(accepted, step, *, before, at, holds, scope_revision, revisions) -> None:
+    """Refuse ``step`` (a ``status.Recovery``) after the accepted step ``accepted`` unless
+    the core's rule allows it (:func:`acceptance_reopen`), asked with the step the
+    acceptance followed (``before``), the instant the acceptance ends, ``step``'s own
+    instant ``at``, the scope holds that stand against ``accepted``, the revision ``step``
+    is derived under and the incident's current one (the newest of ``revisions``).
+
+    While a scope hold stands the core's scope rule answers, ended or not: a return to the
+    investigation that names the accepted step. Otherwise ``step`` follows only an
+    acceptance that has ended at ``at``: a renewal under the current revision, or a state
+    S1 lets follow the state before acceptance; nothing follows one in force, or one with
+    no end (``terminal``). Raises :class:`RecoveryRefused` with the core's code, never one
+    of this module's. Pure."""
+    try:
+        accepted_as, before_as = _as_recovery(accepted), None if before is None else _as_recovery(before)
+    except st.RecoveryError as exc:
+        raise RecoveryRefused(exc.code, str(exc)) from None
+    acceptance_reopen(
+        accepted_as, step, before_acceptance=before_as,
+        expires_at=None if accepted.accepted_until is None else instant(accepted.accepted_until),
+        at=instant(at), holds=list(holds), scope_revision=scope_revision,
+        current_revision=incident_scope.current_of(revisions),
+    )
+
+
+def _least_step(accepted) -> st.Recovery:
+    """The least step that can follow ``accepted``: a return to the investigation that
+    names it, under a ref of its own. What :func:`record` asks the core about first, so
+    that a step after an acceptance in force is refused before anything else is checked."""
+    return st.Recovery(
+        ref=str(uuid.uuid4()), state=st.UNDER_INVESTIGATION, conditions=(INCIDENT_RECORDED,),
+        reopens=str(accepted.uuid),
+    )
+
+
 def derive(
     *, ref: str, links: dict, manifest: cov.Manifest, accepted: str, previous, scope_revision=None, revisions=(),
-    recorded_by: str = "", recorded_at=None,
+    recorded_by: str = "", recorded_at=None, before_acceptance=None,
 ) -> dict | None:
     """What a step resting on ``links``, ``manifest`` and ``accepted`` (the owner's
     acceptance in force, or blank), recorded by ``recorded_by`` (``user:<id>``, blank for
@@ -834,7 +916,9 @@ def derive(
     revision in ``revisions``, oldest first: its state, reopens, conditions, gaps,
     restrictions, release, what it is held back from, who vouches for each witness and
     its residual uncertainty -- or None, when nothing may follow ``previous`` that the
-    witnesses support. Pure."""
+    witnesses support. After an accepted ``previous``, ``before_acceptance`` is the step
+    its acceptance followed (:func:`before_acceptance_of`), and the step is the core's to
+    allow (:func:`after_acceptance`). Pure."""
     facts = _facts(links, accepted)
     holds, complete = _coverage_holds(manifest)
     scope_holds = scope_holds_of(scope_revision, revisions, links, manifest)
@@ -861,13 +945,22 @@ def derive(
     lapse = [] if previous is None else lapsed(previous, revisions)
     if lapse and not blocked and all(hold in scope_holds for hold in lapse):
         return None
-    # S1 lets nothing follow an accepted recovery, not even a reopen. That a scope
-    # revision reopens one is the core's rule (``mythos_core.scope.check_scope_reopen``):
-    # after an accepted step whose scope no longer stands, that rule is asked about it,
-    # with each scope hold that stands against it, and S1's step check about no step.
-    reopened = previous if lapse and previous.state in st.RECOVERY_TERMINAL else None
+    # S1 lets nothing follow an accepted recovery, not even a reopen. What may follow one
+    # is the core's rule (``mythos_core.scope.check_acceptance_reopen``): while a scope hold
+    # stands against it, a return to the investigation (the scope rule); once its
+    # acceptance has ended and none stands, a renewal under the current revision or a
+    # state S1 lets follow the state before acceptance. That rule is asked about the step
+    # after an accepted one, and S1's step check about no step; S1's runs from the next on.
+    reopened = previous if previous is not None and previous.state == st.RECOVERY_ACCEPTED else None
     follows = None if reopened is not None else previous
-    state = st.UNDER_INVESTIGATION if lapse else _step(None if previous is None else previous.state, supported)
+    if lapse:
+        state = st.UNDER_INVESTIGATION
+    elif reopened is not None:
+        # The step that follows an ended acceptance is the one S1 would let follow the state
+        # before acceptance. With no step before it on record, nothing is derived here.
+        state = None if before_acceptance is None else _step(before_acceptance.state, supported)
+    else:
+        state = _step(None if previous is None else previous.state, supported)
     if state is None:
         return None
     # The recovered state the step would have reached but for its coverage and scope
@@ -902,10 +995,13 @@ def derive(
         )
         if follows is not None:
             st.check_recovery_step(_as_recovery(follows), recovery)
-        if reopened is not None:
-            core_scope.check_scope_reopen(_as_recovery(reopened), recovery, lapse)
-    except (st.RecoveryError, core_scope.ScopeError) as exc:
+    except st.RecoveryError as exc:
         raise RecoveryRefused(exc.code, str(exc)) from None
+    if reopened is not None:
+        after_acceptance(
+            reopened, recovery, before=before_acceptance, at=recorded_at, holds=lapse, scope_revision=scope_revision,
+            revisions=revisions,
+        )
     # The core's rule. The acceptance carries: it is in force when the step is recorded,
     # given under the scope revision the step is derived under, and no scope hold stands.
     release = release_of(
@@ -943,7 +1039,7 @@ def _derived(row, previous, revisions) -> dict | None:
         ref=str(row.uuid), links=row.links, manifest=manifest_of(row.finding, row.coverage),
         accepted=person_ref(row.accepted_by_id) if in_force else "", previous=previous,
         scope_revision=row.scope_revision, revisions=revisions, recorded_by=person_ref(row.recorded_by_id),
-        recorded_at=row.recorded_at,
+        recorded_at=row.recorded_at, before_acceptance=before_acceptance_of(previous),
     )
 
 
@@ -1013,23 +1109,26 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
     one row per step, recorded by ``by``, and return them. ``accept_until`` is the owner's
     acceptance, given by ``by``, which must be the deployment's owner. Refused, with nothing
     recorded, when nobody records it (``recorded_by_required``), nothing moves, or a link
-    or the acceptance is refused."""
+    or the acceptance is refused.
+
+    After an accepted step whose scope still stands, the core decides first
+    (:func:`after_acceptance`, about the least step that could follow it): nothing follows
+    an acceptance in force, refused ``terminal`` before anything else is checked. Once it
+    has ended, the owner may renew it under the current revision, or a step S1 lets follow
+    the state before acceptance is recorded; the step itself is the core's to allow too.
+    The ended acceptance stays in the history as it was."""
     from .models import RecoveryRecord
 
     now = timezone.now()
     previous = RecoveryRecord.objects.filter(finding_id=finding.pk).order_by("-version").first()
     revisions = incident_scope.revisions_of([finding.pk]).get(finding.pk, [])
-    # An accepted recovery is final for the scope revision it was accepted under, and
-    # only for that one: once that scope no longer stands, steps are recorded again.
-    if previous is not None and previous.state in st.RECOVERY_TERMINAL and not lapsed(previous, revisions):
-        ended = previous.accepted_until is not None and previous.accepted_until <= now
-        raise RecoveryRefused(
-            "terminal",
-            f"the recovery was accepted (step {previous.version}); nothing follows"
-            + (
-                ", not even a new acceptance once that one has ended: it reads as not accepted, and only a scope "
-                "revision reopens it" if ended else ""
-            ),
+    # An accepted recovery is final while its acceptance is in force, for the scope revision
+    # it was accepted under. Once that scope no longer stands, or the acceptance has ended,
+    # steps are recorded again: the core's rule says which.
+    if previous is not None and previous.state == st.RECOVERY_ACCEPTED and not lapsed(previous, revisions):
+        after_acceptance(
+            previous, _least_step(previous), before=before_acceptance_of(previous), at=now, holds=(),
+            scope_revision=incident_scope.current_of(revisions), revisions=revisions,
         )
     if accept_until is not None:
         if finding.deployment.owner_id is None:
@@ -1058,6 +1157,10 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
                 row.save()
                 steps.append(row)
                 previous = row
+                if row.state == st.RECOVERY_ACCEPTED:
+                    # Nothing follows an acceptance in force, and every acceptance recorded
+                    # here is: its end is after now.
+                    break
     except IntegrityError:
         raise RecoveryRefused("raced", "another step of this recovery was recorded at the same time") from None
     if not steps:
@@ -1069,6 +1172,13 @@ def record(finding, *, by=None, body=None, accept_until=None) -> list:
                 f"scope, and this step answers none of what took it away: {lapse}. An item a revision added stays "
                 "open until a step links something that names it: evidence of a finding on that asset, a permit of "
                 "that workflow, or the asset observed in a coverage manifest posted since",
+            )
+        if previous.state == st.RECOVERY_ACCEPTED:
+            raise RecoveryRefused(
+                "nothing_moved",
+                f"nothing moved: the acceptance of step {previous.version} has ended, and what this step rests on "
+                "supports no state that may follow the state before acceptance; the owner renews it with a new "
+                "acceptance",
             )
         raise RecoveryRefused(
             "nothing_moved",
@@ -1174,12 +1284,16 @@ def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION, *, at=None, standing
     ``held_at`` (the last state before it that was not a recovered one), its ``gaps``
     name each, and it is held back from the state it recorded. Where the step is
     accepted and its acceptance has ended by ``at``, it is not served as accepted either:
-    its ``state`` is ``held_at`` and it is held back from nothing. Its ``release`` is the
+    its ``state`` is ``held_at`` and it is held back from nothing. Where the step was held
+    back from a recovered state, its scope holds among its gaps are ``scope_gaps``, read
+    against the current revision: one a narrowing has ended is not listed, and with no
+    coverage or scope hold left it is held back from nothing. Its ``release`` is the
     core's over what is served, in every case (:func:`release_of`); ``standing`` is the
     core's word for how it stands (:func:`standing_of`, as the last step when not given).
     ``recorded`` is what the row holds, always: the row is history and is not
     rewritten."""
-    measured = cov.coverage_ratio(manifest_of(row.finding, row.coverage))
+    manifest = manifest_of(row.finding, row.coverage)
+    measured = cov.coverage_ratio(manifest)
     scope_gaps = list(scope_gaps)
     at = timezone.now() if at is None else at
     scope_lapsed = row.state in RECOVERED and bool(scope_gaps)
@@ -1196,6 +1310,22 @@ def served(row, scope_gaps, held_at=st.UNDER_INVESTIGATION, *, at=None, standing
         state, held_back_from = held_at, row.state
     else:
         state, held_back_from = row.state, _held_of(row)
+        if held_back_from is not None:
+            # A held step's scope holds are read against the current revision, as the
+            # record derives them (:func:`scope_holds_of`): a hold the scope no longer shows
+            # is not listed, and one it shows now is. It stays held back while a coverage or
+            # a scope hold stands; with none, it is held back from nothing.
+            posted = row.links.get("gaps") if isinstance(row.links, dict) else None
+            stale = [
+                gap for gap in recorded_gaps
+                if core_scope.is_scope_hold(gap) and gap not in scope_gaps and gap not in (posted or ())
+            ]
+            gaps = [
+                *(gap for gap in recorded_gaps if gap not in stale),
+                *(hold for hold in scope_gaps if hold not in recorded_gaps),
+            ]
+            if measured.complete and not _coverage_holds(manifest)[0] and not scope_gaps:
+                held_back_from = None
     if standing is None:
         standing = standing_of(row, last=True, current_revision=row.scope_revision, at=at)
     return {

@@ -406,4 +406,36 @@ zopfli==0.2.3.post1
 # pins is that one new file, and pinguard.py and templates/pin_bootstrap.py are byte for
 # byte what they were, so tests/pin_bootstrap.py is unchanged. On no stop path. The pin
 # guard stays ON (DEPENDENCY_PIN_GUARD is set nowhere).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@12c64334810f0101cb15c526b2af0c7bb6483ab0
+#
+# What the pin since 12c6433 (Mythos-Core#82) adds:
+#
+# Mythos-Core#84 and #85 -- the a27774d pin, the head of the core's main on 16 Nov 2026
+# (the merge of #85, which carries #84's merge, f3f808d).
+# (1) #85: mythos_core.scope.check_acceptance_reopen, beside check_scope_reopen: an
+# ended acceptance reopens an accepted recovery. A step after recovery_accepted is
+# allowed when, and only when, the acceptance has ended at that step's instant: a
+# renewal under the current scope revision, or any state the status rule lets follow
+# the state before acceptance; while a scope hold stands the scope rule answers, as
+# before. assurance/recovery_record.py asks it for every step after an accepted one, so
+# an owner can accept again once an acceptance has ended, and nothing follows one in
+# force (terminal, the core's code). mythos_core.status is unchanged by it. The answer
+# key, tests/vectors/acceptance-reopen-v1.json, is carried byte for byte in tests/vectors/
+# (tests/test_an_ended_acceptance_can_be_renewed.py).
+# (2) #85: mythos_core.evidence_record.is_name, the name grammar's one public check. The
+# recovery record asks it and no longer reads the private _NAME pattern.
+# (3) #84: mythos_core.observed_effect exports its verified-field sets
+# (VERIFIED_FIELDS_V3, _V4, _V5). assurance/observed_effects.py reads VERIFIED_FIELDS_V4,
+# no longer the private _VERIFIED_FIELDS_V4; the private names stay in the core as
+# aliases of the public sets, so the objects are the same.
+# (4) #84: mythos_core.provenance gains what vouches for a record (VOUCHERS: signed,
+# stated, with voucher_words and voucher_sentence), and recovery_receipt reads its
+# voucher words and support sentences through it (VOUCHER_OF: engine is signed, actor is
+# stated). No byte of the receipt's format, its vectors or the words it prints changes;
+# the recovery record serves those words as it did.
+# Every other module of the core is byte for byte what it was at 12c6433 (the diff of
+# src/ touches only scope.py, evidence_record.py, observed_effect.py, provenance.py and
+# recovery_receipt.py), and so are pinguard.py and templates/pin_bootstrap.py, so
+# tests/pin_bootstrap.py is unchanged. Each of the five is data and pure functions, read
+# at first use or by the recovery and evidence routes: on no stop path. The pin guard
+# stays ON (DEPENDENCY_PIN_GUARD is set nowhere).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@a27774dc8cb0dae775a5b7dd97d15f697f011415

@@ -137,10 +137,10 @@ _FROM_THE_CORE = {
     "RECIPIENT_BOUND": lambda core: core.RECIPIENT_BOUND,
     "RECIPIENT_UNBOUND": lambda core: core.RECIPIENT_UNBOUND,
     "RECIPIENT_ORDER": lambda core: core.RECIPIENT_ORDER,
-    # The core exports no field sets. This one name is kept because the G6 test reads it
-    # (tests/test_the_gate_verifies_the_tool_contract_it_dispatches_under.py); it is the
-    # core's own set, read by its private name at the pinned commit, never typed in.
-    "VERIFIED_FIELDS_V4": lambda core: core._VERIFIED_FIELDS_V4,
+    # The G6 test reads this one field set
+    # (tests/test_the_gate_verifies_the_tool_contract_it_dispatches_under.py): the core's
+    # own public set (Mythos-Core#84), never typed in, and never its private alias.
+    "VERIFIED_FIELDS_V4": lambda core: core.VERIFIED_FIELDS_V4,
     "EvidenceRefused": lambda core: core.EvidenceRefused,
     # One envelope (bounded by the core) and one document of the largest size the core's
     # field rules allow a version 5 document: both numbers are the core's.

@@ -789,7 +789,7 @@ def test_every_name_these_modules_keep_is_the_cores_own_object():
     assert observed_effects.EVIDENCE_SCHEMAS is core.EVIDENCE_SCHEMAS
     assert observed_effects.EVIDENCE_SCHEMA_V5 == "mythos.observed-effect/v5"
     assert observed_effects.TOOL_KINDS is core.TOOL_KINDS is effect_reconciliation.TOOL_KINDS
-    assert observed_effects.VERIFIED_FIELDS_V4 is core._VERIFIED_FIELDS_V4
+    assert observed_effects.VERIFIED_FIELDS_V4 is core.VERIFIED_FIELDS_V4
     assert observed_effects.MAX_APPROVAL_RECIPIENTS is core.MAX_APPROVAL_RECIPIENTS
     assert effect_reconciliation.SCHEMAS is core.RECONCILIATION_SCHEMAS
     assert (effect_reconciliation.SCHEMA, effect_reconciliation.SCHEMA_V2) == core.RECONCILIATION_SCHEMAS
