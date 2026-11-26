@@ -1982,7 +1982,10 @@ named by the exception's type, never its message.
 A finished check's reading is served again for 1 s, counted from when the check was
 asked, so a flood of probes costs at most one check per dependency per second. The
 cache never serves an `ok` older than that: a reading that ages out while the answer
-waits on another check is asked again. Each reading carries `age_seconds`.
+waits on another check, or between a probe's start and the moment its answer is
+built, is asked again inside the 2 s bound. A dependency that answers therefore never
+reads `unknown` only because a probe began just inside a reading's second. Each
+reading carries `age_seconds`.
 
 Every dependency `ok` answers 200 with `status: "ok"`. Anything else answers 503,
 in the evidence-read shape above (`status: "unknown"`, `dependency` naming the first

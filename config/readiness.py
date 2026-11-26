@@ -38,9 +38,12 @@ Cached for :data:`CACHE_SECONDS`. A reading a check finished with is served agai
 without asking, until :data:`CACHE_SECONDS` after the check was *asked* -- never
 counted from when it answered -- so a flood of probes costs at most one check per
 dependency per second, and the cache never serves an ``ok`` older than that: a
-cached reading that ages out while an answer waits on another check is asked again
-then. A check still running is never cached: single-flight covers it. Each reading
-carries its ``age_seconds``: how long ago the check it comes from was asked.
+cached reading that ages out while an answer waits on another check, or between a
+probe's start and the moment its answer is built, is asked again then, inside the
+bound, so a dependency that answers never reads ``unknown`` only because a probe
+began just inside a reading's second. A check still running is never cached:
+single-flight covers it. Each reading carries its ``age_seconds``: how long ago the
+check it comes from was asked.
 
 Never on a stop's path. It is a read (safety.degraded: evidence_read; safety.stops:
 not a stop). Nothing imports this module but the root URLconf, and no stop, gate or
@@ -253,8 +256,8 @@ def check_all():
     """Every dependency's reading: {name: {"status", "reason", "age_seconds"}}, in
     :data:`CHECKS` order, within :data:`DEADLINE_SECONDS` however the dependencies
     answer. A reading a finished check gave is served again while it is fresh; one
-    that ages past CACHE_SECONDS while this answer waits on another check is asked
-    again then, and its new reading served."""
+    that ages past CACHE_SECONDS while this answer waits on another check, or by the
+    moment this answer is built, is asked again then, and its new reading served."""
     started = time.monotonic()
     deadline = started + DEADLINE_SECONDS
     with _lock:
@@ -271,13 +274,19 @@ def check_all():
                 asked[name] = _asked(name, check, now)
         pending = [future for future, _at in asked.values() if not future.done()]
         if not pending or now >= deadline:
-            break
+            # The moment the answer is built. A cached reading found fresh above can be
+            # past its second by now: the clock moved on between the two. Inside the
+            # bound it is asked again, above, like one that ages out during a wait; the
+            # answer is built from this reading of the clock, never a later one.
+            now = time.monotonic()
+            if now >= deadline or all(_fresh(asked_at, now) for _r, asked_at in cached.values()):
+                break
+            continue
         # Until every check asked has answered, the bound is reached, or the first
         # cached reading ages out (then it is asked again, above).
         until = min([deadline, *(asked_at + CACHE_SECONDS for _r, asked_at in cached.values())])
         wait(pending, timeout=max(until - now, 0.0))
         now = time.monotonic()
-    now = time.monotonic()  # the moment the answer is built
     readings = {}
     for name in CHECKS:
         if name in asked:
@@ -290,7 +299,8 @@ def check_all():
                         _served[name] = (reading, asked_at)
         else:
             reading, asked_at = cached[name]
-            # Built a moment after the loop above found it fresh: checked again here.
+            # Fresh at the moment the answer is built, unless the bound was spent by
+            # then: past the bound nothing is asked, and it reads unknown, never ok.
             reading = _from_cache(reading, asked_at, now)
         # In whole milliseconds, rounded down: a reading 0.9996 s old is not "1.0".
         readings[name] = {**reading, "age_seconds": math.floor((now - asked_at) * 1000) / 1000}
