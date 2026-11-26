@@ -12,8 +12,8 @@ What holds now, and is proved here against the real route:
   whatever arrives between pages;
 * ``?recorded_as=observed_effect`` reads only the rows recorded as observed
   effects, and each row still says for itself what it is in force;
-* a cursor or a filter the read does not know is a ``400`` with a code, never a
-  page that looks like "no more";
+* a cursor, a filter or a parameter the read does not know is a ``400`` with a
+  code, never a page that looks like "no more" and never the first page again;
 * a row reads the same on whichever page it falls;
 * a page costs the same number of statements whatever it holds.
 
@@ -34,6 +34,7 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from rest_framework.settings import api_settings
 from rest_framework.test import APIClient
 
 from assurance import composition as comp
@@ -593,6 +594,84 @@ def test_a_filter_given_twice_is_refused_even_when_both_are_the_known_value():
     assert response.status_code == 400 and response.json()["code"] == outcome_pages.UNKNOWN_RECORDED_AS
 
 
+@pytest.mark.parametrize(
+    "name, value",
+    [("offset", "100"), ("kind", "observed_effect"), ("page", "2"), ("zzz-not-a-parameter", "1")],
+)
+def test_a_parameter_this_read_does_not_know_is_a_400_that_names_it_and_never_the_first_page(name, value):
+    """``?offset=100`` answered the first page, and ``?kind=observed_effect`` every
+    row: a caller who sent either was told nothing and would believe it had paged or
+    filtered. That is the fault of an empty page that looks like "no more", from
+    the other side."""
+    dep = _deployment()
+    _typed(dep, SIZE + 5)
+    response = _client(dep.owner).get(_url(dep, **{name: value}))
+    assert response.status_code == 400, response.content[:200]
+    body = response.json()
+    assert body["code"] == outcome_pages.UNKNOWN_PARAMETER == "unknown_parameter"
+    assert body["parameters"] == [name] and repr(name) in body["error"]
+    assert "outcomes" not in body and "next" not in body
+
+
+def test_an_unknown_parameter_is_refused_beside_good_ones_and_before_they_are_judged():
+    dep = _deployment()
+    _typed(dep, SIZE + 5)
+    client = _client(dep.owner)
+    cursor = _a_cursor(client, dep)
+
+    beside_good = client.get(_url(dep, before=cursor, recorded_as="observed_effect", offset="100"))
+    beside_bad = client.get(_url(dep, before="not-a-cursor", recorded_as="gate", offset="100"))
+
+    for response in (beside_good, beside_bad):
+        assert response.status_code == 400
+        assert response.json()["code"] == outcome_pages.UNKNOWN_PARAMETER
+        assert response.json()["parameters"] == ["offset"]
+    # Without it, the same cursor reads the rest.
+    assert client.get(_url(dep, before=cursor)).json()["returned"] == 5
+
+
+def test_every_unknown_parameter_is_named_in_order_and_the_naming_is_bounded():
+    """The names are the caller's own text. Each is cut at 64 characters and at most
+    ten are named, with the count of all of them beside."""
+    dep = _deployment()
+    client = _client(dep.owner)
+
+    two = client.get(_url(dep, page="2", kind="observed_effect", recorded_as="observed_effect"))
+    assert two.status_code == 400 and two.json()["parameters"] == ["kind", "page"]
+    assert two.json()["unknown_count"] == 2
+
+    nameless = client.get(_url(dep) + "?=5")
+    assert nameless.status_code == 400 and nameless.json()["parameters"] == [""]
+
+    many = {f"p{n:02d}": "1" for n in range(12)}
+    many["x" * 300] = "1"
+    flood = client.get(_url(dep, **many))
+    assert flood.status_code == 400
+    body = flood.json()
+    assert body["code"] == outcome_pages.UNKNOWN_PARAMETER
+    assert body["parameters"] == [f"p{n:02d}" for n in range(10)] and body["unknown_count"] == 13
+    assert "x" * 65 not in flood.content.decode()
+    long = client.get(_url(dep, **{"x" * 300: "1"}))
+    assert long.json()["parameters"] == ["x" * 64]
+
+
+def test_the_format_parameter_the_framework_already_read_is_still_read():
+    """The one query parameter this route honoured before: the framework's own
+    choice of renderer, under whatever name the project gives it. It is not this
+    read's to refuse."""
+    dep = _deployment()
+    _typed(dep, 3)
+    client = _client(dep.owner)
+    name = api_settings.URL_FORMAT_OVERRIDE
+    plain = client.get(_url(dep))
+    if name:
+        chosen = client.get(_url(dep, **{name: "json"}))
+        assert chosen.status_code == 200 and chosen.json() == plain.json()
+        assert name in outcome_pages.read_by_the_framework(chosen.renderer_context["request"])
+    else:
+        assert client.get(_url(dep, format="json")).status_code == 400
+
+
 # --------------------------------------------------------------------------
 # Access: the same as it was, and a cursor opens nothing.
 # --------------------------------------------------------------------------
@@ -634,7 +713,13 @@ def test_a_cursor_changes_nothing_about_who_may_read_a_deployment():
 
     plain = outsider.get(_url(theirs))
     assert plain.status_code == 404
-    for params in ({"before": cursor}, {"before": "not-a-cursor"}, {"recorded_as": "gate"}, {"recorded_as": "observed_effect"}):
+    for params in (
+        {"before": cursor},
+        {"before": "not-a-cursor"},
+        {"recorded_as": "gate"},
+        {"recorded_as": "observed_effect"},
+        {"offset": "100"},
+    ):
         hidden = outsider.get(_url(theirs, **params))
         absent = outsider.get(_url(nowhere, **params))
         assert hidden.status_code == absent.status_code == 404, params
@@ -746,7 +831,7 @@ def test_a_post_answers_the_first_page_whatever_its_query_string_says():
     client = _client(dep.owner)
     body = {"workflow": "posted", "status": comp.HELD, "observed_at": (timezone.now() - timedelta(minutes=1)).isoformat()}
 
-    posted = client.post(_url(dep, before="not-a-cursor", recorded_as="gate"), body, format="json")
+    posted = client.post(_url(dep, before="not-a-cursor", recorded_as="gate", offset="100"), body, format="json")
 
     assert posted.status_code == 200
     answer = posted.json()

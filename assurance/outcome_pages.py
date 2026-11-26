@@ -45,6 +45,15 @@ recorded as one whose signature no longer checks is among them too, and says so
 itself: its ``evidence_kind`` reads ``attested`` and its ``effect_reading`` is
 null, exactly as on the unfiltered read.
 
+A PARAMETER THIS READ DOES NOT KNOW IS REFUSED (:data:`UNKNOWN_PARAMETER`), by
+name. ``?offset=100`` used to answer the first page and ``?kind=observed_effect``
+every row, and a caller who sent either would believe it had paged or filtered:
+the fault of an empty page that reads as "no more", from the other side. What
+this read knows is ``before``, ``recorded_as`` and what the framework itself read
+on this route before (:func:`read_by_the_framework`): the viewset reads no query
+parameter of its own, declares no filter, search or ordering, and this action
+does not pass through the paginator.
+
 A read. Nothing here writes, and nothing here is on a stop's path.
 """
 
@@ -59,6 +68,8 @@ from django.core import signing
 from django.db import transaction
 from django.db.models import BigIntegerField, Count, F, Q, Subquery, Value
 from django.db.models.functions import Coalesce
+from rest_framework.settings import api_settings
+from rest_framework.versioning import QueryParameterVersioning
 
 from . import composition
 
@@ -70,6 +81,12 @@ RECORDED_AS = "recorded_as"
 #: The refusal codes, each a ``400``.
 BAD_CURSOR = "bad_cursor"
 UNKNOWN_RECORDED_AS = "unknown_recorded_as"
+UNKNOWN_PARAMETER = "unknown_parameter"
+
+#: An unknown parameter's name is the caller's own text: this much of each is said
+#: back, and this many of them. The count of all of them is said whole.
+MAX_NAME_CHARS = 64
+MAX_NAMES = 10
 
 #: The longest cursor this route reads. One it issued is about 160 characters;
 #: anything longer is not one, and is refused before any signature is computed.
@@ -108,9 +125,9 @@ FILTERS: Mapping[str, Callable[[], Q]] = {
 class Refused(ValueError):
     """A request this read cannot answer. ``body`` is the ``400`` it is told."""
 
-    def __init__(self, code: str, error: str):
+    def __init__(self, code: str, error: str, **said):
         self.code = code
-        self.body = {"error": error, "code": code}
+        self.body = {"error": error, "code": code, **said}
         super().__init__(error)
 
 
@@ -186,14 +203,42 @@ def _place(value: str, deployment_uuid: str, recorded_as: str | None) -> tuple[d
         raise _bad_cursor() from None
 
 
-def requested(query_params, deployment) -> Asked:
+def read_by_the_framework(request) -> frozenset[str]:
+    """The query parameters the framework itself reads on this route, and read before
+    this module existed: its choice of renderer (``?format=``, under whatever name
+    the project gives it) and, where versions are told by query parameter, that one.
+    Read from the framework's own configuration, never listed here by hand."""
+    names = set()
+    if api_settings.URL_FORMAT_OVERRIDE:
+        names.add(api_settings.URL_FORMAT_OVERRIDE)
+    scheme = getattr(request, "versioning_scheme", None)
+    if isinstance(scheme, QueryParameterVersioning):
+        names.add(scheme.version_param)
+    return frozenset(names)
+
+
+def requested(query_params, deployment, *, also_read: frozenset[str] = frozenset()) -> Asked:
     """What a GET's query string asks for, or :class:`Refused`.
 
     Called after the deployment is resolved, so a person who cannot see it is
     answered about the deployment (``404``) before anything is said about a cursor.
     A parameter given twice is refused like a wrong one: which of the two was meant
-    is not this read's to guess.
+    is not this read's to guess. A parameter that is neither this read's nor in
+    ``also_read`` (:func:`read_by_the_framework`) is refused first, by name.
     """
+    unknown = sorted(set(query_params) - {BEFORE, RECORDED_AS} - also_read)
+    if unknown:
+        names = [name[:MAX_NAME_CHARS] for name in unknown[:MAX_NAMES]]
+        raise Refused(
+            UNKNOWN_PARAMETER,
+            f"this read takes {BEFORE} and {RECORDED_AS}, and does not know "
+            + ", ".join(repr(name) for name in names)
+            + ("" if len(unknown) <= MAX_NAMES else f" and {len(unknown) - MAX_NAMES} more")
+            + f". The rest of the outcomes are read with {BEFORE}=<the `next` of the answer before>; "
+            "there is no offset and no page number.",
+            parameters=names,
+            unknown_count=len(unknown),
+        )
     recorded_as = None
     if RECORDED_AS in query_params:
         values = query_params.getlist(RECORDED_AS)

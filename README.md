@@ -470,9 +470,11 @@ signature on this read, so a matched row whose signature no longer checks reads
 whatever the filter, and `composition` is of every outcome on every page. A `before`
 that is not a cursor this read issued for this deployment and filter is `400`
 (`bad_cursor`), and any other `recorded_as` is `400` (`unknown_recorded_as`): neither
-is ever answered as an empty page. There is no `?offset=`: a parameter this read does
-not know is ignored, as it always was, and answers the first page. A row reads the same
-on every page. `POST` answers the first page, with the same keys. Without a parameter the
+is ever answered as an empty page. There is no `?offset=` and no `?page=`: a parameter
+this read does not know is `400` (`unknown_parameter`, with the names in `parameters`),
+where it used to be ignored and answer the first page. The one parameter the route read
+before, the framework's `?format=`, is still read. A row reads the same on every page. `POST` answers the first page, with the same keys, and refuses no
+parameter. Without a parameter the
 first page is what it was, with `matching_count` and `next` added.
 
 The Action Gate reads the approval in force itself (authority chain short 3):

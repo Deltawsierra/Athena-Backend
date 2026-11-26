@@ -1899,7 +1899,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         older one a page at a time (:mod:`assurance.outcome_pages`): ``next`` is the
         cursor for the page after this one, ``null`` on the last, and ``?before=`` reads
         it. ``?recorded_as=observed_effect`` reads only the rows recorded as observed
-        effects; ``matching_count`` counts those, ``recorded_count`` every outcome. POST
+        effects; ``matching_count`` counts those, ``recorded_count`` every outcome. Any
+        other parameter (``?offset=``, for one) is a ``400`` that names it. POST
         APPENDS one or more (admin-only — it writes the shared record) and answers the
         first page.
 
@@ -1920,13 +1921,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         deployment = self.get_object()
         # WHICH PAGE, read only once the deployment is resolved: a person who cannot
         # see it is answered 404 about the deployment before anything is said about
-        # a cursor. A cursor or a filter this read does not know is a 400 with a
-        # code, never a page that reads as "no more". Only a GET is asked: a POST
-        # answers the first page, as it always has.
+        # a cursor. A cursor, a filter or a parameter this read does not know is a
+        # 400 with a code, never a page that reads as "no more" and never the first
+        # page again. Only a GET is asked: a POST answers the first page, as it
+        # always has.
         asked = outcome_pages.FIRST_PAGE
         if request.method == "GET":
             try:
-                asked = outcome_pages.requested(request.query_params, deployment)
+                asked = outcome_pages.requested(
+                    request.query_params, deployment, also_read=outcome_pages.read_by_the_framework(request)
+                )
             except outcome_pages.Refused as refused:
                 return Response(refused.body, status=status.HTTP_400_BAD_REQUEST)
         if request.method == "POST":
