@@ -2269,6 +2269,12 @@ COMMANDS: dict[str, str] = {
     # and who acknowledged it (the --by name and the account) and when.
     "acknowledge_worker_reports": "commands: lists or acknowledges the workers' reports; prints ids, states, "
     "host, pid, ages and whole-number counts, and who acknowledged which when",
+    # AB-STOP-STAYS-SERVED: lists the historic failsafe stops that are not in force (a
+    # dry run), and puts in force only those named: prints each stop's engine id,
+    # action, uuid, drafting and readiness times and status, and the uuid of a later
+    # start -- never a command's reason, nonce or signatures.
+    "failsafe_historic_stops": "commands: lists historic failsafe stops, puts in force those named; prints engine "
+    "ids, actions, uuids, times and statuses, never a reason, nonce or signature",
 }
 
 

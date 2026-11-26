@@ -298,6 +298,68 @@ with the stops. Commands past their window are passed over and marked expired,
 at most 200 per poll in one write that never waits for the database's write
 lock, and a write that fails never fails the poll.
 
+**A stop in force keeps being served. A stop now ends only by a signed start.**
+A pause, a stand-down or a terminate that was signed into force is *in force*
+from that moment (the same write that makes it ready says so, with when:
+`ready_at`), and the poll answers it on every poll, whatever its window, for as
+long as it is. It lapsed after `FAILSAFE_COMMAND_TTL_SECONDS` before: ten minutes
+after a stop was signed the poll answered `[]`, and an engine that restarted
+then, or a second engine with the same id, was told nothing. There is no lapse
+now, and nothing but a signature lifts a stop:
+
+- a **pause** is lifted only by a **resume** drafted after it and signed after it;
+- a **stand-down** only by a **release** drafted after it and signed after it;
+- a **terminate** by nothing. Today nothing ends a terminate for an engine id, so
+  a rebuilt engine with the same id is served the old terminate.
+
+The matching is strict, because that never under-holds. Its cost: after a pause,
+a stand-down and a release, the engine runs, but the pause is still in force and
+still answered until a resume is signed -- an engine that restarts comes back
+paused. The state view says so on the pause's row (`in_force`,
+`lifted_only_by`, `in_force_note`). A cancel never ends a stop that was signed
+into force: it is answered 409, saying which start to sign. A window, an expiry
+write and a flood of drafts do not touch it either. If the operators' keys are
+lost, a stand-down in force cannot be released by this plane.
+
+What is answered is the stored row: the nonce, times, reason and signatures the
+operators signed. The plane holds no key and signs nothing. An engine applies a
+pause or a stand-down whatever its window (and rejects one it already applied as
+a replay, as it always did inside the window); it applies a terminate only
+inside its window, so the poll also carries `X-Failsafe-In-Force`, the kinds of
+stop in force on its page, the strongest first (`terminate`, `stand_down`,
+`pause`), for the engine to hold on. A stop a later signed start has lifted is no
+longer answered; the start is, in its place. Cancelling a start that had been
+made ready puts the stops it lifted back in force (`X-Failsafe-Back-In-Force`).
+
+A start is delivered only if it was drafted after, AND signed into force after,
+every stop made ready for its engine. A stand-down drafted first and signed
+last, beside a release drafted after it and signed before it, was answered
+stand-down then release, and the engine ended running.
+
+One command row that cannot be read, or cannot be turned into a command, no
+longer answers the poll 500 (which an engine reads as nothing pending): it is
+left out and counted in `X-Failsafe-Unreadable` (`0` when there was none), every
+readable command is answered, and the state view lists the broken row by its
+uuid, engine and action with `unreadable: true`. A poll whose lanes cannot be
+read at all is still not answered 200.
+
+A stop's draft, signature and readiness land whatever becomes of their audit
+rows: an audit insert that failed rolled the signature back before. A missing
+audit row is logged as an error (`AUDIT ROWS MISSING`), counted, and said in
+`X-Failsafe-Audit-Missed` on that answer and on the state view. A resume or a
+release still fails closed: one whose audit row, or whose lift, cannot be
+written is not made ready (503), and every stop stays in force.
+
+None of this adds a read or a write to drafting, signing or serving a stop.
+
+*Deploy day (migration 0006).* `ready_at` is backfilled from the audit trail. A
+stop that is ready and still inside its window when the migration runs is in
+force (it is being answered anyway). A stop already past its window is **not**
+put in force: its engine may have been restarted to clear it, with no release on
+record. `python manage.py failsafe_historic_stops` lists those per engine, with
+whether the rule would have each in force and why, and changes nothing;
+`--apply --engine <id> --stop <uuid>` puts in force exactly the stops named.
+
 Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
 engagements they created are kept, with the creator unlinked; such an engagement
 is visible to admins only. A contradiction they made on an assurance claim stays

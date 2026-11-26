@@ -16,6 +16,13 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
+
+#: The actions that stop an engine, and what alone lifts each once it is in
+#: force: a pause only by a resume, a stand-down only by a release, and a
+#: terminate by nothing (FailsafeCommand.in_force).
+STOP_ACTIONS = ("pause", "stand_down", "terminate")
+LIFTED_ONLY_BY = {"pause": "resume", "stand_down": "release", "terminate": None}
 
 
 class FailsafeCommand(models.Model):
@@ -72,6 +79,26 @@ class FailsafeCommand(models.Model):
         max_length=32, choices=STATUS_CHOICES, default=STATUS_AWAITING, db_index=True
     )
 
+    #: When enough distinct operators had signed it: set by mark_ready, in the
+    #: one UPDATE that makes the command ready. None for a command never made
+    #: ready. The order commands were SIGNED into force in, which their
+    #: drafting times do not give.
+    ready_at = models.DateTimeField(null=True, blank=True)
+    #: A stop in force: a pause, stand-down or terminate that was made ready
+    #: and that no later start has lifted. Set by mark_ready in that same
+    #: UPDATE, so it cannot fail apart from the stop itself; never typed in.
+    #: Cleared only by the transaction that signs a later resume (for a pause)
+    #: or release (for a stand-down) into force, which names itself in
+    #: ``lifted_by``; nothing clears a terminate's. While it is set the
+    #: command stays ``ready`` and the engine's poll answers it whatever its
+    #: window: no expiry, cancel or supersede touches it (failsafe.views).
+    in_force = models.BooleanField(default=False)
+    #: The uuid of the resume or release that lifted this stop, and when that
+    #: start was made ready. None while in force, and for a command that is
+    #: not a stop.
+    lifted_by = models.UUIDField(null=True, blank=True)
+    lifted_at = models.DateTimeField(null=True, blank=True)
+
     initiator = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -116,27 +143,46 @@ class FailsafeCommand(models.Model):
             # An account's unsigned drafts, newest first: those past the
             # account's limit are superseded by its newest (failsafe.views).
             models.Index(fields=["initiator", "status", "signed", "created_at"], name="fsc_init_st_sig_ct"),
+            # The stops one start lifted: read only when that start is
+            # cancelled, to put them back in force (failsafe.views). Partial,
+            # so a row no start lifted -- every draft -- is not in it.
+            models.Index(fields=["lifted_by"], name="fsc_lifted_by", condition=models.Q(lifted_by__isnull=False)),
         ]
 
     def __str__(self):
         return f"{self.action} {self.engine_id} [{self.status}]"
 
     # ---- transitions (each saves only what it changed) ----
-    def mark_ready(self):
+    def mark_ready(self, at=None):
+        """Ready for the engine, as of ``at`` (now). A stop is in force from
+        this same write: one UPDATE, as it was, carrying two more columns."""
         self.status = self.STATUS_READY
-        self.save(update_fields=["status", "updated_at"])
+        self.ready_at = at or timezone.now()
+        self.in_force = self.action in STOP_ACTIONS
+        self.save(update_fields=["status", "ready_at", "in_force", "updated_at"])
 
+    # A stop in force stays ready: none of the three below moves it, and each
+    # says so (False). It ends only by a signed start (failsafe.views).
     def mark_consumed(self):
+        if self.in_force:
+            return False
         self.status = self.STATUS_CONSUMED
         self.save(update_fields=["status", "updated_at"])
+        return True
 
     def mark_expired(self):
+        if self.in_force:
+            return False
         self.status = self.STATUS_EXPIRED
         self.save(update_fields=["status", "updated_at"])
+        return True
 
     def mark_canceled(self):
+        if self.in_force:
+            return False
         self.status = self.STATUS_CANCELED
         self.save(update_fields=["status", "updated_at"])
+        return True
 
     def distinct_signers(self):
         return sorted({s["key_id"] for s in self.signatures if s.get("key_id")})
@@ -166,13 +212,24 @@ class FailsafeStopMark(models.Model):
     the stop's window. The engine's poll reads one row of it per engine on
     its page, and never delivers a resume or release drafted at or before it:
     delivered after that stop, the start would undo it. One row per engine,
-    whatever the number of stops, starts or consumed history."""
+    whatever the number of stops, starts or consumed history.
+
+    And when a stop was last made ready for the engine (``last_ready_at``):
+    a start made ready at or before that is never delivered either, however
+    late it was drafted. A stand-down drafted first and signed last, beside a
+    release drafted after it and signed before it, was answered stand-down
+    then release, and the engine ended running."""
 
     engine_id = models.CharField(max_length=200, primary_key=True)
     #: The stop's own creation time (FailsafeCommand.created_at).
     created_at = models.DateTimeField()
     stop_uuid = models.UUIDField()
     action = models.CharField(max_length=32)
+    #: When a stop was last MADE READY for this engine (FailsafeCommand.
+    #: ready_at), whichever stop that was: moved in the same UPDATE as the
+    #: rest. The poll never delivers a start made ready at or before it. None
+    #: until a stop is made ready after migration 0006 (or backfilled by it).
+    last_ready_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
@@ -194,6 +251,11 @@ class FailsafeAuditEvent(models.Model):
     EVENT_EXPIRED = "expired"
     EVENT_CANCELED = "canceled"
     EVENT_SUPERSEDED = "superseded"
+    #: A stop in force lifted by a later signed start, which the event names.
+    EVENT_LIFTED = "lifted"
+    #: A stop put (back) in force: its lifting start was cancelled, or the
+    #: owner chose a historic stop (the failsafe_historic_stops command).
+    EVENT_IN_FORCE = "in_force"
     EVENT_CHOICES = (
         (EVENT_DRAFTED, "Drafted"),
         (EVENT_SIGNED, "Signed"),
@@ -204,6 +266,8 @@ class FailsafeAuditEvent(models.Model):
         (EVENT_EXPIRED, "Expired"),
         (EVENT_CANCELED, "Canceled"),
         (EVENT_SUPERSEDED, "Superseded by a newer draft"),
+        (EVENT_LIFTED, "Lifted by a later start"),
+        (EVENT_IN_FORCE, "Put in force"),
     )
 
     id = models.BigAutoField(primary_key=True)

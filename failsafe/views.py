@@ -23,7 +23,7 @@ from contextlib import contextmanager
 
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import Max
+from django.db.models import Case, CharField, DateTimeField, F, Max, Q, UUIDField, Value, When
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -34,7 +34,7 @@ from rest_framework.response import Response
 
 from accounts.permissions import IsAdminOrAnalyst
 
-from .models import FailsafeAuditEvent, FailsafeCommand, FailsafeStopMark
+from .models import LIFTED_ONLY_BY, FailsafeAuditEvent, FailsafeCommand, FailsafeStopMark
 from .serializers import (
     DraftCommandSerializer,
     FailsafeAuditEventSerializer,
@@ -144,14 +144,17 @@ class _Expiry:
     EXPIRE_PER_READ due commands expired in ONE write: those it came across,
     then others found by the index on (status, expires_at). A backlog of any
     size is therefore marked over a few reads, never by one. A write that
-    fails is logged, and the read is answered."""
+    fails is logged, and the read is answered.
+
+    A stop in force is never due: it stays ready and is answered whatever its
+    window, until a later signed start lifts it (FailsafeCommand.in_force)."""
 
     def __init__(self):
         self.now = timezone.now()
         self.pks = {}  # an ordered set: one row can be in more than one list
 
-    def due(self, pk, status_, expires_at):
-        if status_ in _IN_FLIGHT and _due(expires_at, self.now):
+    def due(self, pk, status_, expires_at, in_force=False):
+        if not in_force and status_ in _IN_FLIGHT and _due(expires_at, self.now):
             if len(self.pks) < EXPIRE_PER_READ:
                 self.pks[pk] = None
             return True
@@ -168,7 +171,9 @@ class _Expiry:
                 # its window to take the first few (a temp B-tree), so the
                 # read grew with the backlog it is there to clear.
                 candidates = (
-                    FailsafeCommand.objects.filter(status__in=_IN_FLIGHT, expires_at__lt=self.now.isoformat())
+                    FailsafeCommand.objects.filter(
+                        status__in=_IN_FLIGHT, expires_at__lt=self.now.isoformat(), in_force=False
+                    )
                     .exclude(pk__in=list(self.pks))
                     .order_by()
                     .values_list("pk", "expires_at")[:room]
@@ -177,16 +182,92 @@ class _Expiry:
             if not self.pks:
                 return
             with transaction.atomic():
-                FailsafeCommand.objects.filter(pk__in=list(self.pks), status__in=_IN_FLIGHT).update(
+                FailsafeCommand.objects.filter(pk__in=list(self.pks), status__in=_IN_FLIGHT, in_force=False).update(
                     status=FailsafeCommand.STATUS_EXPIRED, updated_at=self.now
                 )
         except Exception:  # noqa: BLE001 - a failed read or write must not fail a stop-lane read
             logger.exception("could not mark %d failsafe commands expired", len(self.pks))
 
 
+#: After this many rows in a row that cannot be read one by one, the rest of a
+#: read's rows are not tried: each is unreadable, by its key alone.
+UNREADABLE_IN_A_ROW = 8
+
+
+class _Unreadable:
+    """A command row that could not be read whole: what could still be read of
+    it. Its primary key, and -- read by themselves, without the stored
+    signatures -- its uuid, engine, action, status and creation time, each
+    None when even that failed.
+
+    Never served to an engine and never dropped unsaid: a read counts it
+    (X-Failsafe-Unreadable), the console's reads name it, and every readable
+    row beside it is answered as ever. One ready row a read could not turn
+    into a command used to answer the whole poll 500, and a readable ready
+    stand-down of the same engine was lost with it."""
+
+    in_force = False
+    expires_at = None
+    ready_at = None
+    lifted_by = None
+    lifted_at = None
+
+    def __init__(self, pk, why):
+        self.pk, self.why = pk, why
+        self.uuid = self.engine_id = self.action = self.created_at = None
+        self.status = ""
+
+    @classmethod
+    def of(cls, pk, exc, read=True):
+        row = cls(pk, type(exc).__name__)
+        if read:
+            try:
+                found = (
+                    FailsafeCommand.objects.filter(pk=pk)
+                    .order_by()
+                    .values_list("uuid", "engine_id", "action", "status", "created_at")
+                    .first()
+                )
+            except Exception:  # noqa: BLE001 - what cannot be read is None, never a failed read
+                found = None
+            if found is not None:
+                row.uuid, row.engine_id, row.action, row.status, row.created_at = found
+        return row
+
+
+def _named(command, why):
+    """An unreadable row as a console read names it."""
+    return {
+        "uuid": None if getattr(command, "uuid", None) is None else str(command.uuid),
+        "engine_id": getattr(command, "engine_id", None),
+        "action": getattr(command, "action", None),
+        "status": getattr(command, "status", None) or None,
+        "unreadable": True,
+        "why": f"this command's stored row could not be read ({why}); it is not served to its engine",
+    }
+
+
 def _fetch(pks):
-    """The commands with these primary keys, in this order: one read."""
-    rows = FailsafeCommand.objects.order_by().in_bulk(pks)
+    """The commands with these primary keys, in this order: one read. When
+    that read fails, each row by itself: one that still cannot be read is an
+    _Unreadable, and the others are read as ever."""
+    try:
+        rows = FailsafeCommand.objects.order_by().in_bulk(pks)
+    except Exception:  # noqa: BLE001 - one row that cannot be read must not take the others with it
+        logger.exception("could not read %d failsafe commands in one read; reading them one by one", len(pks))
+        rows, failed = {}, 0
+        for pk in pks:
+            if failed >= UNREADABLE_IN_A_ROW:
+                rows[pk] = _Unreadable.of(pk, RuntimeError("not tried"), read=False)
+                continue
+            try:
+                rows[pk] = FailsafeCommand.objects.order_by().get(pk=pk)
+                failed = 0
+            except FailsafeCommand.DoesNotExist:
+                continue
+            except Exception as exc:  # noqa: BLE001 - counted and named, never raised
+                rows[pk] = _Unreadable.of(pk, exc)
+                failed += 1
     return [rows[pk] for pk in pks if pk in rows]
 
 
@@ -205,7 +286,7 @@ def _newest(qs, parts, limit, expiry, in_flight_only):
     keys.sort(key=lambda key: key[1], reverse=True)
     out = []
     for command in _fetch([pk for pk, _created in keys[:limit]]):
-        if expiry.due(command.pk, command.status, command.expires_at):
+        if expiry.due(command.pk, command.status, command.expires_at, command.in_force):
             if in_flight_only:
                 continue
             command.status = FailsafeCommand.STATUS_EXPIRED
@@ -256,7 +337,7 @@ def _lane(qs, tiers, limit, after, expiry):
     the lane's order, and whether more remain past them. A command in flight
     past its window is marked expired and passed over (command None), so a
     page is never held on it; one gone since its key was read is passed over
-    too."""
+    too. A stop in force is never past its window (_Expiry)."""
     keys = _lane_keys(qs, tiers, limit, after)
     more = len(keys) > limit
     keys = keys[:limit]
@@ -264,7 +345,7 @@ def _lane(qs, tiers, limit, after, expiry):
     entries = []
     for key in keys:
         command = rows.get(key[2])
-        if command is not None and expiry.due(command.pk, command.status, command.expires_at):
+        if command is not None and expiry.due(command.pk, command.status, command.expires_at, command.in_force):
             command = None
         entries.append((key, command))
     return entries, more
@@ -358,11 +439,18 @@ class _Page:
     says about it: in the state read's body, and in both reads' X-Failsafe-More
     header."""
 
-    def __init__(self, whole=None, row=None):
+    def __init__(self, whole=None, row=None, names_unreadable=True):
         self.whole = self.left = stop_lane_read_bytes() if whole is None else whole
-        #: A command as this page lists it (take_lane): the console's row, or
-        #: the engine's command document (pending).
-        self._row = row or (lambda command: FailsafeCommandSerializer(command).data)
+        #: A command as this page lists it: the console's row, or the engine's
+        #: command document (pending).
+        self._row = row or _console_row
+        #: Whether a row that cannot be read is listed by what could be read
+        #: of it (the console's reads) or only counted (the engine's poll,
+        #: whose answer holds commands and nothing else).
+        self.names_unreadable = names_unreadable
+        #: The rows this page could not read or turn into a row, as _named, by
+        #: primary key: a row two of a read's lists hold is one row.
+        self.unreadable = {}
         self.more = False
         #: The uuid of a command passed over because it alone is larger than a
         #: whole page (take_lane), or None.
@@ -375,12 +463,30 @@ class _Page:
     def _size(row):
         return len(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) + 1
 
+    def _read(self, command):
+        """``command`` as this page lists it, or None: it could not be read,
+        and is noted in ``unreadable``. Never raises."""
+        if isinstance(command, _Unreadable):
+            self.unreadable[command.pk] = _named(command, command.why)
+            return None
+        try:
+            return self._row(command)
+        except Exception as exc:  # noqa: BLE001 - one row must not fail the read of the others
+            logger.exception("failsafe command %s could not be listed; the rest of the read is answered", command.pk)
+            self.unreadable[command.pk] = _named(command, type(exc).__name__)
+            return None
+
     def take(self, commands):
         out = []
         if self.left <= 0:
             self.more = self.more or bool(commands)
             return out
-        for row in FailsafeCommandSerializer(commands, many=True).data:
+        for command in commands:
+            row = self._read(command)
+            if row is None:
+                if not self.names_unreadable:
+                    continue
+                row = self.unreadable[command.pk]
             size = self._size(row)
             if size > self.left:
                 self.left = 0
@@ -406,10 +512,15 @@ class _Page:
             if self.left <= 0:
                 self.more = True
                 return out, last, False
-            row = self._row(command)
+            row = self._read(command)
+            if row is None:
+                if not self.names_unreadable:
+                    last = key
+                    continue
+                row = self.unreadable[command.pk]
             size = self._size(row)
             if size > self.whole:
-                self.too_large, self.left, self.more = str(command.uuid), 0, True
+                self.too_large, self.left, self.more = str(getattr(command, "uuid", None)), 0, True
                 return out, key, key == entries[-1][0]
             if size > self.left:
                 self.left, self.more = 0, True
@@ -533,19 +644,124 @@ def _read_kind(request, view):
     return (*kind, cursor) if cursor else kind
 
 
-def _audit(command, event, request, **detail):
-    FailsafeAuditEvent.objects.create(
-        command=command,
+#: What an in-force stop's row says of itself in the console's reads, by action.
+IN_FORCE_NOTES = {
+    "pause": (
+        "In force: answered to its engine on every poll, whatever its window, until a resume drafted and "
+        "signed after it. Nothing else ends it: no window, no cancel, and no release -- after a pause, a "
+        "stand-down and a release, this pause is still answered until a resume is signed."
+    ),
+    "stand_down": (
+        "In force: answered to its engine on every poll, whatever its window, until a release drafted and "
+        "signed after it. Nothing else ends it: no window, no cancel, and no resume."
+    ),
+    "terminate": (
+        "In force: answered to its engine on every poll, whatever its window. Nothing ends a terminate. An "
+        "engine applies one only inside its window; after it, the engine is told one is in force "
+        "(X-Failsafe-In-Force)."
+    ),
+}
+
+#: One serializer for every row a read lists (what a ListSerializer does with
+#: its child): building one per row copied its fields per row.
+_ROW = FailsafeCommandSerializer()
+
+
+def _console_row(command):
+    """A command as the console's reads list it. A stop in force says so, and
+    what alone lifts it; every other row is as it always was."""
+    row = _ROW.to_representation(command)
+    if command.in_force:
+        row["in_force"] = True
+        row["ready_at"] = None if command.ready_at is None else command.ready_at.isoformat()
+        row["lifted_only_by"] = LIFTED_ONLY_BY.get(command.action)
+        row["in_force_note"] = IN_FORCE_NOTES.get(command.action, "")
+    elif command.lifted_at is not None:
+        row["lifted_by"] = None if command.lifted_by is None else str(command.lifted_by)
+        row["lifted_at"] = command.lifted_at.isoformat()
+    return row
+
+
+def _event(command, event, request, **detail):
+    """An audit event for ``command`` (a row, or its primary key), not yet written."""
+    return FailsafeAuditEvent(
+        **({"command": command} if isinstance(command, FailsafeCommand) else {"command_id": command}),
         event=event,
         actor=request.user if request.user.is_authenticated else None,
         detail={**getattr(request, "audit_metadata", {}), **detail},
     )
 
 
+def _audit(command, event, request, **detail):
+    _event(command, event, request, **detail).save(force_insert=True)
+
+
+class _Count:
+    """A count kept for the life of this process."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._n = 0
+
+    def add(self, n):
+        with self._lock:
+            self._n += n
+
+    @property
+    def value(self):
+        return self._n
+
+
+#: The audit rows of stops this process could not write (_audit_a_stop).
+AUDIT_ROWS_MISSED = _Count()
+#: The header a stop's answer carries when an audit row of it could not be
+#: written: how many. The state read carries this process's count so far.
+AUDIT_MISSED_HEADER = "X-Failsafe-Audit-Missed"
+
+
+def _audit_a_stop(events, one_insert=False):
+    """Write a stop's audit rows; never raise. Returns how many were missed.
+    Each row is its own INSERT, as it was, unless ``one_insert`` (a draft's
+    rows, which were one INSERT before too).
+
+    A stop's signature and its readiness were written in one transaction with
+    their audit rows, with nothing around the inserts: an audit insert that
+    failed rolled the signature back and answered 500 -- a failed write
+    holding back a stop. The rows are still written with the stop, in its
+    transaction, but in a savepoint of their own: a failure rolls back the
+    audit rows alone. What is missing is never silent: it is logged as an
+    error naming each event and command, counted (AUDIT_ROWS_MISSED), and
+    said on the answer (AUDIT_MISSED_HEADER)."""
+    try:
+        with transaction.atomic():
+            if one_insert:
+                FailsafeAuditEvent.objects.bulk_create(events)
+            else:
+                for event in events:
+                    event.save(force_insert=True)
+        return 0
+    except Exception:  # noqa: BLE001 - a stop never fails on its audit rows
+        AUDIT_ROWS_MISSED.add(len(events))
+        logger.exception(
+            "AUDIT ROWS MISSING: %d failsafe audit rows could not be written and the stop stands: %s",
+            len(events),
+            ", ".join(f"{event.event} of command {event.command_id}" for event in events),
+        )
+        return len(events)
+
+
+def _saying(response, missed):
+    """``response``, saying how many audit rows of this stop are missing."""
+    if missed:
+        response[AUDIT_MISSED_HEADER] = str(missed)
+    return response
+
+
 def _expire_if_due(command, now=None):
-    """Lazily flip a past-its-window command to expired. Returns True if expired."""
+    """Lazily flip a past-its-window command to expired. Returns True if
+    expired. A stop in force is never expired (FailsafeCommand.in_force)."""
     now = now or timezone.now()
-    if command.status in _IN_FLIGHT and _due(command.expires_at, now):
+    if not command.in_force and command.status in _IN_FLIGHT and _due(command.expires_at, now):
         command.mark_expired()
         return True
     return False
@@ -565,10 +781,10 @@ def commands(request):
             read = _Read(request, "commands")
         except _BadCursor as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        rows, more, following, too_large = _SHARED_READS.read(
+        rows, more, following, too_large, unreadable = _SHARED_READS.read(
             _read_kind(request, "commands"), lambda: _list(request, read)
         )
-        return Response(rows, headers=_page_headers(more, following, too_large))
+        return Response(rows, headers=_page_headers(more, following, too_large, unreadable))
 
     serializer = DraftCommandSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -701,8 +917,10 @@ def _stop_draft(request, action, engine_id, reason, ttl):
         )
         for pk in superseded
     ]
-    FailsafeAuditEvent.objects.bulk_create(events)
-    return _drafted(command, command.as_command_dict(), status.HTTP_201_CREATED)
+    # The draft is made: an audit row that cannot be written never refuses it.
+    return _saying(
+        _drafted(command, command.as_command_dict(), status.HTTP_201_CREATED), _audit_a_stop(events, one_insert=True)
+    )
 
 
 def _insert_draft(request, action, engine_id, reason, ttl):
@@ -924,12 +1142,27 @@ def _list(request, read):
     lanes, following = read.page(expiry, page)
     expiry.mark()
     rows = [row for name, _tiers, _limit in read.lanes for row in lanes.get(name, [])]
-    return rows, following is not None, following, page.too_large
+    return rows, following is not None, following, page.too_large, len(page.unreadable)
 
 
-def _page_headers(more, following, too_large):
+#: The header every stop-lane read and the engine's poll carry: how many
+#: command rows the read came across that it could not read or turn into a
+#: row. "0" when there were none. Such a row is not in the engine's answer;
+#: every readable one is. An engine reads more than 0 as "not heard clean".
+UNREADABLE_HEADER = "X-Failsafe-Unreadable"
+#: The header the engine's poll carries when its page came across a stop in
+#: force: the kinds in force there, the strongest first ("terminate",
+#: "stand_down", "pause"). An engine applies a terminate only inside its
+#: window, so past it this header is how the engine is told one is in force.
+#: It names a stop in force whose row could not be turned into a command too
+#: (X-Failsafe-Unreadable counts that one): in force, and not in the answer.
+IN_FORCE_HEADER = "X-Failsafe-In-Force"
+
+
+def _page_headers(more, following, too_large, unreadable=0):
     return {
         MORE_HEADER: "true" if more else "false",
+        UNREADABLE_HEADER: str(unreadable),
         **({NEXT_HEADER: following} if following else {}),
         **({TOO_LARGE_HEADER: too_large} if too_large else {}),
     }
@@ -944,7 +1177,7 @@ def command_detail(request, cmd_uuid):
         # The service token reads a stop command in flight and its signing
         # bytes; nothing else, and no resume's or release's bytes.
         raise Http404
-    body = FailsafeCommandSerializer(command).data
+    body = _console_row(command)
     body["signing_bytes"] = signing_bytes_hex(command.as_command_dict())
     return Response(body)
 
@@ -1004,47 +1237,181 @@ def submit_signature(request, cmd_uuid):
     # transaction takes SQLite's write lock at its start (IMMEDIATE,
     # config.settings) and the row's lock elsewhere (select_for_update); the
     # row is read again inside it and everything is judged on that.
-    with transaction.atomic():
-        command = FailsafeCommand.objects.select_for_update().filter(pk=command.pk).first()
-        if command is None:
-            raise Http404
-        _expire_if_due(command)
-        if not _signable(command):
-            return Response(
-                {"detail": f"command is {command.status}; not accepting signatures"},
-                status=status.HTTP_409_CONFLICT,
-            )
-        if key_id in command.distinct_signers():
-            return Response(
-                {"detail": f"{key_id} has already signed"}, status=status.HTTP_409_CONFLICT
-            )
+    #
+    # A stop gains nothing here. Its readiness is the one UPDATE it was, now
+    # also saying when (ready_at) and that it is in force (mark_ready); its
+    # mark is the one UPDATE it was; and its audit rows are the inserts they
+    # were, in a savepoint, and never fail the signature (_audit_a_stop). Everything a
+    # START needs beyond that -- the read of its engine's stops in force and
+    # the write that lifts them -- is on the start's path only, and a start
+    # that cannot be made ready with its lift is not made ready at all.
+    missed = 0
+    try:
+        with transaction.atomic():
+            command = FailsafeCommand.objects.select_for_update().filter(pk=command.pk).first()
+            if command is None:
+                raise Http404
+            _expire_if_due(command)
+            if not _signable(command):
+                return Response(
+                    {"detail": f"command is {command.status}; not accepting signatures"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if key_id in command.distinct_signers():
+                return Response(
+                    {"detail": f"{key_id} has already signed"}, status=status.HTTP_409_CONFLICT
+                )
 
-        # A superseded but unsigned stop, validly signed, is revived here: it
-        # returns to awaiting a signature and takes this one, so a count never
-        # makes a real pending stop unsignable (round 5, F2, SAFETY). Now that
-        # it carries a signature it is never superseded again.
-        revived = command.status == FailsafeCommand.STATUS_SUPERSEDED
-        if revived:
-            command.status = FailsafeCommand.STATUS_AWAITING
-        command.signatures.append({
-            "key_id": key_id,
-            "sig": sig,
-            "submitted_by": request.user.username,
-            "submitted_at": timezone.now().isoformat(),
-        })
-        command.signed = True
-        command.save(update_fields=["signatures", "signed", "status", "updated_at"])
-        _audit(command, FailsafeAuditEvent.EVENT_SIGNED, request, key_id=key_id,
-               **({"revived": True} if revived else {}))
+            # A superseded but unsigned stop, validly signed, is revived here: it
+            # returns to awaiting a signature and takes this one, so a count never
+            # makes a real pending stop unsignable (round 5, F2, SAFETY). Now that
+            # it carries a signature it is never superseded again.
+            revived = command.status == FailsafeCommand.STATUS_SUPERSEDED
+            if revived:
+                command.status = FailsafeCommand.STATUS_AWAITING
+            command.signatures.append({
+                "key_id": key_id,
+                "sig": sig,
+                "submitted_by": request.user.username,
+                "submitted_at": timezone.now().isoformat(),
+            })
+            command.signed = True
+            command.save(update_fields=["signatures", "signed", "status", "updated_at"])
+            is_stop = command.action in STOP_ACTIONS
+            signed_ = _event(command, FailsafeAuditEvent.EVENT_SIGNED, request, key_id=key_id,
+                             **({"revived": True} if revived else {}))
+            events = [signed_]
+            if not is_stop:
+                signed_.save(force_insert=True)
 
-        valid = distinct_valid_signers(command.as_command_dict(), command.signatures, keyring)
-        if len(valid) >= command.required_signatures:
-            command.mark_ready()
-            _mark_stop_made_ready(command)
-            _audit(command, FailsafeAuditEvent.EVENT_READY, request,
-                   signers=sorted(valid))
+            valid = distinct_valid_signers(command.as_command_dict(), command.signatures, keyring)
+            if len(valid) >= command.required_signatures:
+                if is_stop:
+                    command.mark_ready()
+                    _mark_stop_made_ready(command)
+                    events.append(_event(command, FailsafeAuditEvent.EVENT_READY, request, signers=sorted(valid)))
+                else:
+                    try:
+                        lifted, lifts_nothing = _make_start_ready(command)
+                        for event in (
+                            _event(command, FailsafeAuditEvent.EVENT_READY, request, signers=sorted(valid),
+                                   lifted=[str(stop_uuid) for _pk, stop_uuid in lifted],
+                                   **({"lifts_nothing": lifts_nothing} if lifts_nothing else {})),
+                            *[
+                                _event(pk, FailsafeAuditEvent.EVENT_LIFTED, request, by=str(command.uuid),
+                                       by_action=command.action)
+                                for pk, _stop_uuid in lifted
+                            ],
+                        ):
+                            event.save(force_insert=True)
+                    except Exception as exc:
+                        raise _StartNotMadeReady from exc
+            if is_stop:
+                missed = _audit_a_stop(events)
+    except _StartNotMadeReady:
+        logger.exception("the %s %s was not made ready: what it lifts could not be read or written",
+                         command.action, command.uuid)
+        return Response(
+            {"detail": f"Held, not done: this {command.action} was not made ready, because the stops it would "
+                       "lift could not be read or recorded. Every stop in force stays in force. Sign it again."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
-    return Response(FailsafeCommandSerializer(command).data)
+    return _saying(Response(_console_row(command)), missed)
+
+
+class _StartNotMadeReady(Exception):
+    """A resume or release whose readiness could not be written whole: its
+    transaction is rolled back, signature and all (submit_signature)."""
+
+
+#: The stop each start lifts, and no other (LIFTED_ONLY_BY, the other way round).
+_LIFTS = {start: stop for stop, start in LIFTED_ONLY_BY.items() if start}
+
+
+def _make_start_ready(start):
+    """Make the resume or release ``start`` ready, and lift what it lifts:
+    (the stops lifted, as (pk, uuid); why it lifts nothing, or "").
+
+    Called in the transaction that signs it into force, and raises on any
+    failure: that transaction is then rolled back, so a start is never ready
+    with its lift unwritten. One read of its engine's mark, one of its
+    engine's stops in force (a few rows, by fsc_eng_st_ct), its own UPDATE as
+    before, and one UPDATE of the stops it lifts.
+
+    What it lifts: the stops of its own kind -- a resume lifts pauses, a
+    release lifts stand-downs, and nothing lifts a terminate -- in force for
+    its engine and drafted before it. Every stop in force was made ready
+    before this moment, so it is later than each in both orders. A stand-down
+    is not lifted by a resume, nor a pause by a release: after a pause, a
+    stand-down and a release, the pause is still in force until a resume is
+    signed. That never under-holds.
+
+    It lifts nothing when the poll will never deliver it (_PollRead._held):
+    its engine has no mark, or a stop made ready for its engine -- the mark,
+    or one in force -- was drafted at or after it.
+
+    ``ready_at`` is strictly after the engine's last stop made ready, even on
+    a clock that ties, so a start signed after a stop is never read as
+    signed with it."""
+    mark = FailsafeStopMark.objects.filter(engine_id=start.engine_id).first()
+    in_force = list(
+        FailsafeCommand.objects.filter(engine_id=start.engine_id, status=_READY, in_force=True)
+        .order_by("-created_at")
+        .values_list("pk", "uuid", "action", "created_at", "ready_at")[:POLL_STOP_LIMIT]
+    )
+    at = timezone.now()
+    last = max(
+        [mark.last_ready_at] * (mark is not None and mark.last_ready_at is not None)
+        + [ready for *_rest, ready in in_force if ready is not None],
+        default=None,
+    )
+    if last is not None and at <= last:
+        at = last + timezone.timedelta(microseconds=1)
+    start.mark_ready(at=at)
+    if mark is None:
+        return [], "no stop was ever made ready for its engine, so the poll holds every start of it back"
+    newest = max([mark.created_at] + [created for _pk, _uuid, _action, created, _ready in in_force])
+    if start.created_at <= newest:
+        return [], "it was drafted at or before a stop made ready for its engine, so the poll never delivers it"
+    # Every stop in force was drafted before it (the check above) and made
+    # ready before it (now): it lifts those of its own kind, and no other.
+    lifted = [
+        (pk, stop_uuid) for pk, stop_uuid, action, _created, _ready in in_force if action == _LIFTS[start.action]
+    ]
+    if lifted:
+        FailsafeCommand.objects.filter(pk__in=[pk for pk, _uuid in lifted], in_force=True).update(
+            in_force=False, lifted_by=start.uuid, lifted_at=at, updated_at=at
+        )
+    return lifted, ""
+
+
+def _put_back_in_force(start):
+    """Put back in force the stops the cancelled start ``start`` lifted: their
+    uuids, or None when that could not be done (logged, and said).
+
+    A start that was made ready lifted its stops then. Cancelled, it is no
+    longer delivered, so an engine that had not heard it stays stopped -- and
+    the plane must go on answering the stop. One read by fsc_lifted_by and,
+    when it lifted any, one write, after the cancel itself is written: it
+    never fails or delays the cancel."""
+    try:
+        with transaction.atomic():
+            stops = list(FailsafeCommand.objects.filter(lifted_by=start.uuid).order_by().values_list("pk", "uuid"))
+            if stops:
+                FailsafeCommand.objects.filter(pk__in=[pk for pk, _uuid in stops]).update(
+                    in_force=True, status=_READY, lifted_by=None, lifted_at=None, updated_at=timezone.now()
+                )
+        return [str(stop_uuid) for _pk, stop_uuid in stops]
+    except Exception:  # noqa: BLE001 - the cancel stands; what could not be put back is said
+        logger.exception("could not put back in force the stops the cancelled %s %s lifted", start.action, start.uuid)
+        return None
+
+
+#: The header a cancelled start's answer carries when that start had been made
+#: ready: how many stops it had lifted are back in force, or "unknown" when
+#: they could not be put back (logged as an error).
+BACK_IN_FORCE_HEADER = "X-Failsafe-Back-In-Force"
 
 
 @api_view(["POST"])
@@ -1061,9 +1428,45 @@ def cancel_command(request, cmd_uuid):
             {"detail": "only the initiator or an admin may cancel"},
             status=status.HTTP_403_FORBIDDEN,
         )
+    if command.action in STOP_ACTIONS and (command.in_force or command.status == FailsafeCommand.STATUS_READY):
+        # A stop that was signed into force may be in force on its engine: a
+        # cancel, which needs no operator's key, never ends it. It ended by
+        # one before, for any engine that restarted.
+        only = LIFTED_ONLY_BY.get(command.action)
+        how = (
+            f"Sign a {only} drafted after it: only that ends it."
+            if only
+            else "Nothing ends a terminate: neither a resume nor a release does."
+        )
+        return Response(
+            {"detail": f"this {command.action} was signed into force, and a cancel never ends a stop in force. {how}"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if command.action not in START_ACTIONS:
+        command.mark_canceled()
+        _audit(command, FailsafeAuditEvent.EVENT_CANCELED, request)
+        return Response(_console_row(command))
+    # Cancelling a start keeps an engine stopped (safety.stops): the cancel is
+    # written first, as it was; then the stops that start had lifted, if it
+    # had been made ready, are put back in force; and its audit row never
+    # fails it.
+    was_ready = command.status == FailsafeCommand.STATUS_READY
     command.mark_canceled()
-    _audit(command, FailsafeAuditEvent.EVENT_CANCELED, request)
-    return Response(FailsafeCommandSerializer(command).data)
+    back = _put_back_in_force(command) if was_ready else []
+    missed = _audit_a_stop([
+        _event(command, FailsafeAuditEvent.EVENT_CANCELED, request,
+               **({"back_in_force": back} if back else {}),
+               **({"back_in_force_failed": True} if back is None else {})),
+        *[
+            _event(None, FailsafeAuditEvent.EVENT_IN_FORCE, request, stop=stop_uuid,
+                   why=f"the {command.action} {command.uuid} that lifted it was cancelled")
+            for stop_uuid in back or []
+        ],
+    ])
+    response = _saying(Response(_console_row(command)), missed)
+    if was_ready:
+        response[BACK_IN_FORCE_HEADER] = "unknown" if back is None else str(len(back))
+    return response
 
 
 #: At most this many reads of the engine's live state run at once. A read the
@@ -1158,16 +1561,21 @@ def state(request):
         read = _Read(request, "state")
     except _BadCursor as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-    commands_, too_large = _SHARED_READS.read(_read_kind(request, "state"), lambda: _in_flight(request, read))
+    commands_, too_large, unreadable = _SHARED_READS.read(
+        _read_kind(request, "state"), lambda: _in_flight(request, read)
+    )
     engine_state, engine_state_available = _engine_live_state()
-    return Response(
-        {
-            "engine_id": request.query_params.get("engine_id"),
-            "engine_state": engine_state,
-            "engine_state_available": engine_state_available,
-            **commands_,
-        },
-        headers=_page_headers(commands_["more"], commands_["next"], too_large),
+    return _saying(
+        Response(
+            {
+                "engine_id": request.query_params.get("engine_id"),
+                "engine_state": engine_state,
+                "engine_state_available": engine_state_available,
+                **commands_,
+            },
+            headers=_page_headers(commands_["more"], commands_["next"], too_large, unreadable),
+        ),
+        AUDIT_ROWS_MISSED.value,
     )
 
 
@@ -1190,7 +1598,7 @@ def _in_flight(request, read):
         "recent": recent,
         "more": following is not None,
         "next": following,
-    }, page.too_large
+    }, page.too_large, len(page.unreadable)
 
 
 @api_view(["GET"])
@@ -1262,7 +1670,32 @@ def pending(request):
     which ``cursor`` reads the rest (the engine's client reads the first page
     only, and every first page carries the stops). Commands past their window
     are passed over and marked expired, at most EXPIRE_PER_READ in one write
-    that never fails the poll (_Expiry): it wrote each one, one by one."""
+    that never fails the poll (_Expiry): it wrote each one, one by one.
+
+    A stop in force is answered on every poll, however old (AB-STOP-STAYS-
+    SERVED). A stop past its window was passed over, so ten minutes after a
+    pause, a stand-down or a terminate was signed the poll answered ``[]``:
+    an engine that restarted then, or a second engine with the same id, was
+    told nothing. A stop made ready is in force until a later signed start
+    lifts it -- a resume lifts a pause, a release a stand-down, nothing a
+    terminate -- and while it is, it stays ready and is never past its
+    window. It is answered as the row stores it: the nonce, times, reason and
+    signatures the operators signed, which the engine verifies as ever. The
+    engine applies a pause or a stand-down whatever its window, and rejects
+    one it already applied as a replay; it applies a terminate only inside
+    its window, so X-Failsafe-In-Force names the kinds in force in the answer
+    ("terminate" among them) for the engine to hold on. A stop a later signed
+    start has lifted is no longer answered, inside its window or out: the
+    start is answered in its place (_PollRead.page).
+
+    A row that cannot be read or turned into a command is left out and
+    counted in X-Failsafe-Unreadable; every readable command is answered. It
+    answered the whole poll 500, and the engine reads that as nothing
+    pending. A poll whose lanes cannot be read at all is still not answered
+    200.
+
+    None of this adds a statement to the poll: the same index reads, the
+    same row read, and no write for a stop in force."""
     if not poll_token_ok(request):
         return Response({"detail": "poll token required"}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -1271,7 +1704,7 @@ def pending(request):
     except _BadCursor as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     expiry = _Expiry()
-    page = _Page(POLL_READ_BYTES, FailsafeCommand.as_command_dict)
+    page = _Page(POLL_READ_BYTES, FailsafeCommand.as_command_dict, names_unreadable=False)
     lanes, following = read.page(expiry, page)
     # The poll's only write, after its answer is built, and only when it
     # came across commands past their window: never waiting for the
@@ -1282,7 +1715,19 @@ def pending(request):
     with _not_waiting_for_the_write_lock():
         expiry.mark()
     out = [*lanes.get("p", []), *lanes.get("q", [])]
-    return Response(out, headers=_page_headers(following is not None, following, page.too_large))
+    headers = _page_headers(following is not None, following, page.too_large, len(page.unreadable))
+    in_force = [action for action in POLL_STOP_ORDER if action in read.in_force]
+    if in_force:
+        headers[IN_FORCE_HEADER] = ", ".join(in_force)
+    if page.unreadable:
+        logger.error(
+            "the engine poll left out %d command rows it could not read: %s",
+            len(page.unreadable),
+            ", ".join(
+                f"{row['action']} {row['uuid']} of {row['engine_id']!r}" for row in list(page.unreadable.values())[:20]
+            ),
+        )
+    return Response(out, headers=headers)
 
 
 @contextmanager
@@ -1340,32 +1785,44 @@ _UNREADABLE = object()
 
 def _mark_stop_made_ready(command):
     """Move ``command``'s engine's FailsafeStopMark forward to it, when it is a
-    stop newer than the mark: inside the transaction that signs it into
-    force, one conditional UPDATE by the primary key, and an INSERT the first
-    time. In a savepoint, and never raised: a failure is logged and the
-    signature stands; the poll still holds back older starts by the ready
-    stop itself while it is ready."""
+    stop newer than the mark, and say when a stop was last made ready for the
+    engine (``last_ready_at``), whichever stop that was: inside the
+    transaction that signs it into force, ONE UPDATE by the primary key, and
+    an INSERT the first time. It was a conditional UPDATE, a read of whether
+    the mark existed when that moved nothing, and the INSERT: never more
+    statements now than then. In a savepoint, and never raised: a failure is
+    logged and the signature stands; the poll still holds back older starts
+    by the ready stop itself while it is ready -- and a stop in force stays
+    ready."""
     if command.action not in STOP_ACTIONS:
         return
     try:
         with transaction.atomic():
             fields = {"created_at": command.created_at, "stop_uuid": command.uuid, "action": command.action}
-            moved = FailsafeStopMark.objects.filter(
-                engine_id=command.engine_id, created_at__lt=command.created_at
-            ).update(updated_at=timezone.now(), **fields)
-            if not moved and not FailsafeStopMark.objects.filter(engine_id=command.engine_id).exists():
-                FailsafeStopMark.objects.create(engine_id=command.engine_id, **fields)
+            newer = Q(created_at__lt=command.created_at)
+            types = {"created_at": DateTimeField(), "stop_uuid": UUIDField(), "action": CharField()}
+            said = {} if command.ready_at is None else {"last_ready_at": command.ready_at}
+            moved = FailsafeStopMark.objects.filter(engine_id=command.engine_id).update(
+                updated_at=timezone.now(),
+                **said,
+                **{
+                    name: Case(When(newer, then=Value(value, output_field=types[name])), default=F(name))
+                    for name, value in fields.items()
+                },
+            )
+            if not moved:
+                FailsafeStopMark.objects.create(engine_id=command.engine_id, **fields, **said)
     except Exception:  # noqa: BLE001 - a stop's signature must never fail on its mark
         logger.exception("could not move the stop mark of engine %r to %s", command.engine_id, command.uuid)
 
 
 def _stop_marks(engines):
-    """{engine_id: (created_at, stop uuid, action)} of the marks of
-    ``engines``: one read of their rows by the primary key. _UNREADABLE when
-    the read fails."""
+    """{engine_id: (created_at, stop uuid, action, last_ready_at)} of the marks
+    of ``engines``: one read of their rows by the primary key. _UNREADABLE
+    when the read fails."""
     try:
         return {
-            mark.engine_id: (mark.created_at, str(mark.stop_uuid), mark.action)
+            mark.engine_id: (mark.created_at, str(mark.stop_uuid), mark.action, mark.last_ready_at)
             for mark in FailsafeStopMark.objects.filter(engine_id__in=sorted(engines))
         }
     except Exception:  # noqa: BLE001 - an unreadable mark holds every start back, never a stop
@@ -1374,8 +1831,10 @@ def _stop_marks(engines):
 
 
 def _supersede(held):
-    """Mark the starts ``held`` ({pk: (stop uuid, stop action)}) superseded,
-    each with an audit event naming the stop it was drafted before: one
+    """Mark the starts ``held`` ({pk: (stop uuid, stop action, True when it is
+    held for when it was made ready, not for when it was drafted)})
+    superseded, each with an audit event naming the stop it was drafted or
+    made ready before: one
     UPDATE of at most EXPIRE_PER_READ rows still ready, one read of the rows
     that write changed (its own ``updated_at``, so two reads at once never
     record one twice), and one insert, in one transaction that never waits
@@ -1401,8 +1860,14 @@ def _supersede(held):
                     detail={
                         "by": "state read",
                         "superseded_by": held[pk][0],
-                        "reason": f"drafted at or before the {held[pk][1]} {held[pk][0]}, the newest stop made "
-                                  "ready for its engine: delivered after it, it would undo that stop",
+                        "reason": (
+                            f"made ready at or before a stop was made ready for its engine (its newest stop "
+                            f"drafted is the {held[pk][1]} {held[pk][0]}): delivered after that stop, it would "
+                            "undo it"
+                            if held[pk][2]
+                            else f"drafted at or before the {held[pk][1]} {held[pk][0]}, the newest stop made "
+                                 "ready for its engine: delivered after it, it would undo that stop"
+                        ),
                     },
                 )
                 for pk in mine
@@ -1413,24 +1878,37 @@ def _supersede(held):
 
 def _supersede_listed_starts(rows):
     """The ready resumes and releases a state read listed that the newest stop
-    made ready for their engine (its mark) was drafted at or after:
+    made ready for their engine (its mark) was drafted at or after, or that
+    were made ready at or before a stop was last made ready for it:
     superseded (_supersede). Only by a mark: a start of an engine with none is
     held back by the poll but never marked. At most STATE_LIST_LIMIT rows, by
     their uuid, then their engines' marks by the primary key."""
-    uuids = [row["uuid"] for row in rows if row.get("action") in START_ACTIONS and row.get("status") == _READY]
+    uuids = [
+        row["uuid"]
+        for row in rows
+        if row.get("action") in START_ACTIONS and row.get("status") == _READY and not row.get("unreadable")
+    ]
     if not uuids:
         return
     try:
         starts = list(FailsafeCommand.objects.filter(uuid__in=uuids).order_by().values_list(
-            "pk", "engine_id", "created_at"))
+            "pk", "engine_id", "created_at", "ready_at"))
     except Exception:  # noqa: BLE001 - nothing here may fail the read
         logger.exception("could not read %d listed starts", len(uuids))
         return
-    marks = _stop_marks({engine_id for _pk, engine_id, _created in starts})
+    marks = _stop_marks({engine_id for _pk, engine_id, _created, _ready in starts})
     if marks is _UNREADABLE:
         return
-    _supersede({pk: marks[engine_id][1:] for pk, engine_id, created in starts
-                if engine_id in marks and created <= marks[engine_id][0]})
+    held = {}
+    for pk, engine_id, created, ready in starts:
+        if engine_id not in marks:
+            continue
+        drafted, stop_uuid, action, last_ready = marks[engine_id]
+        if created <= drafted:
+            held[pk] = (stop_uuid, action, False)
+        elif ready is not None and last_ready is not None and ready <= last_ready:
+            held[pk] = (stop_uuid, action, True)
+    _supersede(held)
 
 
 class _PollRead(_Read):
@@ -1482,25 +1960,41 @@ class _PollRead(_Read):
         self.after = self._cursor(request.query_params.get(CURSOR_PARAM) or "")
         #: The starts this read held back (pks).
         self.held = set()
+        #: The kinds of stop in force this page answered.
+        self.in_force = set()
 
     @staticmethod
-    def _held(start, marks, ready_stops):
+    def _held(start, marks, ready_stops, made_ready=None):
         """Whether ``start`` is held back: its engine's mark is missing or
-        unreadable, or the newer of its mark and the newest ready stop of its
-        engine on this page was drafted at or after it."""
+        unreadable; or the newer of its mark and the newest ready stop of its
+        engine on this page was drafted at or after it; or a stop was made
+        ready for its engine -- by its mark, or by a ready stop on this page
+        -- at or after the start was made ready.
+
+        The last is the order the two were SIGNED in. A stand-down drafted
+        first and signed last, beside a release drafted after it and signed
+        before it, was answered stand-down then release: the engine ended
+        running, with a stand-down the operators had just signed. A start or
+        a stop with no ``ready_at`` (made ready before migration 0006 and not
+        backfilled) is judged by its drafting time alone, as before."""
         if marks is _UNREADABLE or start.engine_id not in marks:
             return True
-        newest = marks[start.engine_id][0]
+        newest, _uuid, _action, last = marks[start.engine_id]
         ready = ready_stops.get(start.engine_id)
         if ready is not None and ready > newest:
             newest = ready
-        return start.created_at <= newest
+        if start.created_at <= newest:
+            return True
+        on_page = (made_ready or {}).get(start.engine_id)
+        if on_page is not None and (last is None or on_page > last):
+            last = on_page
+        return start.ready_at is not None and last is not None and start.ready_at <= last
 
     def page(self, expiry, page):
         """This page's rows by lane, and the next page's cursor or None. No
         start is on a page that left a stop for the next one: the starts wait
         for the stops' last page."""
-        rows, continuing, ready_stops = {}, {}, {}
+        rows, continuing, ready_stops, made_ready = {}, {}, {}, {}
         for name, tiers, limit in self.lanes:
             if self.after is not None and name not in self.after:
                 continue  # a lane a page before this one finished
@@ -1511,15 +2005,38 @@ class _PollRead(_Read):
             entries, more = _lane(self.qs, tiers, limit, after, expiry)
             if name == "p":
                 for _key, command in entries:
-                    if command is None:
+                    # A ready stop whose row cannot be read still holds back
+                    # the starts drafted before it, where its engine and its
+                    # creation time could be read.
+                    if command is None or command.engine_id is None or command.created_at is None:
                         continue
                     seen = ready_stops.get(command.engine_id)
                     if seen is None or command.created_at > seen:
                         ready_stops[command.engine_id] = command.created_at
+                    seen = made_ready.get(command.engine_id)
+                    if command.ready_at is not None and (seen is None or command.ready_at > seen):
+                        made_ready[command.engine_id] = command.ready_at
+                    if command.in_force:
+                        self.in_force.add(command.action)
+                # A stop a later signed start has lifted is not answered, even
+                # inside its window: the start is answered in its place. With
+                # the lifted stop answered first, a stand-down that a release
+                # had lifted swallowed a pause still in force (an engine stood
+                # down ignores a pause) and the release then left the engine
+                # running. Without it the engine ends in the stop in force.
+                entries = [
+                    (key, None if command is not None and command.lifted_at is not None and not command.in_force
+                     else command)
+                    for key, command in entries
+                ]
             if name == "q":
-                starts = [command for _key, command in entries if command is not None]
+                starts = [
+                    command for _key, command in entries if command is not None and not isinstance(command, _Unreadable)
+                ]
                 marks = _stop_marks({command.engine_id for command in starts}) if starts else {}
-                self.held = {command.pk for command in starts if self._held(command, marks, ready_stops)}
+                self.held = {
+                    command.pk for command in starts if self._held(command, marks, ready_stops, made_ready)
+                }
                 entries = [(key, None if command is not None and command.pk in self.held else command)
                            for key, command in entries]
             rows[name], last, passed = page.take_lane(entries)
