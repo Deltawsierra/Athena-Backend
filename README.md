@@ -448,6 +448,33 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   trusts.
 - `unknown`: typed in without saying what it rests on.
 
+Every outcome can be read, a page at a time (`assurance/outcome_pages.py`).
+`GET /api/assurance/deployments/<uuid>/chain-outcomes/` answers `outcomes` (at most
+`page_size`, 100), `returned`, `truncated`, `page_size`, `recorded_count`,
+`matching_count`, `next` and `composition`, newest first: by `observed_at`, undated rows
+last, then by `recorded_at`, then by the row's id. `next` is the cursor for the page
+after this one and `null` on the last; `truncated` is true exactly when `next` is a
+cursor. `?before=<next>` reads that page. The cursor names the last row served, not a
+count of rows, so an outcome recorded between two pages moves nothing: no row is served
+twice and none still to come is passed over. The new outcome is read on the page where
+it sorts, and one newer than the cursor's place heads the next read from the first
+page. A cursor is opaque, does not expire, and is good only for the deployment and the
+filter it was issued under. It is signed, not sealed, and holds only what the page
+already served of that row (its two instants and its `uuid`), never a row id. `?recorded_as=observed_effect` reads only the rows recorded
+as observed effects (basis `demonstrated`, observer `achilles-effect`).
+`recorded_as` is what the row was written as, which the database can filter;
+`evidence_kind` and `effect_reading` on each row are what it is now, read from its
+signature on this read, so a matched row whose signature no longer checks reads
+`attested` with `effect_reading: null`. `matching_count` counts what the filter matched
+(with no filter, every outcome); `recorded_count` counts every outcome of the deployment
+whatever the filter, and `composition` is of every outcome on every page. A `before`
+that is not a cursor this read issued for this deployment and filter is `400`
+(`bad_cursor`), and any other `recorded_as` is `400` (`unknown_recorded_as`): neither
+is ever answered as an empty page. There is no `?offset=`: a parameter this read does
+not know is ignored, as it always was, and answers the first page. A row reads the same
+on every page. `POST` answers the first page, with the same keys. Without a parameter the
+first page is what it was, with `matching_count` and `next` added.
+
 The Action Gate reads the approval in force itself (authority chain short 3):
 `GET /api/assurance/deployments/<uuid>/workflows/<slug>/approval-in-force/` with
 `X-Gate-Approval-Token` (`ASSURANCE_GATE_APPROVAL_TOKEN` / `_USER`, a credential of
