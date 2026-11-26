@@ -330,6 +330,11 @@ stop in force on its page, the strongest first (`terminate`, `stand_down`,
 `pause`), for the engine to hold on. A stop a later signed start has lifted is no
 longer answered; the start is, in its place. Cancelling a start that had been
 made ready puts the stops it lifted back in force (`X-Failsafe-Back-In-Force`).
+That makes the plane answer them again; it does not stop an engine that had
+already applied the start: such an engine is running, and while it keeps running
+it rejects the old stop as a replay, so the old stop stops it again only when it
+restarts. The cancel's answer says so (`back_in_force`, `back_in_force_note`):
+to stop that engine now, sign a new pause or stand-down.
 
 A start is delivered only if it was drafted after, AND signed into force after,
 every stop made ready for its engine. A stand-down drafted first and signed

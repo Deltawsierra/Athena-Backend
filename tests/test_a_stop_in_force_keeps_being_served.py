@@ -61,6 +61,11 @@ MASTER = {
     "poll": {"select": 7, "pragma": 3},
 }
 
+#: The data statements cancelling a resume that had lifted one pause made
+#: before its audit event was attached to the pause, and before its answer said
+#: more (025a3cd), measured the same way. Neither adds a statement.
+CANCEL_OF_A_START_MADE_READY = {"select": 3, "update": 2, "insert": 2}
+
 
 @pytest.fixture()
 def keys(settings):
@@ -424,10 +429,101 @@ def test_cancelling_a_start_puts_back_in_force_the_stop_it_lifted(keys, clock, o
     row = _row(pause)
     assert (row.in_force, row.status, row.lifted_by, row.lifted_at) == (True, "ready", None, None)
     assert _nonces() == [pause["nonce"]]
+    # The pause's own audit trail says it was put back, by the cancel of which start.
+    from failsafe.models import FailsafeAuditEvent
+
+    put_back = list(FailsafeAuditEvent.objects.filter(event="in_force"))
+    assert [event.command_id for event in put_back] == [row.pk], "the event is not attached to the stop put back"
+    assert put_back[0].detail["stop"] == pause["uuid"] and resume["uuid"] in put_back[0].detail["why"]
+    assert "was cancelled" in put_back[0].detail["why"]
+    assert "in_force" in [event.event for event in row.audit_events.all()]
+    # The answer says which stops are back, and what that does not do.
+    assert cancel.data["back_in_force"] == [pause["uuid"]], cancel.data.get("back_in_force", "(no such key)")
     # A start never made ready lifted nothing: its cancel reads nothing more and says nothing more.
     unsigned = _draft(operator, "resume")
     plain = operator.post(f"/api/failsafe/commands/{unsigned['uuid']}/cancel/", {}, format="json")
     assert plain.status_code == 200 and BACK_IN_FORCE not in plain
+    assert "back_in_force" not in plain.data and "back_in_force_note" not in plain.data
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+@pytest.mark.parametrize(
+    ("stop", "start", "to_stop_it_now"),
+    [("pause", "resume", "sign a new pause."), ("stand_down", "release", "sign a new stand-down.")],
+)
+def test_the_cancel_of_a_start_made_ready_tells_the_operator_what_stops_the_engine_now(
+    stop, start, to_stop_it_now, keys, clock, operator
+):
+    """The stop is back in force on the plane, and answered. But an engine
+    that had already applied the start is running, and while it keeps running
+    it rejects the old stop as a replay (the core's nonce ledger): the old stop
+    stops it again only when it restarts. The cancel's answer says so, and
+    what does stop it now. Saying it costs no statement."""
+    stopped = _signed(operator, stop, keys)
+    clock(ELEVEN_MINUTES)
+    started = _signed(operator, start, keys)
+    cancel, statements, _ = _statements(
+        lambda: operator.post(f"/api/failsafe/commands/{started['uuid']}/cancel/", {}, format="json"))
+    assert cancel.status_code == 200 and cancel[BACK_IN_FORCE] == "1"
+    assert cancel.data["back_in_force"] == [stopped["uuid"]], cancel.data.get("back_in_force", "(no such key)")
+    note = cancel.data["back_in_force_note"]
+    assert "already applied" in note and "is running" in note and "replay" in note and "only when it restarts" in note
+    assert note.endswith("To stop it now, " + to_stop_it_now), note
+    assert _nonces() == [stopped["nonce"]]
+    for kind in set(statements) | set(CANCEL_OF_A_START_MADE_READY):
+        assert statements.get(kind, 0) <= CANCEL_OF_A_START_MADE_READY.get(kind, 0), statements
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+def test_stops_that_could_not_be_put_back_are_said_as_null_and_the_cancel_stands(keys, clock, operator, monkeypatch):
+    """When the stops a cancelled start had lifted cannot be put back in
+    force, the cancel stands (it was written first), the header says
+    ``unknown``, and the body says ``null``, never an empty list: nothing was
+    put back, and the answer does not read as though nothing needed to be."""
+    from django.db.models import QuerySet
+
+    pause = _signed(operator, "pause", keys)
+    resume = _signed(operator, "resume", keys)
+    real = QuerySet.update
+
+    def no_putting_back(self, **fields):
+        if fields.get("in_force") is True:
+            raise OperationalError("disk I/O error")
+        return real(self, **fields)
+
+    monkeypatch.setattr(QuerySet, "update", no_putting_back)
+    cancel = operator.post(f"/api/failsafe/commands/{resume['uuid']}/cancel/", {}, format="json")
+    monkeypatch.setattr(QuerySet, "update", real)
+    assert cancel.status_code == 200 and cancel.data["status"] == "canceled" and cancel[BACK_IN_FORCE] == "unknown"
+    assert "back_in_force" in cancel.data and cancel.data["back_in_force"] is None, cancel.data
+    note = cancel.data["back_in_force_note"]
+    assert "could not be put back in force" in note and note.endswith("To stop it now, sign a new pause."), note
+    assert not _row(pause).in_force and _row(resume).status == "canceled"
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("rates")
+def test_cancelling_a_stop_a_start_already_lifted_says_it_was_lifted_and_by_which_start(keys, operator):
+    """A pause a resume has lifted is still ``ready`` inside its window, and
+    not in force. Its cancel is refused 409 as before, but not by telling the
+    operator to sign the resume that was already signed: it says the pause was
+    lifted, by which start and when, and that nothing is left to cancel."""
+    pause = _signed(operator, "pause", keys)
+    resume = _signed(operator, "resume", keys)
+    lifted = _row(pause)
+    assert (lifted.status, lifted.in_force, str(lifted.lifted_by)) == ("ready", False, resume["uuid"])
+    cancel = operator.post(f"/api/failsafe/commands/{pause['uuid']}/cancel/", {}, format="json")
+    assert cancel.status_code == 409, (cancel.status_code, cancel.content)
+    said = cancel.data["detail"]
+    assert "was lifted" in said and f"resume {resume['uuid']}" in said and lifted.lifted_at.isoformat() in said, said
+    assert "nothing is left to cancel" in said, said
+    assert "Sign a resume drafted after it" not in said and "a cancel never ends a stop in force" not in said, said
+    after = _row(pause)
+    assert (after.status, after.in_force, after.lifted_by, after.lifted_at) == (
+        "ready", False, lifted.lifted_by, lifted.lifted_at)
+    assert _nonces() == [resume["nonce"]]
 
 
 # --- 3. Nothing on a stop's path gains a write or a read -------------------------------------------

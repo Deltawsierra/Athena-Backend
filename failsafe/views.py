@@ -20,6 +20,7 @@ import re
 import secrets
 import threading
 from contextlib import contextmanager
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import connection, transaction
@@ -1367,7 +1368,7 @@ def _make_start_ready(start):
         default=None,
     )
     if last is not None and at <= last:
-        at = last + timezone.timedelta(microseconds=1)
+        at = last + timedelta(microseconds=1)
     start.mark_ready(at=at)
     if mark is None:
         return [], "no stop was ever made ready for its engine, so the poll holds every start of it back"
@@ -1387,8 +1388,8 @@ def _make_start_ready(start):
 
 
 def _put_back_in_force(start):
-    """Put back in force the stops the cancelled start ``start`` lifted: their
-    uuids, or None when that could not be done (logged, and said).
+    """Put back in force the stops the cancelled start ``start`` lifted: each
+    as (pk, uuid), or None when that could not be done (logged, and said).
 
     A start that was made ready lifted its stops then. Cancelled, it is no
     longer delivered, so an engine that had not heard it stays stopped -- and
@@ -1402,7 +1403,7 @@ def _put_back_in_force(start):
                 FailsafeCommand.objects.filter(pk__in=[pk for pk, _uuid in stops]).update(
                     in_force=True, status=_READY, lifted_by=None, lifted_at=None, updated_at=timezone.now()
                 )
-        return [str(stop_uuid) for _pk, stop_uuid in stops]
+        return [(pk, str(stop_uuid)) for pk, stop_uuid in stops]
     except Exception:  # noqa: BLE001 - the cancel stands; what could not be put back is said
         logger.exception("could not put back in force the stops the cancelled %s %s lifted", start.action, start.uuid)
         return None
@@ -1412,6 +1413,38 @@ def _put_back_in_force(start):
 #: ready: how many stops it had lifted are back in force, or "unknown" when
 #: they could not be put back (logged as an error).
 BACK_IN_FORCE_HEADER = "X-Failsafe-Back-In-Force"
+
+
+def _back_in_force_note(start, back):
+    """What the answer to the cancel of ``start``, a start that had been made
+    ready, tells the operator. ``back`` is the uuids of the stops put back in
+    force, or None when they could not be.
+
+    Putting a stop back in force makes the plane answer it again; it does not
+    stop an engine that is running. An engine that applied the stop and then
+    the start holds the stop's nonce in the core's nonce ledger, and rejects
+    it as a replay for as long as it runs. So the old stop stops such an
+    engine again only when it restarts. What stops it now is a new stop,
+    which nothing here holds back."""
+    stop = _LIFTS[start.action]
+    kind = stop.replace("_", "-")
+    if back is None:
+        what = (
+            f"The stops this {start.action} had lifted could not be put back in force (logged as an error) and "
+            f"are not answered, and an engine that had already applied the {start.action} is running."
+        )
+    elif not back:
+        what = (
+            f"This {start.action} had lifted no stop, so none was put back in force, and an engine that had "
+            f"already applied it is running."
+        )
+    else:
+        what = (
+            f"Every {kind} this {start.action} had lifted is back in force and answered on every poll, but an "
+            f"engine that had already applied the {start.action} is running, and while it keeps running it "
+            f"rejects that old {kind} as a replay: the old {kind} stops it again only when it restarts."
+        )
+    return f"{what} To stop it now, sign a new {kind}."
 
 
 @api_view(["POST"])
@@ -1433,6 +1466,19 @@ def cancel_command(request, cmd_uuid):
         # cancel, which needs no operator's key, never ends it. It ended by
         # one before, for any engine that restarted.
         only = LIFTED_ONLY_BY.get(command.action)
+        if not command.in_force and command.lifted_at is not None:
+            # A start already lifted it: it is ready only until its window
+            # passes, it is not in force and not answered. Telling the
+            # operator to sign the start that was already signed would be wrong.
+            by = f"the {only} {command.lifted_by}" if command.lifted_by else f"a {only} this row does not name"
+            return Response(
+                {"detail": (
+                    f"this {command.action} was signed into force and was lifted by {by} at "
+                    f"{command.lifted_at.isoformat()}: it is no longer in force and no longer answered, so "
+                    f"nothing is left to cancel."
+                )},
+                status=status.HTTP_409_CONFLICT,
+            )
         how = (
             f"Sign a {only} drafted after it: only that ends it."
             if only
@@ -1452,18 +1498,26 @@ def cancel_command(request, cmd_uuid):
     # fails it.
     was_ready = command.status == FailsafeCommand.STATUS_READY
     command.mark_canceled()
-    back = _put_back_in_force(command) if was_ready else []
+    put_back = _put_back_in_force(command) if was_ready else []
+    back = None if put_back is None else [stop_uuid for _pk, stop_uuid in put_back]
+    # Each stop put back has the event on its own audit trail (the row's
+    # primary key, already read: no statement more), naming the cancelled
+    # start and why.
     missed = _audit_a_stop([
         _event(command, FailsafeAuditEvent.EVENT_CANCELED, request,
                **({"back_in_force": back} if back else {}),
                **({"back_in_force_failed": True} if back is None else {})),
         *[
-            _event(None, FailsafeAuditEvent.EVENT_IN_FORCE, request, stop=stop_uuid,
+            _event(pk, FailsafeAuditEvent.EVENT_IN_FORCE, request, stop=stop_uuid,
                    why=f"the {command.action} {command.uuid} that lifted it was cancelled")
-            for stop_uuid in back or []
+            for pk, stop_uuid in put_back or []
         ],
     ])
-    response = _saying(Response(_console_row(command)), missed)
+    body = _console_row(command)
+    if was_ready:
+        body["back_in_force"] = back
+        body["back_in_force_note"] = _back_in_force_note(command, back)
+    response = _saying(Response(body), missed)
     if was_ready:
         response[BACK_IN_FORCE_HEADER] = "unknown" if back is None else str(len(back))
     return response
