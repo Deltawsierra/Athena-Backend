@@ -144,8 +144,18 @@ _FROM_THE_CORE = {
     "EvidenceRefused": lambda core: core.EvidenceRefused,
     # One envelope (bounded by the core) and one document of the largest size the core's
     # field rules allow a version 5 document: both numbers are the core's.
-    "MAX_BODY_BYTES": lambda core: oc.MAX_PAYLOAD_B64 + core.MAX_EVIDENCE_BYTES,
+    "MAX_BODY_BYTES": lambda core: _body_bound(oc.MAX_PAYLOAD_B64, core.MAX_EVIDENCE_BYTES),
 }
+
+#: The intake's bound, one object for each pair of the core's two numbers. The route's 413
+#: reads it, and the Defender gateway holds it (``audit.middleware.DECLARED_BODY_BOUNDS``):
+#: the same object, never a second copy computed beside it. When the core's numbers move,
+#: the bound is a new object, as it was.
+_BODY_BOUNDS: dict[tuple[int, int], int] = {}
+
+
+def _body_bound(envelope: int, evidence: int) -> int:
+    return _BODY_BOUNDS.setdefault((envelope, evidence), envelope + evidence)
 
 
 def __getattr__(name: str):
