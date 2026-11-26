@@ -465,6 +465,11 @@ def test_the_payload_shapes_are_pinned():
         "truncated",
         "page_size",
         "recorded_count",
+        # Every outcome can be read, a page at a time (assurance.outcome_pages): what
+        # the filter matched beside the whole count, and the cursor for the page after
+        # this one (null on the last). Added to this pinned set deliberately.
+        "matching_count",
+        "next",
         "composition",
     }
     assert set(outcome.data["outcomes"][0]) == {

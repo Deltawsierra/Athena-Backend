@@ -124,6 +124,7 @@ from .ripple import assess_ripple
 from .remediation import ContractRequired, IllegalTransition, apply_transition, assign
 from . import incident_scope, recovery_record, repair_contract
 from . import authority_chain_records
+from . import outcome_pages
 from . import closure_evidence as evidence_route
 from . import closure_forward
 from .retest_checks import NotRecorded as CheckNotRecorded
@@ -1894,8 +1895,14 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     def chain_outcomes(self, request, uuid=None):
         """What the deployment's per-workflow assurance chains established.
 
-        GET returns the most recent outcomes beside the live composition. POST
-        APPENDS one or more (admin-only — it writes the shared record).
+        GET returns the most recent outcomes beside the live composition, and every
+        older one a page at a time (:mod:`assurance.outcome_pages`): ``next`` is the
+        cursor for the page after this one, ``null`` on the last, and ``?before=`` reads
+        it. ``?recorded_as=observed_effect`` reads only the rows recorded as observed
+        effects; ``matching_count`` counts those, ``recorded_count`` every outcome. Any
+        other parameter (``?offset=``, for one) is a ``400`` that names it. POST
+        APPENDS one or more (admin-only — it writes the shared record) and answers the
+        first page.
 
         APPEND, NOT REPLACE, and this is the load-bearing difference from the
         approved set above. An outcome is a REPORT at an instant.
@@ -1912,6 +1919,20 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         place the platform stopped noticing shadow workflows.
         """
         deployment = self.get_object()
+        # WHICH PAGE, read only once the deployment is resolved: a person who cannot
+        # see it is answered 404 about the deployment before anything is said about
+        # a cursor. A cursor, a filter or a parameter this read does not know is a
+        # 400 with a code, never a page that reads as "no more" and never the first
+        # page again. Only a GET is asked: a POST answers the first page, as it
+        # always has.
+        asked = outcome_pages.FIRST_PAGE
+        if request.method == "GET":
+            try:
+                asked = outcome_pages.requested(
+                    request.query_params, deployment, also_read=outcome_pages.read_by_the_framework(request)
+                )
+            except outcome_pages.Refused as refused:
+                return Response(refused.body, status=status.HTTP_400_BAD_REQUEST)
         if request.method == "POST":
             _require_admin(request)
             # One outcome or many. A campaign posts a batch; an operator recording
@@ -1951,20 +1972,27 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     for row, route in zip(rows, routes, strict=True)
                 )
                 _refresh_stored_decision(deployment)
-        recorded = deployment.chain_outcomes.all()
-        total = recorded.count()
-        page = list(recorded[: self.CHAIN_OUTCOME_PAGE_SIZE])
+        page = outcome_pages.read(deployment, asked, page_size=self.CHAIN_OUTCOME_PAGE_SIZE)
         return Response(
             {
+                # One serializer and one context for every page, so a row reads the
+                # same on whichever page it falls.
                 "outcomes": WorkflowChainOutcomeSerializer(
-                    page, many=True, context={"deployment_uuid": str(deployment.uuid)}
+                    page.rows, many=True, context={"deployment_uuid": str(deployment.uuid)}
                 ).data,
                 # Returned vs recorded, stated separately and always: `len(outcomes)`
                 # is not the count and must not be usable as one.
-                "returned": len(page),
-                "truncated": len(page) < total,
+                "returned": len(page.rows),
+                # True exactly when a further page exists, which is exactly when
+                # `next` is a cursor.
+                "truncated": page.next is not None,
                 "page_size": self.CHAIN_OUTCOME_PAGE_SIZE,
-                "recorded_count": total,
+                # Every outcome of the deployment, whatever the filter and whichever
+                # the page; `matching_count` is what the filter matched (the same
+                # number with no filter).
+                "recorded_count": page.recorded_count,
+                "matching_count": page.matching_count,
+                "next": page.next,
                 "composition": _composition_payload(deployment),
             }
         )
