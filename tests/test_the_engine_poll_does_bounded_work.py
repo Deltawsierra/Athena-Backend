@@ -50,16 +50,19 @@ PAST = "2000-01-01T00:00:00+00:00"
 def _make(actions, at, engine_id="athena-1", reason="", expires=FAR):
     """Ready commands of these actions, made in this order: the first at
     ``at``, each next one a millisecond later. Creation times are set
-    explicitly, so a clock that ties (Windows) never reorders them."""
+    explicitly, so a clock that ties (Windows) never reorders them; each is
+    signed as issued at its creation time, as make_draft issues a draft the
+    moment before its row is made (the engine, and the plane, order a start
+    after a stop by that signed instant too)."""
     from failsafe.models import FailsafeCommand
 
     made = FailsafeCommand.objects.bulk_create(
         [
             FailsafeCommand(engine_id=engine_id, action=action, nonce=uuid.uuid4().hex,
-                            issued_at="2026-11-03T00:00:00+00:00", expires_at=expires, reason=reason,
+                            issued_at=(at + timedelta(milliseconds=n)).isoformat(), expires_at=expires, reason=reason,
                             status="ready", signed=True, signatures=[{"key_id": "alice", "sig": "00" * 64}],
                             required_signatures=2 if action in ("stand_down", "terminate") else 1)
-            for action in actions
+            for n, action in enumerate(actions)
         ],
         batch_size=500,
     )
