@@ -11,6 +11,7 @@ required for stand-down and terminate.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import itertools
@@ -20,10 +21,11 @@ import re
 import secrets
 import threading
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import DEFAULT_DB_ALIAS, connection, connections, transaction
 from django.db.models import Case, CharField, DateTimeField, F, Max, Q, UUIDField, Value, When
 from django.http import Http404
 from django.shortcuts import get_object_or_404
@@ -147,6 +149,15 @@ class _Expiry:
     size is therefore marked over a few reads, never by one. A write that
     fails is logged, and the read is answered.
 
+    That write is housekeeping, and it never waits for the database's write
+    lock, from any read (AB-STOP-FIXES, D3): refused at once when another
+    connection holds it, it is logged and the next read marks the commands.
+    The state read, where the second operator finds the stand-down to
+    co-sign, and the list waited on it before -- 3.05 s for a 3 s hold, up to
+    busy_timeout -- whenever any command anywhere was past its window. Its
+    PRAGMAs run only when there is something to mark: a read with nothing
+    due makes no statement more.
+
     A stop in force is never due: it stays ready and is answered whatever its
     window, until a later signed start lifts it (FailsafeCommand.in_force)."""
 
@@ -182,7 +193,7 @@ class _Expiry:
                 self.pks.update((pk, None) for pk, end in candidates if _due(end, self.now))
             if not self.pks:
                 return
-            with transaction.atomic():
+            with _not_waiting_for_the_write_lock(), transaction.atomic():
                 FailsafeCommand.objects.filter(pk__in=list(self.pks), status__in=_IN_FLIGHT, in_force=False).update(
                     status=FailsafeCommand.STATUS_EXPIRED, updated_at=self.now
                 )
@@ -698,11 +709,15 @@ def _audit(command, event, request, **detail):
 
 
 class _Count:
-    """A count kept for the life of this process."""
+    """A count kept for the life of this process, and since when it counts
+    (``since``: when this process made it, at its start). It lives in memory
+    only, so a restart begins it again at 0: a reader is told since when, and
+    reads a zero as "none since then", never as "none"."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._n = 0
+        self.since = datetime.now(dt_timezone.utc)
 
     def add(self, n):
         with self._lock:
@@ -716,30 +731,41 @@ class _Count:
 #: The audit rows of stops this process could not write (_audit_a_stop).
 AUDIT_ROWS_MISSED = _Count()
 #: The header a stop's answer carries when an audit row of it could not be
-#: written: how many. The state read carries this process's count so far.
+#: written: how many. The state read always carries this process's count so
+#: far ("0" when none), and AUDIT_MISSED_SINCE_HEADER beside it.
 AUDIT_MISSED_HEADER = "X-Failsafe-Audit-Missed"
+#: The header the state read always carries beside AUDIT_MISSED_HEADER: since
+#: when this process counts (its start, ISO 8601). The count is in memory and a
+#: restart begins it again, so "0" reads "none missed since then".
+AUDIT_MISSED_SINCE_HEADER = "X-Failsafe-Audit-Missed-Since"
 
 
-def _audit_a_stop(events, one_insert=False):
-    """Write a stop's audit rows; never raise. Returns how many were missed.
-    Each row is its own INSERT, as it was, unless ``one_insert`` (a draft's
-    rows, which were one INSERT before too).
+def _audit_a_stop(events, one_insert=False, using=DEFAULT_DB_ALIAS):
+    """Write a stop's audit rows on ``using``; never raise. Returns how many
+    were missed. Each row is its own INSERT, as it was, unless ``one_insert``
+    (a draft's rows, which were one INSERT before too).
 
     A stop's signature and its readiness were written in one transaction with
     their audit rows, with nothing around the inserts: an audit insert that
     failed rolled the signature back and answered 500 -- a failed write
-    holding back a stop. The rows are still written with the stop, in its
-    transaction, but in a savepoint of their own: a failure rolls back the
-    audit rows alone. What is missing is never silent: it is logged as an
-    error naming each event and command, counted (AUDIT_ROWS_MISSED), and
-    said on the answer (AUDIT_MISSED_HEADER)."""
+    holding back a stop. Then a slow one held the stop's commit, and so its
+    serving and its answer (3.04 s and 3.02 s for a 3 s hold). A stop's rows
+    are written now once the stop has committed, never waiting for the
+    database's write lock and adding no statement to the request's
+    connection (_housekeeping_connection, at each caller), in a transaction
+    of their own: a failure rolls back the audit rows alone.
+    What is missing is never silent: it is logged as an error naming each
+    event and command, counted (AUDIT_ROWS_MISSED), and said on the answer
+    (AUDIT_MISSED_HEADER). A process that ends between the stop's commit and
+    this insert loses the rows uncounted; the stop's row still holds its
+    signers, their times and ``ready_at``."""
     try:
-        with transaction.atomic():
+        with transaction.atomic(using=using):
             if one_insert:
-                FailsafeAuditEvent.objects.bulk_create(events)
+                FailsafeAuditEvent.objects.db_manager(using).bulk_create(events)
             else:
                 for event in events:
-                    event.save(force_insert=True)
+                    event.save(force_insert=True, using=using)
         return 0
     except Exception:  # noqa: BLE001 - a stop never fails on its audit rows
         AUDIT_ROWS_MISSED.add(len(events))
@@ -766,6 +792,27 @@ def _expire_if_due(command, now=None):
         command.mark_expired()
         return True
     return False
+
+
+def _expire_if_due_without_waiting(command):
+    """_expire_if_due, for a read outside any transaction of its own (a
+    command's detail; a signature before its transaction): its write is
+    housekeeping, so it never waits for the database's write lock (D3).
+    Refused at once, it is logged, and the command is judged and shown by its
+    window all the same -- expired, as it is: no signature counts on it and
+    the engine would refuse it. The next read writes it. A command that is not
+    due makes no statement."""
+    now = timezone.now()
+    if command.in_force or command.status not in _IN_FLIGHT or not _due(command.expires_at, now):
+        return False
+    try:
+        with _not_waiting_for_the_write_lock():
+            command.mark_expired()
+    except Exception:  # noqa: BLE001 - housekeeping never fails the read; the command is past its window
+        logger.warning("could not mark the failsafe command %s expired; the next read will", command.uuid,
+                       exc_info=True)
+        command.status = FailsafeCommand.STATUS_EXPIRED
+    return True
 
 
 @api_view(["GET", "POST"])
@@ -868,7 +915,9 @@ def _stop_draft(request, action, engine_id, reason, ttl):
     the look-up and the take-back are in the transaction; superseding and the
     audit are outside it, so the write lock is held for that dedupe alone and
     never across the superseding (which, inside it, delayed a pause 2.9 s during
-    a draft flood).
+    a draft flood). Outside it, neither waits for the write lock either: the
+    answer with the bytes to sign is never held behind another writer for
+    them.
 
     The account's unsigned stop drafts past unsigned_stop_drafts_per_account()
     -- its oldest -- are then superseded (_supersede_past_limit). Only the
@@ -901,6 +950,15 @@ def _stop_draft(request, action, engine_id, reason, ttl):
         command, earlier = _insert_draft(request, action, engine_id, reason, ttl), None
     if earlier is not None:
         return _drafted(earlier, earlier.as_command_dict(), status.HTTP_200_OK)
+    # The draft is committed and signable. Superseding and its audit row are
+    # housekeeping, and neither waits for the database's write lock (D4): the
+    # bytes to sign came back 3.01 s after the row was signable, behind them.
+    # Refused at once, a supersede is logged and the next draft makes it; a
+    # missing audit row is counted and said, as one that fails is. The audit
+    # row is made on a connection of their own (_housekeeping_connection), so
+    # the draft's own connection makes no statement more; a supersede, made
+    # only by a draft past its account's limit, on the draft's connection
+    # (_supersede_past_limit).
     superseded = _supersede_past_limit(command)
     actor = request.user if request.user.is_authenticated else None
     metadata = getattr(request, "audit_metadata", {})
@@ -919,9 +977,9 @@ def _stop_draft(request, action, engine_id, reason, ttl):
         for pk in superseded
     ]
     # The draft is made: an audit row that cannot be written never refuses it.
-    return _saying(
-        _drafted(command, command.as_command_dict(), status.HTTP_201_CREATED), _audit_a_stop(events, one_insert=True)
-    )
+    with _housekeeping_connection() as using:
+        missed = _audit_a_stop(events, one_insert=True, using=using)
+    return _saying(_drafted(command, command.as_command_dict(), status.HTTP_201_CREATED), missed)
 
 
 def _insert_draft(request, action, engine_id, reason, ttl):
@@ -952,12 +1010,20 @@ def _supersede_past_limit(newest):
     Why: a stop draft is never refused, so one account could draft without end
     -- 1,200 in 10 s to engines that do not exist, all awaiting a signature
     (round 4, H1). Its unsigned drafts are bounded now, never its right to draft.
-    A failure here is logged; the new draft stands."""
+    A failure here is logged; the new draft stands.
+
+    Its write never waits for the database's write lock (D4): refused at
+    once, it is logged and the next draft makes it. It is made on the
+    draft's own connection, outside any transaction, as it was; so only a
+    draft past its account's limit -- the one that writes -- adds the three
+    PRAGMAs of _not_waiting_for_the_write_lock, and a draft within its limit
+    makes the statements it made."""
     limit = unsigned_stop_drafts_per_account()
+    commands = FailsafeCommand.objects
     try:
         pks = [
             pk
-            for pk in FailsafeCommand.objects.filter(
+            for pk in commands.filter(
                 initiator=newest.initiator_id, status=_AWAITING, signed=False, action__in=STOP_ACTIONS
             )
             .order_by("-created_at")
@@ -967,13 +1033,14 @@ def _supersede_past_limit(newest):
         if not pks:
             return []
         now = timezone.now()
-        FailsafeCommand.objects.filter(pk__in=pks, status=_AWAITING, signed=False).update(
-            status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
-        )
-        return list(
-            FailsafeCommand.objects.filter(pk__in=pks, status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now)
-            .values_list("pk", flat=True)
-        )
+        with _not_waiting_for_the_write_lock():
+            commands.filter(pk__in=pks, status=_AWAITING, signed=False).update(
+                status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
+            )
+            return list(
+                commands.filter(pk__in=pks, status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now)
+                .values_list("pk", flat=True)
+            )
     except Exception:  # noqa: BLE001 - superseding is housekeeping; the new stop draft stands
         logger.exception("could not supersede drafts past the limit of account %s", newest.initiator_id)
         return []
@@ -1178,7 +1245,7 @@ def _page_headers(more, following, too_large, unreadable=0):
 @permission_classes([IsAdminOrAnalyst])
 def command_detail(request, cmd_uuid):
     command = get_object_or_404(FailsafeCommand, uuid=cmd_uuid)
-    _expire_if_due(command)
+    _expire_if_due_without_waiting(command)
     if _by_service_token(request) and (command.action not in STOP_ACTIONS or command.status not in _IN_FLIGHT):
         # The service token reads a stop command in flight and its signing
         # bytes; nothing else, and no resume's or release's bytes.
@@ -1211,7 +1278,7 @@ def _signable(command, now=None):
 @permission_classes([IsAdminOrAnalyst])
 def submit_signature(request, cmd_uuid):
     command = get_object_or_404(FailsafeCommand, uuid=cmd_uuid)
-    _expire_if_due(command)
+    _expire_if_due_without_waiting(command)
     if not _signable(command):
         return Response(
             {"detail": f"command is {command.status}; not accepting signatures"},
@@ -1246,12 +1313,16 @@ def submit_signature(request, cmd_uuid):
     #
     # A stop gains nothing here. Its readiness is the one UPDATE it was, now
     # also saying when (ready_at) and that it is in force (mark_ready); its
-    # mark is the one UPDATE it was; and its audit rows are the inserts they
-    # were, in a savepoint, and never fail the signature (_audit_a_stop). Everything a
-    # START needs beyond that -- the read of its engine's stops in force and
-    # the write that lifts them -- is on the start's path only, and a start
-    # that cannot be made ready with its lift is not made ready at all.
-    missed = 0
+    # mark is the one UPDATE it was, in the same transaction (it is what holds
+    # an older start back); and its audit rows are the inserts they were, in a
+    # transaction of their own, and never fail the signature (_audit_a_stop) --
+    # written once the stop has committed, never waiting for the write lock (D2), so the
+    # stop is served the moment it commits and a held lock never delays its
+    # answer. Everything a START needs beyond that -- the read of its engine's
+    # stops in force and the write that lifts them -- is on the start's path
+    # only, and a start that cannot be made ready with its lift is not made
+    # ready at all: its audit rows are still written in its transaction.
+    owed = []
     try:
         with transaction.atomic():
             command = FailsafeCommand.objects.select_for_update().filter(pk=command.pk).first()
@@ -1313,7 +1384,7 @@ def submit_signature(request, cmd_uuid):
                     except Exception as exc:
                         raise _StartNotMadeReady from exc
             if is_stop:
-                missed = _audit_a_stop(events)
+                owed = events  # written once this transaction has committed (below)
     except _StartNotMadeReady:
         logger.exception("the %s %s was not made ready: what it lifts could not be read or written",
                          command.action, command.uuid)
@@ -1323,6 +1394,15 @@ def submit_signature(request, cmd_uuid):
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
+    # The stop has committed: it is ready, in force and served. Its audit rows
+    # are housekeeping now, made on a connection of their own that never
+    # waits for the write lock (_housekeeping_connection): refused at once on
+    # a held lock, they are counted and said on this answer, and this
+    # request's connection makes no statement more.
+    missed = 0
+    if owed:
+        with _housekeeping_connection() as using:
+            missed = _audit_a_stop(owed, using=using)
     return _saying(Response(_console_row(command)), missed)
 
 
@@ -1624,17 +1704,22 @@ def state(request):
         _read_kind(request, "state"), lambda: _in_flight(request, read)
     )
     engine_state, engine_state_available = _engine_live_state()
-    return _saying(
-        Response(
-            {
-                "engine_id": request.query_params.get("engine_id"),
-                "engine_state": engine_state,
-                "engine_state_available": engine_state_available,
-                **commands_,
-            },
-            headers=_page_headers(commands_["more"], commands_["next"], too_large, unreadable),
-        ),
-        AUDIT_ROWS_MISSED.value,
+    # This process's count of stop audit rows it could not write, always, and
+    # since when it counts: the count is in memory, so after a restart "0"
+    # means none since the restart, and the header says when that was (D6).
+    missed = AUDIT_ROWS_MISSED
+    return Response(
+        {
+            "engine_id": request.query_params.get("engine_id"),
+            "engine_state": engine_state,
+            "engine_state_available": engine_state_available,
+            **commands_,
+        },
+        headers={
+            **_page_headers(commands_["more"], commands_["next"], too_large, unreadable),
+            AUDIT_MISSED_HEADER: str(missed.value),
+            AUDIT_MISSED_SINCE_HEADER: missed.since.isoformat(),
+        },
     )
 
 
@@ -1794,7 +1879,13 @@ def _not_waiting_for_the_write_lock():
     """Writes in this block are refused at once, never queued, when another
     connection holds the database's write lock (SQLite: busy_timeout 0 for
     the block, then put back as it was). Other databases: unchanged. A
-    failure to set or put it back is logged and changes nothing else."""
+    failure to set or put it back is logged and changes nothing else.
+
+    Inside a block of its own on the same connection (the poll's expiry,
+    _Expiry.mark), it does nothing more: no statement is added."""
+    if getattr(connection, "_failsafe_not_waiting", False):
+        yield
+        return
     before = None
     if connection.vendor == "sqlite":
         try:
@@ -1805,9 +1896,11 @@ def _not_waiting_for_the_write_lock():
         except Exception:  # noqa: BLE001 - the poll is answered whatever this does
             logger.exception("could not stop the engine poll's writes waiting for the write lock")
             before = None
+    connection._failsafe_not_waiting = True
     try:
         yield
     finally:
+        connection._failsafe_not_waiting = False
         if before is not None:
             try:
                 with connection.cursor() as cursor:
@@ -1816,6 +1909,63 @@ def _not_waiting_for_the_write_lock():
                     cursor.execute(f"PRAGMA busy_timeout = {before:d}")  # not-a-decision-writer: an int, put back
             except Exception:  # noqa: BLE001 - the poll is answered whatever this does
                 logger.exception("could not put back the database's busy timeout after the engine poll")
+
+
+#: The alias a stop's housekeeping writes are made on, beside the request's
+#: own connection, while they are (_housekeeping_connection).
+HOUSEKEEPING_ALIAS = "failsafe_housekeeping"
+
+
+@contextmanager
+def _housekeeping_connection():
+    """The database alias a stop's housekeeping writes -- its audit rows -- are
+    made on once the stop has committed: they never
+    wait for the database's write lock, and they add no statement to the
+    request's own connection (whose statements a stop's path is held to).
+
+    * SQLite, the request's connection outside any transaction (the stop's
+      own has committed): a connection of its own, opened for these writes
+      with a busy timeout of 0 given at connect time -- no PRAGMA anywhere --
+      and closed after them. When another connection holds the write lock
+      each write is refused at once; the caller logs it, and counts and says
+      a missing audit row.
+    * Inside a transaction (an outer atomic block): the request's own
+      connection, which already holds the write lock for what it wrote there,
+      so nothing it writes can wait for it; a second connection could not
+      even read the uncommitted stop.
+    * Any other database: the request's connection, as before.
+
+    If the second connection cannot be opened, the request's connection is
+    used under _not_waiting_for_the_write_lock: refused at once all the same
+    (logged)."""
+    if connection.vendor != "sqlite" or connection.in_atomic_block:
+        yield DEFAULT_DB_ALIAS
+        return
+    try:
+        own = connections[DEFAULT_DB_ALIAS]  # the wrapper itself: ``connection`` is a proxy to it
+        settings_dict = copy.deepcopy(own.settings_dict)
+        options = settings_dict.setdefault("OPTIONS", {})
+        options["timeout"] = 0
+        if options.get("init_command"):
+            # Commands configured to run at connect time run first; a busy
+            # timeout among them is put back to 0, still at connect time.
+            options["init_command"] = f"{options['init_command']};PRAGMA busy_timeout = 0"
+        housekeeping = own.__class__(settings_dict, alias=HOUSEKEEPING_ALIAS)
+        housekeeping.ensure_connection()
+    except Exception:  # noqa: BLE001 - housekeeping falls back to the request's connection, never waiting
+        logger.exception("could not open the failsafe housekeeping connection; writing on the request's")
+        with _not_waiting_for_the_write_lock():
+            yield DEFAULT_DB_ALIAS
+        return
+    connections[HOUSEKEEPING_ALIAS] = housekeeping
+    try:
+        yield HOUSEKEEPING_ALIAS
+    finally:
+        del connections[HOUSEKEEPING_ALIAS]
+        try:
+            housekeeping.close()
+        except Exception:  # noqa: BLE001 - the stop is answered whatever this does
+            logger.exception("could not close the failsafe housekeeping connection")
 
 
 #: The stop actions in the order the engine's poll answers them: the strongest

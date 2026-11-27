@@ -387,6 +387,26 @@ audit row is logged as an error (`AUDIT ROWS MISSING`), counted, and said in
 release still fails closed: one whose audit row, or whose lift, cannot be
 written is not made ready (503), and every stop stays in force.
 
+No housekeeping write holds back a stop. A stop's audit rows, and a stop
+draft's supersede, are written after the stop's own transaction commits, so a
+signed stop is served the moment it commits; and none of them, nor the expiry
+any read writes (the state view, the list, a command's detail, a signature),
+ever waits for the database's write lock. Another writer holding it made the
+second operator's state read wait 3 s, and a stop draft's bytes to sign come
+back 3 s late. Refused at once, each is logged; a missing audit row is counted
+and said as above; an expiry or a supersede is made by the next read or draft.
+A stop's audit rows are written on a connection of their own, opened for them
+with a busy timeout of 0 at connect time and closed after, so the stop's own
+connection makes no statement more than it did. A supersede, which only a draft
+past its account's limit makes, stays on the draft's own connection, with its
+busy timeout set to 0 for that write alone.
+The stop's mark stays in its transaction, beside it. A process that ends
+between a stop's commit and its audit insert loses those rows without a count;
+the stop's row still holds its signers, their times and `ready_at`. The count
+is this process's, in memory: the state view always says it (`0` when none) and
+since when it counts (`X-Failsafe-Audit-Missed-Since`, the process's start), so
+after a restart a `0` reads "none since then".
+
 None of this adds a read or a write to drafting, signing or serving a stop.
 
 *Deploy day (migration 0006).* `ready_at` is backfilled from the audit trail. A

@@ -261,13 +261,17 @@ def test_a_cached_ok_that_ages_while_a_probe_waits_is_asked_again_not_served_sta
     after it was last asked, not before -- and the new check's reading is served (with
     its own age), never the cached ok."""
     client = engine()
-    release = threading.Event()
+    release, began, ended = threading.Event(), threading.Event(), threading.Event()
     asks = {}
     counted = _counted(asks)
 
     def hung():
-        release.wait(HELD_SECONDS)
-        return counted["the engine"]()
+        began.set()
+        try:
+            release.wait(HELD_SECONDS)
+            return counted["the engine"]()
+        finally:
+            ended.set()
 
     try:
         with mock.patch.dict(readiness.CHECKS, {**counted, "the engine": hung}):
@@ -277,6 +281,15 @@ def test_a_cached_ok_that_ages_while_a_probe_waits_is_asked_again_not_served_sta
             second, took = _ask(client)
     finally:
         release.set()
+        # The released check asks the engine configured for the run, for real, once
+        # this probe's mock is gone: let it end inside this test. Left running, its
+        # /health ask holds the client's one-at-a-time /health slot (_HEALTH_ASK) into
+        # the next test, whose probe is then answered "did not answer" at once. On
+        # Linux the absent engine refuses that ask in a millisecond; on Windows a
+        # closed loopback port is not refused at once, so it held the slot for up to
+        # its 1.5 s deadline, and on a fast runner the next test asked inside it.
+        if began.is_set():
+            ended.wait(HELD_SECONDS)
     assert took < readiness.DEADLINE_SECONDS + 1.0, took
     answered = time.monotonic()
     database = _reading(second, "the database")
