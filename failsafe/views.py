@@ -1224,6 +1224,11 @@ UNREADABLE_HEADER = "X-Failsafe-Unreadable"
 #: window, so past it this header is how the engine is told one is in force.
 #: It names a stop in force whose row could not be turned into a command too
 #: (X-Failsafe-Unreadable counts that one): in force, and not in the answer.
+#: And a ready stop whose row could not be loaded at all, by its lane's action:
+#: it may be in force (_PollRead.page). The names and the order are
+#: mythos_core.failsafe.wire's (UNREADABLE_HEADER, IN_FORCE_HEADER,
+#: IN_FORCE_ORDER), held to it by
+#: tests/test_the_planes_polls_read_clean_through_the_core.py.
 IN_FORCE_HEADER = "X-Failsafe-In-Force"
 
 
@@ -2208,7 +2213,17 @@ class _PollRead(_Read):
                 continue
             entries, more = _lane(self.qs, tiers, limit, after, expiry)
             if name == "p":
-                for _key, command in entries:
+                for key, command in entries:
+                    # A ready stop whose row cannot even be loaded is named in
+                    # force by the action of the tier its key was read under
+                    # (each tier of this lane is one action): it may be in
+                    # force, it is not served, and X-Failsafe-In-Force is the
+                    # one place its engine is told of it. It was counted in
+                    # X-Failsafe-Unreadable and named nowhere, so a terminate
+                    # in force whose row could not be loaded left the list of
+                    # stops short. Unreadable is caution: never a shorter list.
+                    if isinstance(command, _Unreadable):
+                        self.in_force.add(tiers[key[0]][0]["action"])
                     # A ready stop whose row cannot be read still holds back
                     # the starts drafted before it, where its engine and its
                     # creation time could be read.

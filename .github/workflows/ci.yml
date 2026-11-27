@@ -188,6 +188,9 @@ jobs:
   # its revocation is signed only once the stop is answered, and the reconcile never
   # extends a lease -- under the ASGI entry point too (config.asgi), where a slow
   # revocation never holds back a stop.
+  # And the engine poll's answers, served over real HTTP and read through Mythos-Core's
+  # own poll reader with the header lines as the client keeps them: a stop's answer
+  # read as not heard clean, or its list of stops read short, is a stop path's fault.
   # The Linux job above still runs everything. Bash steps say `shell: bash` (Git Bash is
   # on the runner); the rest run as PowerShell.
   backend-windows:
@@ -250,6 +253,7 @@ jobs:
             tests/test_no_in_flight_failsafe_command_is_left_off_a_list.py \
             tests/test_the_engine_poll_does_bounded_work.py \
             tests/test_a_stop_in_force_keeps_being_served.py \
+            tests/test_the_planes_polls_read_clean_through_the_core.py \
             tests/test_no_control_holds_back_a_stop.py \
             tests/test_no_stop_waits_on_its_own_collector_hold.py \
             tests/test_no_dispatch_holds_back_a_stop.py \

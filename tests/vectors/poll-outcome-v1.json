@@ -1,0 +1,2379 @@
+{
+ "schema": "mythos.poll-outcome-vectors/v1",
+ "description": "Conformance vectors for what one poll of the failsafe control plane heard (mythos_core.failsafe.wire: poll_outcome, PollOutcome and its heard_clean). Typed by hand as an answer key, never generated from the code it checks. A control plane that sets the two headers, and a product that reads a poll without this core, each hold themselves to the core with one test against this file. 'words' is the closed set of words for how a read ended, each with its reader's sentence. 'answers' are answers that arrived: 'status', 'body' (the body's text, exactly) and 'headers' (name to value; a name is matched whatever its letter case) are the input, with 'truncated' (whether the HTTP client could not call the body complete). 'no_answer' are reads that ended with no answer: the word offered is the input. Every 'expect' gives the outcome's fields: 'ended', 'status' (null when no answer arrived), 'commands' (how many commands were read), 'unreadable' (the plane's count; null when its header is there and is not a whole number, which is not a count of zero), 'skipped' (entries of a decoded body that were not read as a command), 'in_force' (the stops its header names, always in 'in_force_order', strongest first, whatever order was sent; empty when the header is absent and when it cannot be read), 'in_force_unreadable' (the header is there and cannot be read), 'truncated' and 'heard_clean'. The in-force header names every kind of stop in force on the page the plane answered, inside its command's window or not, as a comma-separated list of distinct words; spaces and tabs around each element are dropped; an unknown word, another letter case, an empty element, a word twice or two values make the whole value unreadable, and nothing of it is kept. heard_clean is true only for a 200 whose body was decoded and was whole, with an unreadable count of exactly 0, nothing skipped, and in_force_unreadable false. It is not 'the engine may run': a poll heard clean can carry commands and can name stops in force, and a stop named there may also be among the commands. The file holds only printable ASCII. Every engine, key and nonce here is invented. 'lines' are answers whose header lines are given as sent ('lines': each line's name and value, in order), with 'headers' the one value per name the HTTP client joins them into (the values in order, joined by a comma and a space). A header sent on more than one line is two values: 'expect' is the outcome when the client's own list of the lines is read (X-Failsafe-Unreadable is then null, X-Failsafe-In-Force unreadable, and the poll is not heard clean), and 'expect_joined' the outcome when only the joined value can be read.",
+ "words": {
+  "heard": "The control plane answered 200 and its answer was decoded.",
+  "unreachable": "No answer arrived: the read was refused before it left, or it failed on the way.",
+  "timed_out": "No answer arrived inside the read's time bound.",
+  "refused": "The control plane answered with a status that is not 200.",
+  "undecodable": "The control plane answered 200 and its answer could not be decoded.",
+  "unknown": "Nothing is known of how the read ended: the channel cannot say, or the poll raised."
+ },
+ "headers": {
+  "unreadable": "X-Failsafe-Unreadable",
+  "in_force": "X-Failsafe-In-Force"
+ },
+ "in_force_order": [
+  "terminate",
+  "stand_down",
+  "pause"
+ ],
+ "count_digits": 18,
+ "answers": [
+  {
+   "why": "200, an empty list, no header: nothing pending, heard clean",
+   "status": 200,
+   "body": "[]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "200, one command in a list",
+   "status": 200,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "200, one command as a bare object",
+   "status": 200,
+   "body": "{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "200, the plane says it could read every row",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "a count of zero written with leading zeros",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "000"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "the plane could not read two of its rows",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "2"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 2,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "one unreadable row beside a command that was read",
+   "status": 200,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}]",
+   "headers": {
+    "X-Failsafe-Unreadable": "1"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 1,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "the header's name in lower case",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "x-failsafe-unreadable": "1"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 1,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "the header's name in upper case",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-FAILSAFE-UNREADABLE": "4"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 4,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "spaces and a tab around the count",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": " 3\t"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 3,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "leading zeros before a count",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "007"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 7,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "eighteen digits are still a count",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "100000000000000000"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 100000000000000000,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an empty count is not zero",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": ""
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "only spaces is not zero",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "  "
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a negative count",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "-1"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a signed zero",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "+0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a fraction",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "0.0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an exponent",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "1e0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a word",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "none"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a digit of another script (U+0660, ARABIC-INDIC DIGIT ZERO)",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "\u0660"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a superscript digit (U+00B2)",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "\u00b2"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "two values joined, as an HTTP client joins a repeated header",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "0, 0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a space inside the digits",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "1 0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "nineteen digits are not a count of rows",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "1000000000000000000"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a hexadecimal count",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "0x0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a terminate in force is named: heard clean, and held by the caller",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "a stand-down in force",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "stand_down"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "stand_down"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "a pause in force",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "a pause in force is also among the commands served",
+   "status": 200,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}]",
+   "headers": {
+    "X-Failsafe-In-Force": "pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "all three, strongest first, as the plane sends them",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, stand_down, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "the order sent is not trusted: reordered, and not an error",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "pause, terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "all three, weakest first, are read strongest first",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "pause, stand_down, terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "no space after the comma",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "stand_down,pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "tabs around the elements",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "\tterminate\t,\tpause\t"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "spaces around one word",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": " terminate "
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "the header's name in lower case names the same stop",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "x-failsafe-in-force": "terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "another letter case is not the word",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "Terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "upper case is not the word",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "TERMINATE"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an empty value still says something may be in force",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": ""
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "only spaces is an empty value",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "  "
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a word that is not a stop",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "resume"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a state word is not an action word",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminated"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a hyphen where the word has an underscore",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "stand-down"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "the word 'none' is not an absent header",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "none"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "one unknown element makes the whole value unreadable: nothing of it is kept",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, bogus"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an unknown element first",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "bogus, terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an empty element between two words",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate,,pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a trailing comma is an empty element",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate,"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a leading comma is an empty element",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": ",pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a word twice",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a word twice among others",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "pause, terminate, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a semicolon is not the separator",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate; pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a space is not the separator",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "one element in another letter case beside a word",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, Pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "two header values, under names that differ only in letter case",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate",
+    "x-failsafe-in-force": "pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "two unreadable-count values, under names that differ only in letter case",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "0",
+    "x-failsafe-unreadable": "0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "both headers: unreadable rows, and a terminate in force",
+   "status": 200,
+   "body": "[]",
+   "headers": {
+    "X-Failsafe-Unreadable": "5",
+    "X-Failsafe-In-Force": "terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 5,
+    "skipped": 0,
+    "in_force": [
+     "terminate"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "401: the poll token was refused",
+   "status": 401,
+   "body": "denied",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 401,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "403",
+   "status": 403,
+   "body": "",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 403,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "404",
+   "status": 404,
+   "body": "[]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 404,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "500",
+   "status": 500,
+   "body": "",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 500,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "503 from a gateway in front of the plane",
+   "status": 503,
+   "body": "<html>unavailable</html>",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 503,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "204 is not 200, although nothing is wrong with it",
+   "status": 204,
+   "body": "",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 204,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "201 is not 200",
+   "status": 201,
+   "body": "[]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 201,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "206 is not 200",
+   "status": 206,
+   "body": "[]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 206,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a redirect that was not followed to a 200",
+   "status": 302,
+   "body": "",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 302,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a command in a body that came with a 401 is not read",
+   "status": 401,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 401,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "the headers are read from a refusal too",
+   "status": 503,
+   "body": "",
+   "headers": {
+    "X-Failsafe-Unreadable": "2",
+    "X-Failsafe-In-Force": "terminate, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 503,
+    "commands": 0,
+    "unreadable": 2,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an in-force value nobody can read, on a refusal",
+   "status": 503,
+   "body": "",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, bogus"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 503,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "200 with an empty body is not 'nothing pending'",
+   "status": 200,
+   "body": "",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "undecodable",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "200 with a gateway's page",
+   "status": 200,
+   "body": "<html>gateway</html>",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "undecodable",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "200 with a list cut short",
+   "status": 200,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]},",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "undecodable",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "200 with an unclosed bracket",
+   "status": 200,
+   "body": "[",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "undecodable",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "200 with two documents",
+   "status": 200,
+   "body": "[] []",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "undecodable",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an undecodable body keeps the plane's own count",
+   "status": 200,
+   "body": "not json",
+   "headers": {
+    "X-Failsafe-Unreadable": "4"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "undecodable",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 4,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an undecodable body keeps what is in force",
+   "status": 200,
+   "body": "not json",
+   "headers": {
+    "X-Failsafe-In-Force": "terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "undecodable",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an object that is no command",
+   "status": 200,
+   "body": "{}",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 1,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "null is not an empty list",
+   "status": 200,
+   "body": "null",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 1,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a bare number",
+   "status": 200,
+   "body": "0",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 1,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a wrapper object is one entry that is no command",
+   "status": 200,
+   "body": "{\"commands\": []}",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 1,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "entries that are not objects",
+   "status": 200,
+   "body": "[1, \"pause\", null]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 3,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "an action this core does not know, beside a command it read",
+   "status": 200,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}, {\"action\": \"dance\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-2\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 0,
+    "skipped": 1,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a command with a field missing",
+   "status": 200,
+   "body": "[{\"action\": \"terminate\"}]",
+   "headers": {},
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 1,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a body the client could not call complete",
+   "status": 200,
+   "body": "[]",
+   "headers": {},
+   "truncated": true,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": true,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a cut body that carries a command still carries it",
+   "status": 200,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}]",
+   "headers": {},
+   "truncated": true,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": true,
+    "heard_clean": false
+   }
+  }
+ ],
+ "no_answer": [
+  {
+   "why": "nothing listens there, or the read was refused before it left",
+   "ended": "unreachable",
+   "expect": {
+    "ended": "unreachable",
+    "status": null,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "no answer inside the read's time bound",
+   "ended": "timed_out",
+   "expect": {
+    "ended": "timed_out",
+    "status": null,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "the channel cannot say how its read ended",
+   "ended": "unknown",
+   "expect": {
+    "ended": "unknown",
+    "status": null,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "a word that is not one of the six reads unknown",
+   "ended": "ok",
+   "expect": {
+    "ended": "unknown",
+    "status": null,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "another letter case of a word is not the word",
+   "ended": "Heard",
+   "expect": {
+    "ended": "unknown",
+    "status": null,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "no answer is never heard, whatever word is offered",
+   "ended": "",
+   "expect": {
+    "ended": "unknown",
+    "status": null,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  }
+ ],
+ "lines": [
+  {
+   "why": "X-Failsafe-In-Force on two lines, stand_down and pause: two values, unreadable",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "stand_down"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "stand_down, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "X-Failsafe-In-Force on two lines, pause then terminate: unreadable, never a shorter list",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "terminate"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "pause, terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "X-Failsafe-In-Force on two lines, the same stop on both",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "terminate"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "terminate"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, terminate"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "X-Failsafe-In-Force on two lines whose names differ in letter case",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ],
+    [
+     "x-failsafe-in-force",
+     "stand_down"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "pause, stand_down"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "X-Failsafe-In-Force on three lines",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "terminate"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "stand_down"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, stand_down, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "X-Failsafe-In-Force on one line is read as it always was",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "terminate, pause"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "X-Failsafe-Unreadable on two lines, 0 and 0: two values, not a count",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-Unreadable",
+     "0"
+    ],
+    [
+     "X-Failsafe-Unreadable",
+     "0"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-Unreadable": "0, 0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "X-Failsafe-Unreadable on two lines, 2 and 0",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-Unreadable",
+     "2"
+    ],
+    [
+     "X-Failsafe-Unreadable",
+     "0"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-Unreadable": "2, 0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "X-Failsafe-Unreadable on one line, 0: heard clean",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-Unreadable",
+     "0"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-Unreadable": "0"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "both headers, each on two lines",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Failsafe-Unreadable",
+     "0"
+    ],
+    [
+     "X-Failsafe-Unreadable",
+     "0"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "stand_down"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-Unreadable": "0, 0",
+    "X-Failsafe-In-Force": "stand_down, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": null,
+    "skipped": 0,
+    "in_force": [
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  },
+  {
+   "why": "another header on two lines changes nothing",
+   "status": 200,
+   "body": "[]",
+   "lines": [
+    [
+     "X-Other",
+     "a"
+    ],
+    [
+     "X-Other",
+     "b"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ]
+   ],
+   "headers": {
+    "X-Other": "a, b",
+    "X-Failsafe-In-Force": "pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "a command served beside X-Failsafe-In-Force on two lines is still read",
+   "status": 200,
+   "body": "[{\"action\": \"pause\", \"engine_id\": \"engine-example\", \"nonce\": \"n-example-1\", \"issued_at\": \"2026-11-26T09:00:00+00:00\", \"expires_at\": \"2026-11-26T09:10:00+00:00\", \"reason\": \"example\", \"signatures\": [{\"key_id\": \"operator-one\", \"sig\": \"00\"}]}]",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "stand_down"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "stand_down, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "heard",
+    "status": 200,
+    "commands": 1,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "stand_down",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": true
+   }
+  },
+  {
+   "why": "a 401 that names what is in force on two lines",
+   "status": 401,
+   "body": "",
+   "lines": [
+    [
+     "X-Failsafe-In-Force",
+     "terminate"
+    ],
+    [
+     "X-Failsafe-In-Force",
+     "pause"
+    ]
+   ],
+   "headers": {
+    "X-Failsafe-In-Force": "terminate, pause"
+   },
+   "truncated": false,
+   "expect": {
+    "ended": "refused",
+    "status": 401,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [],
+    "in_force_unreadable": true,
+    "truncated": false,
+    "heard_clean": false
+   },
+   "expect_joined": {
+    "ended": "refused",
+    "status": 401,
+    "commands": 0,
+    "unreadable": 0,
+    "skipped": 0,
+    "in_force": [
+     "terminate",
+     "pause"
+    ],
+    "in_force_unreadable": false,
+    "truncated": false,
+    "heard_clean": false
+   }
+  }
+ ]
+}
