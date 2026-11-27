@@ -128,6 +128,26 @@ def _economics_signer_key():
     signer.disable()
 
 
+#: The engine recovery-receipt-signer key every test runs with (SPINE SP-4, part 2b):
+#: SYNTHETIC, for tests only, in the engine's ``ce_rr_`` form. A deployment that issues
+#: recovery receipts sets ``CYBERENGINE_RECOVERY_SIGNER_KEY``; the engine's recovery-receipt
+#: sign route takes that key alone. A test of the key-less behaviour overrides it to "".
+TEST_RECOVERY_SIGNER_KEY = "ce_rr_synthetic-test-recovery-signer-key-for-ci-only-0000"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _recovery_signer_key():
+    """``CYBERENGINE_RECOVERY_SIGNER_KEY`` set for the whole run, as a deployment that issues
+    recovery receipts sets it, by its literal name
+    (``CyberEngineClient.for_recovery_receipt_signing``), as the economics signer's is."""
+    from django.test import override_settings
+
+    signer = override_settings(CYBERENGINE_RECOVERY_SIGNER_KEY=TEST_RECOVERY_SIGNER_KEY)
+    signer.enable()
+    yield TEST_RECOVERY_SIGNER_KEY
+    signer.disable()
+
+
 @pytest.fixture
 def engine_keyring(tmp_path, monkeypatch):
     """Configure an outcome keyring that trusts :data:`tests.signed_chains.ENGINE_KEYS`,

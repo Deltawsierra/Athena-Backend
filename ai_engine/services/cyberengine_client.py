@@ -379,6 +379,25 @@ class ExposureReceiptRefused(EngineError):
         self.reason = reason
 
 
+class RecoveryReceiptRefused(EngineError):
+    """The engine answered a recovery receipt's sign request with a refusal that names
+    its code: ``detail`` is ``{"code": ..., "reason": ...}`` (Athena-Engine's
+    ``POST /api/assurance/recovery-receipt/sign``, the exposure route's shape). A 400
+    is the document refused by ``mythos_core.recovery_receipt``'s rule ``code`` names,
+    as :class:`ExposureReceiptRefused` is; any other status is the engine refusing to
+    sign at all, its own code carried (a 503 ``signer_not_configured``, say). ``status``
+    says which. ``code`` is as the engine sent it, and the issuer
+    (:mod:`assurance.recovery_receipts`) carries it as the engine's."""
+
+    def __init__(self, message: str, *, code: str, reason: str, status: int) -> None:
+        super().__init__(message, kind=ENGINE_REFUSED, status=status)
+        self.code = code
+        self.reason = reason
+
+
+#: How every recovery-receipt-signer key the engine issues begins (athena-engine #146).
+RECOVERY_SIGNER_PREFIX = "ce_rr_"
+
 #: A refusal code as core spells one: lowercase ASCII words joined by ``_``.
 _REFUSAL_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 #: The most of an engine's refusal reason a caller is handed.
@@ -502,6 +521,38 @@ class CyberEngineClient:
         signer_key = getattr(settings, "CYBERENGINE_ECONOMICS_SIGNER_KEY", "")
         if not signer_key:
             raise RuntimeError("CYBERENGINE_ECONOMICS_SIGNER_KEY is not configured")
+
+        if not settings.CYBERENGINE_URL:
+            raise RuntimeError("CYBERENGINE_URL is not configured")
+
+        return cls(base_url=settings.CYBERENGINE_URL, api_key=signer_key)
+
+    @classmethod
+    def for_recovery_receipt_signing(cls):
+        """A client holding the engine's recovery-receipt-signer key, and never another.
+
+        The engine issues that key (``ce_rr_``, athena-engine ``start_engine.py
+        --recovery-signer-key``) for one route, ``POST
+        /api/assurance/recovery-receipt/sign``, which takes it ALONE: an operator key, or
+        the exposure route's receipt-signer key, is refused there (403). The recovery
+        receipt issuer (``assurance.recovery_receipts``) signs, and reads the public
+        keyring, with this client alone; every other call keeps its own key.
+
+        Read by its literal setting name. With none configured, or with one that is not a
+        recovery-receipt-signer key (no ``ce_rr_`` prefix, or the operator key itself),
+        this raises ``RuntimeError`` naming the setting and never its value, and nothing
+        is sent: it never falls back to the operator key or to the exposure signer's."""
+        signer_key = getattr(settings, "CYBERENGINE_RECOVERY_SIGNER_KEY", "")
+        if not signer_key:
+            raise RuntimeError("CYBERENGINE_RECOVERY_SIGNER_KEY is not configured")
+        if (
+            not isinstance(signer_key, str)
+            or not signer_key.startswith(RECOVERY_SIGNER_PREFIX)
+            or signer_key == getattr(settings, "CYBERENGINE_OPERATOR_KEY", "")
+        ):
+            raise RuntimeError(
+                f"CYBERENGINE_RECOVERY_SIGNER_KEY is not a recovery-receipt-signer key ({RECOVERY_SIGNER_PREFIX}...)"
+            )
 
         if not settings.CYBERENGINE_URL:
             raise RuntimeError("CYBERENGINE_URL is not configured")
@@ -728,6 +779,34 @@ class CyberEngineClient:
                     f"Engine refused the receipt ({refused[0]})", code=refused[0], reason=refused[1], status=400
                 )
         if not (200 <= resp.status_code < 300):
+            raise self._refused(resp)
+        return self._read_json(resp, path)
+
+    def sign_recovery_receipt(self, receipt: dict) -> dict:
+        """Ask the engine to sign a recovery receipt (``mythos.recovery-receipt/v2``),
+        returning a DSSE envelope under the receipt's own payload type, signed by a key
+        in the ``recovery-receipt`` role (``mythos_core.recovery_receipt``).
+
+        athena-engine #146's contract, the exposure route's shape: the request is
+        ``{"receipt": <document>}`` and nothing else, presented with the
+        recovery-receipt-signer key (:meth:`for_recovery_receipt_signing`; the route
+        refuses any other key, 403). 200 is the envelope. The engine reads the document
+        with the core before it signs; one the core refuses is a 400
+        ``{"detail": {"code", "reason"}}`` with the core's code, raised here as
+        :class:`RecoveryReceiptRefused`. A 503 ``signer_not_configured`` (no role key,
+        no keyring, the sidecar down) is raised the same way with its status. A refusal
+        that names no code, a connection failure and a timeout are an EngineError as
+        from every route (``unreachable`` where nothing came back). One request, never
+        retried here. Nothing here is on a stop path."""
+        path = "/api/assurance/recovery-receipt/sign"
+        resp = self._send_post(path, {"receipt": receipt})
+        if not (200 <= resp.status_code < 300):
+            refused = _document_refusal(resp)
+            if refused is not None:
+                raise RecoveryReceiptRefused(
+                    f"Engine refused the recovery receipt ({refused[0]})",
+                    code=refused[0], reason=refused[1], status=resp.status_code,
+                )
             raise self._refused(resp)
         return self._read_json(resp, path)
 
