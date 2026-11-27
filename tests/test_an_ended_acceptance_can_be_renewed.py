@@ -71,8 +71,8 @@ REPO = Path(__file__).resolve().parent.parent
 VECTORS = Path(__file__).resolve().parent / "vectors" / "acceptance-reopen-v1.json"
 #: Byte for byte Mythos-Core's tests/vectors/acceptance-reopen-v1.json at the pin.
 VECTOR_SHA256 = "5f94793c8369d2a6c06d5362b7fea23ea411fcf89fa969fb290b2e376a6a9955"
-#: The core's main on 16 Nov 2026: the merge of #85, which carries #84.
-PIN = "a27774dc8cb0dae775a5b7dd97d15f697f011415"
+#: The core's main on 26 Nov 2026: the merge of #89, which carries #84 to #90 (#85 among them).
+PIN = "1de268c2e6c1fc68553e006ec89735d10ef0b59e"
 RECEIPT_VECTORS = Path(__file__).resolve().parent / "vectors" / "recovery-receipt-v1.json"
 #: The words no recovery receipt says, and so nothing here.
 REASSURANCE = {"clean", "resolved", "secure", "safe"}
