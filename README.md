@@ -87,6 +87,15 @@ nothing is recorded. Every other engine call, the stops among them, keeps the
 operator key. The setting is read by that literal name; like the other keys, it
 is a settings line reading the owner's key from the environment.
 
+Recovery receipts (SPINE SP-4) are signed with a third, `CYBERENGINE_RECOVERY_SIGNER_KEY`:
+a recovery-receipt-signer key (`ce_rr_`), which the engine issues with `python
+tools/start_engine.py --recovery-signer-key` and takes on its recovery-receipt sign route
+ALONE (an operator key is refused there). The issuer signs and reads the keyring with it
+(`CyberEngineClient.for_recovery_receipt_signing`); a value that is missing, not `ce_rr_`,
+or the operator key itself is refused here, nothing is sent, and no other key is sent
+instead (`signer_unavailable`). It is read by that literal name, and needs the same kind
+of settings line as the economics signer key.
+
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
@@ -1253,6 +1262,55 @@ receipt could not (migration `assurance.0088`: five nullable fields, no row writ
 `tests/test_the_recovery_record_says_what_a_receipt_could.py` holds all of it to the core,
 with its vector file (`tests/vectors/recovery-receipt-v1.json`, byte for byte the core's),
 and builds, signs and verifies a receipt of each step with the vectors' test key.
+
+## The backend issues signed recovery receipts (SPINE SP-4, part 2b)
+
+An owner, an auditor or an insurer reads a recovery's standing as a signed receipt
+(`mythos.recovery-receipt/v2`, Mythos-Core#86), not as a page of this backend
+(`assurance/recovery_receipts.py`, `RecoveryReceipt`, migration `assurance.0089`: one new
+table, nothing else changed).
+
+| Route | Class | What it does |
+|---|---|---|
+| `POST /api/assurance/findings/<uuid>/recovery-receipts/` | effect (admin) | issues the next receipt; takes no body |
+| `GET /api/assurance/findings/<uuid>/recovery-receipts/` | evidence read | every receipt, oldest first, each verified again now |
+| `GET /api/assurance/findings/<uuid>/recovery-receipts/head/` | evidence read | `{current_scope_revision, latest_receipt_ref}` |
+
+- **What it says** is the record as its read serves it at the issue's instant (`as_of`):
+  the last step's state, what it is held back from, its restrictions that are names, who
+  vouches for each witness and every gap with what would close it, the step's acceptance,
+  and the current scope revision with its items and what was removed, by whom and why.
+  Built by the core's `build_receipt`, which computes the release. **v2 only**: a document
+  that is not v2 is never sent, and an envelope that is not v2 is never stored. An engine
+  support that names no key id is never issued as signed: it is the gap
+  `support:<condition>:<kind>:<ref>`, and it holds a pass back.
+- **The engine signs** (`CyberEngineClient.sign_recovery_receipt`, `POST
+  /api/assurance/recovery-receipt/sign`, athena-engine #146, the exposure route's request
+  and answer), in the `recovery-receipt` role, asked with the recovery-receipt-signer key
+  alone (`CYBERENGINE_RECOVERY_SIGNER_KEY`, above), never the operator key.
+- **Verified before it is stored**: under the engine's published keyring in that role
+  (every other role filed as another, so its keys are refused `wrong_role`), and its
+  receipt must be the document sent, byte for byte as the core canonicalises it. Anything
+  else is never stored, and the answer says why (502 with the code and the core's verdict).
+- **Append-only, superseded, never edited.** Each receipt after the first names the latest
+  (`supersedes`) and why (`reason`: `recovery-step:<uuid>`, `scope-revision:<uuid>`,
+  `acceptance-ended:<uuid>` or `recovery-record:<uuid>`), checked by the core's
+  `check_supersedes` before it is signed. A record that has not moved returns the same
+  latest (200), and nothing is signed. A latest receipt that no longer verifies is never
+  superseded here (409 `latest_receipt_unverified`).
+- **An engine that cannot be reached, or answers 503, stores nothing**: 503
+  `engine_unreachable` or `engine_unavailable` (its code carried, `signer_not_configured`
+  among them), with `Retry-After`. A 400 is the engine's core refusing the document: 502
+  `receipt_refused_by_signer`, the engine's code carried. Any other refusal is 502
+  `signer_refused` with its status. One ask, never retried on the request thread, and no
+  transaction open while it is made.
+- **Every read verifies again**: a receipt that does not verify, whose row is not what it
+  signed, or that cannot be checked (no keyring) reads `unknown`, never `current`.
+
+On no stop path: the URL conf loads the issuer, which reads `mythos_core.recovery_receipt`
+and the engine client at first use. `tests/test_the_backend_issues_signed_recovery_receipts.py`
+holds it, with the core's v2 vectors (`tests/vectors/recovery-receipt-v2.json`, byte for
+byte the core's at the pin).
 
 ## An incident's scope, versioned (SPINE SP-3)
 

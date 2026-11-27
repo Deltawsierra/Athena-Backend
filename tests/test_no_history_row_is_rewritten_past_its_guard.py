@@ -89,6 +89,8 @@ from assurance.models import (
     IdentityEvidenceRewriteRefused,
     IncidentScopeRevision,
     IncidentScopeRewriteRefused,
+    RecoveryReceipt,
+    RecoveryReceiptRewriteRefused,
     RecoveryRecord,
     RecoveryRecordRewriteRefused,
     RepairContract,
@@ -126,6 +128,7 @@ APPEND_ONLY = {
     AchillesScanRefusal: AchillesScanRewriteRefused,
     RecoveryRecord: RecoveryRecordRewriteRefused,
     IncidentScopeRevision: IncidentScopeRewriteRefused,
+    RecoveryReceipt: RecoveryReceiptRewriteRefused,
     **{
         model: econ.EconomicsRewriteRefused
         for model in (

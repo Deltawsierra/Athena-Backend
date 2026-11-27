@@ -66,6 +66,11 @@ _RECORD = (
 )
 _SIGN_IN = "issues a token on a password: no engine, no target. A failed read fails closed (HOLD)"
 _NOTHING = "returns a suggested plan and writes nothing: no engine, no target"
+_SIGNED = (
+    "asks the engine to sign a document of this backend's and records it: it aims the engine at no "
+    "target, and the preflight asks whether the engine may be aimed at one. An engine that cannot be "
+    "reached, or refuses, stores nothing (503 with Retry-After, or its code)"
+)
 
 #: Every effect route and method in safety.degraded, and whether the preflight is its
 #: gate. The admin site (safety.degraded.ADMIN_CLASS) writes this backend's own rows
@@ -122,6 +127,7 @@ EFFECTS = {
     ("finding-repair-contracts", "POST"): _RECORD,
     ("finding-recovery-record", "POST"): _RECORD,
     ("finding-scope-revisions", "POST"): _RECORD,
+    ("finding-recovery-receipts", "POST"): _SIGNED,
     ("provider-list", "POST"): _RECORD,
     ("provider-detail", "PUT"): _RECORD,
     ("provider-detail", "PATCH"): _RECORD,

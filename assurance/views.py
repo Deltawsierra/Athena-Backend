@@ -122,7 +122,7 @@ from .workflow_chains import (
 )
 from .ripple import assess_ripple
 from .remediation import ContractRequired, IllegalTransition, apply_transition, assign
-from . import incident_scope, recovery_record, repair_contract
+from . import incident_scope, recovery_receipts, recovery_record, repair_contract
 from . import authority_chain_records
 from . import outcome_pages
 from . import closure_evidence as evidence_route
@@ -3913,6 +3913,44 @@ class FindingViewSet(
             {"finding": str(finding.uuid), "steps": recovery_record.recorded_steps(finding, steps)},
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=["get", "post"], url_path="recovery-receipts", url_name="recovery-receipts")
+    def recovery_receipts_view(self, request, uuid=None):
+        """The finding's signed recovery receipts (SPINE SP-4, :mod:`assurance.recovery_receipts`).
+
+        ``GET`` serves every receipt issued, oldest first, to any operator who can see the
+        finding: each verified again now against the engine's published recovery-receipt
+        keys, with its standing (the core's word) against the head; one that cannot be
+        verified reads ``unknown``. ``POST`` issues the next receipt -- admin-only, as
+        every write to the assurance record is (:func:`_require_admin`), and attributed to
+        the caller. It takes no body: what a receipt says is the record as it reads now,
+        never a field. 201 with the receipt issued; 200 with the latest when the record
+        has not moved since it; nothing is stored otherwise, and the answer says why
+        (503 with ``Retry-After`` when the engine could not be reached or answered 503)."""
+        finding = self.get_object()
+        if request.method != "POST":
+            return Response(recovery_receipts.receipts_of(finding))
+        _require_admin(request)
+        data = request.data
+        if not isinstance(data, dict):
+            raise ValidationError({"body": "must be an object"})
+        if data:
+            raise ValidationError({key: "unknown field" for key in sorted(str(k) for k in data)})
+        outcome = recovery_receipts.issue(finding, by=request.user)
+        if outcome.code is not None:
+            headers = None
+            if outcome.code in recovery_receipts.RETRY_LATER:
+                headers = {"Retry-After": str(recovery_receipts.RETRY_AFTER_SECONDS)}
+            return Response(recovery_receipts.refusal(outcome), status=outcome.status, headers=headers)
+        return Response(recovery_receipts.issued(finding, outcome), status=outcome.status)
+
+    @action(detail=True, methods=["get"], url_path="recovery-receipts/head", url_name="recovery-receipts-head")
+    def recovery_receipts_head(self, request, uuid=None):
+        """What a reader asks a recovery receipt's standing with
+        (``mythos_core.recovery_receipt.receipt_standing``): the incident's current scope
+        revision and its latest receipt's name, each None when there is none. A read of
+        this backend's rows; the engine is not asked."""
+        return Response(recovery_receipts.head_of(self.get_object()))
 
     @action(detail=True, methods=["get", "post"], url_path="scope-revisions", url_name="scope-revisions")
     def scope_revisions(self, request, uuid=None):

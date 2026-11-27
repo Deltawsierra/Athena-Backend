@@ -788,6 +788,15 @@ NOT_STOPS = {
         "POST": "records the next revision of an incident's scope: scope revisions, append-only; it starts and "
         "stops nothing",
     },
+    # A finding's signed recovery receipts (assurance.recovery_receipts, SPINE SP-4, part
+    # 2b): every receipt read and verified again, and the next one issued. Its own
+    # append-only table; the engine is asked to sign a document and nothing else, and no
+    # decision, finding, record or engine run moves.
+    "finding-recovery-receipts": {
+        "GET": _READ,
+        "POST": "issues a signed recovery receipt: its own append-only table; it starts and stops nothing",
+    },
+    "finding-recovery-receipts-head": _get(),
     "provider-list": {"GET": _READ, "POST": "creates a provider record: configuration that starts and stops nothing"},
     "provider-detail": {
         "GET": _READ,

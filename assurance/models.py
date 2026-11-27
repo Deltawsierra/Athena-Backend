@@ -4598,3 +4598,97 @@ class IncidentScopeRevision(models.Model):
 
     def __str__(self) -> str:
         return f"scope revision {self.revision} of finding {self.finding_id}"
+
+
+# ---------------------------------------------------------------------------
+# The recovery receipt (SPINE SP-4, part 2b): one row per receipt issued
+# ---------------------------------------------------------------------------
+
+
+class RecoveryReceiptRewriteRefused(ValueError):
+    """An issued recovery receipt was asked to change or go away. The record is
+    append-only: a receipt is never edited; a later one supersedes it, as a NEW row."""
+
+
+class RecoveryReceiptQuerySet(HistoryQuerySet):
+    """Refuses a bulk update, a bulk delete and an upsert of an issued receipt, as its
+    ``save`` and ``delete`` refuse one (:mod:`assurance.append_only`)."""
+
+    refused = RecoveryReceiptRewriteRefused
+    rewritten = "An issued recovery receipt is never rewritten; a later receipt supersedes it."
+    deleted = "An issued recovery receipt is never deleted."
+
+
+class RecoveryReceipt(models.Model):
+    """One signed recovery receipt of an incident (SPINE SP-4,
+    :mod:`assurance.recovery_receipts`; ``mythos_core.recovery_receipt``, v2).
+
+    The incident is a :class:`Finding`. Its receipts are its rows, oldest first by
+    ``sequence``; each after the first names the one before it in ``supersedes``, with
+    the pointer to why in ``reason``. ``envelope`` is the DSSE envelope exactly as the
+    engine signed it in the ``recovery-receipt`` role and as it verified before it was
+    stored; its payload IS the receipt. The other columns repeat what the signed receipt
+    says (``receipt_ref``, ``record``, ``as_of``, ``supersedes``, ``reason``) and the
+    signing key's id, so a read can find a receipt without decoding every one; ``save``
+    refuses a row whose columns are not what its payload says, and every read holds
+    them to the signed payload again. ``issued_by_ref`` is who asked for it
+    (``user:<id>``), a reference kept with no key, so removing an account changes no
+    receipt.
+
+    APPEND-ONLY: the model refuses an update or a delete of an issued receipt, or a
+    fresh instance carrying its key, and its queryset a bulk one or an upsert. Its key
+    has no reverse accessor. One write still reaches an issued row, through the base
+    manager, which stays Django's plain one: the finding's cascade removes it.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    # No reverse accessor: nothing reads one, and one would move an issued receipt. The
+    # deployment is the finding's, so no second column can disagree with it.
+    finding = models.ForeignKey(Finding, on_delete=models.CASCADE, related_name="+")
+    # 1 for the incident's first receipt; each later one the next. Two receipts can
+    # never supersede the same one: the second to be stored fails on this key.
+    sequence = models.PositiveIntegerField()
+    # The receipt's own name: "recovery-receipt:<uuid4>", minted when it is issued.
+    receipt_ref = models.CharField(max_length=64, unique=True)
+    # The recovery step (RecoveryRecord.uuid) the receipt says the record stood at.
+    record = models.CharField(max_length=64)
+    # The instant the receipt speaks for.
+    as_of = models.DateTimeField()
+    # The receipt it supersedes and the pointer to why; null and "" for the first.
+    supersedes = models.CharField(max_length=64, null=True, blank=True)
+    reason = models.CharField(max_length=200, blank=True, default="")
+    envelope = models.JSONField()
+    key_id = models.CharField(max_length=64)
+    issued_by_ref = models.CharField(max_length=40)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    objects = RecoveryReceiptQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["finding_id", "sequence"]
+        constraints = [
+            models.UniqueConstraint(fields=["finding", "sequence"], name="uq_recovery_receipt_finding_sequence"),
+            models.CheckConstraint(
+                condition=models.Q(sequence=1, supersedes__isnull=True)
+                | models.Q(sequence__gt=1, supersedes__isnull=False),
+                name="recovery_receipt_supersedes_from_the_second",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        from .recovery_receipts import check_row
+
+        refusal = RecoveryReceiptRewriteRefused(
+            "An issued recovery receipt is never rewritten; issue a later receipt, which supersedes it."
+        )
+        # An INSERT and nothing else (assurance.append_only), and only of a row whose
+        # columns are what its signed payload says.
+        kwargs = insert_only(self, kwargs, refusal)
+        check_row(self)
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise RecoveryReceiptRewriteRefused("An issued recovery receipt is never deleted.")
+
+    def __str__(self) -> str:
+        return f"recovery receipt {self.sequence} of finding {self.finding_id}"

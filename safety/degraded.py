@@ -237,6 +237,11 @@ ROUTES = {
     # An incident's scope revisions (SPINE SP-3): the history read; the next revision
     # recorded. Read by no stop and by no decision.
     "finding-scope-revisions": {"GET": _R, "POST": _E},
+    # An incident's signed recovery receipts (SPINE SP-4, part 2b): every receipt read and
+    # verified again, and the next one issued (signed by the engine, verified, stored);
+    # the head a reader asks a receipt's standing with. Read by no stop and by no decision.
+    "finding-recovery-receipts": {"GET": _R, "POST": _E},
+    "finding-recovery-receipts-head": {"GET": _R},
     "provider-list": {"GET": _R, "POST": _E},
     "provider-detail": {"GET": _R, "PUT": _E, "PATCH": _E},
     "provider-assertion-list": {"GET": _R, "POST": _E},
