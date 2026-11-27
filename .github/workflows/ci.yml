@@ -256,6 +256,7 @@ jobs:
             tests/test_no_stop_waits_on_an_engine_answer.py \
             tests/test_a_persons_stop_outlives_their_account.py \
             tests/test_a_supersede_never_holds_back_a_stop.py \
+            tests/test_no_housekeeping_holds_back_a_stop.py \
             tests/test_nothing_that_watches_holds_back_a_stop.py \
             tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py \
             tests/test_a_proxy_password_that_cannot_be_encoded_owes_the_stop.py \
