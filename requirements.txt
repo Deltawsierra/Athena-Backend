@@ -438,4 +438,42 @@ zopfli==0.2.3.post1
 # tests/pin_bootstrap.py is unchanged. Each of the five is data and pure functions, read
 # at first use or by the recovery and evidence routes: on no stop path. The pin guard
 # stays ON (DEPENDENCY_PIN_GUARD is set nowhere).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@a27774dc8cb0dae775a5b7dd97d15f697f011415
+#
+# What the pin since a27774d (Mythos-Core#84 and #85) adds:
+#
+# Mythos-Core#86 to #90 -- the 1de268c pin, the head of the core's main on 26 Nov 2026
+# (the merge of #89, which carries #90's merge, 967514a).
+# (1) #87 and #89: mythos_core.failsafe.wire says what one poll of this control plane
+# heard. The six words for how a read ended (POLL_ENDINGS), the two headers this plane
+# sets on its engine poll (UNREADABLE_HEADER, X-Failsafe-Unreadable; IN_FORCE_HEADER,
+# X-Failsafe-In-Force, read as a list of distinct words of IN_FORCE_WORDS, always given
+# strongest first, IN_FORCE_ORDER), PollOutcome and its one question, heard_clean, and
+# poll_outcome, which reads an answer that arrived. #89: given the HTTP client's own list
+# of the header lines (lines=, as the channel passes response.raw.headers), either header
+# sent on more than one line is two values, unreadable, and the poll is not heard clean.
+# The channel gains poll_heard and the control loop poll_once_heard, beside poll and
+# poll_once, which are unchanged. The core's answer key, tests/vectors/poll-outcome-v1.json,
+# is carried byte for byte in tests/vectors/, and this plane holds its poll to it through
+# the core's own reader (tests/test_the_planes_polls_read_clean_through_the_core.py).
+# (2) #88: the governor refuses a resume or a release not issued strictly later than the
+# latest stop it accepted (commands.start_order_refusal, START_ACTIONS, START_ORDER_RULE),
+# and spends no nonce on it. This service runs no governor. Its poll already holds back a
+# start drafted at or before the newest stop made ready for its engine, and a start's
+# issued_at is its draft's instant, so a start this plane serves is one the rule lets
+# through; where two drafts race, the engine's refusal keeps the stop. Carried, not reached.
+# (3) #86: mythos_core.recovery_receipt builds mythos.recovery-receipt/v2, where an engine
+# entry names its key id, and still reads v1 byte for byte. release_status gains an
+# optional unvouched (default False: the rule this service asks is the same rule), and
+# unvouched_support names a v1 support that does not vouch. assurance/recovery_record.py
+# reads release_status, support_sentence, voucher_words, the standings and the refusal
+# codes, none of which changes for a call that does not name unvouched. On no stop path.
+# (4) #90 changes the core's own tests (a start is signed after its stop on a coarse clock).
+# Every other module of the core is byte for byte what it was at a27774d (the diff of src/
+# touches only failsafe/wire.py, failsafe/channel.py, failsafe/commands.py,
+# failsafe/governor.py and recovery_receipt.py), and so are pinguard.py,
+# templates/pin_bootstrap.py and the two vector files carried here before
+# (recovery-receipt-v1.json, acceptance-reopen-v1.json), so tests/pin_bootstrap.py is
+# unchanged. Nothing this service loads with its URL conf imports the new names: the
+# engine poll writes the two headers as it did. The pin guard stays ON
+# (DEPENDENCY_PIN_GUARD is set nowhere).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@1de268c2e6c1fc68553e006ec89735d10ef0b59e

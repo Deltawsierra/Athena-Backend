@@ -366,8 +366,19 @@ One command row that cannot be read, or cannot be turned into a command, no
 longer answers the poll 500 (which an engine reads as nothing pending): it is
 left out and counted in `X-Failsafe-Unreadable` (`0` when there was none), every
 readable command is answered, and the state view lists the broken row by its
-uuid, engine and action with `unreadable: true`. A poll whose lanes cannot be
-read at all is still not answered 200.
+uuid, engine and action with `unreadable: true`. A ready stop whose row cannot be
+read is still named in `X-Failsafe-In-Force`, by the action its lane read it
+under, even when the row cannot be loaded at all: it may be in force, so the list
+of stops is never shorter than what may be. A poll whose lanes cannot be read at
+all is still not answered 200.
+
+Each of the poll's answers is held to Mythos-Core's own reader of it
+(`mythos_core.failsafe.wire.poll_outcome`, Mythos-Core#87 and #89), over real HTTP
+with the header lines as the engine's client keeps them, and to the core's answer
+key (`tests/vectors/poll-outcome-v1.json`, byte for byte the core's):
+`tests/test_the_planes_polls_read_clean_through_the_core.py`. Neither header is ever
+sent on more than one line, the in-force words are the core's closed set, strongest
+first, and a poll is heard clean exactly when nothing on its page was unreadable.
 
 A stop's draft, signature and readiness land whatever becomes of their audit
 rows: an audit insert that failed rolled the signature back before. A missing
@@ -2175,7 +2186,7 @@ through `tests/pin_bootstrap.py`, a byte-for-byte copy of Mythos-Core's
 Python imports is exactly the commit `requirements.txt` and `requirements-dev.txt` both
 pin, from the install pip recorded; otherwise it stops the run with one error naming each
 failed check and what to do. Each run ends with its verdict, for example
-`pin guard <sha>: mythos-core pinned a27774d, imported a27774d from <path>: OK`. Its one
+`pin guard <sha>: mythos-core pinned 1de268c, imported 1de268c from <path>: OK`. Its one
 switch is described under "The shared pin guard" in Mythos-Core's README.
 `ATHENA_MYTHOS_CORE_PIN_GUARD` is retired: set to anything, it makes the guard refuse the
 run. `tests/test_pin_guard.py` holds the wiring, and runs on Windows in CI too.
