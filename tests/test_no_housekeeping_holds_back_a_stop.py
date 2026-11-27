@@ -315,6 +315,48 @@ def test_a_stop_and_its_engines_mark_are_written_in_one_transaction(keys, monkey
     assert mark is not None and str(mark) == drafted["uuid"], "the pause was served before its engine's mark moved"
 
 
+#: The statements the request's own connection made for each stop path on master
+#: (6b25920), measured by the test below under this same harness: outside any
+#: transaction, as a request runs. (Inside one -- tests/test_a_stop_in_force_keeps_
+#: being_served.py's MASTER -- the housekeeping writes stay on the request's
+#: connection, which already holds the write lock, and its counts are master's.)
+MASTER_OUTSIDE_A_TRANSACTION = {
+    "draft": {"select": 3, "begin": 2, "insert": 2, "commit": 2},
+    "sign first": {"select": 3, "begin": 1, "update": 3, "insert": 3, "commit": 1},
+    "sign later": {"select": 3, "begin": 1, "update": 3, "insert": 2, "commit": 1},
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("rates")
+def test_a_stops_housekeeping_adds_no_statement_to_its_request_connection(keys):
+    """Outside any transaction, as a request runs, a stop's audit rows and a
+    draft's supersede are written on a connection of their own, opened with a
+    busy timeout of 0 at connect time: the request's connection makes no
+    statement of a kind, or in a number, that master's did not -- no PRAGMA --
+    and the audit rows are all written."""
+    from failsafe.models import FailsafeAuditEvent
+    from tests.test_a_stop_in_force_keeps_being_served import _statements
+
+    client = _client_for(_admin())
+    measured, drafted = {}, []
+    for when in ("first", "later"):
+        answer, measured["draft"], _ = _statements(lambda: client.post(
+            "/api/failsafe/commands/", {"action": "pause", "engine_id": "housekeeping-counts"}, format="json"))
+        assert answer.status_code == 201 and AUDIT_MISSED not in answer.headers
+        signed, measured[f"sign {when}"], _ = _statements(lambda: _sign(client, answer.data, keys, "op0"))  # noqa: B023
+        assert signed.data["status"] == "ready" and AUDIT_MISSED not in signed.headers
+        drafted.append(answer.data["uuid"])
+        for path in ("draft", f"sign {when}"):
+            was = MASTER_OUTSIDE_A_TRANSACTION[path]
+            more = {kind: n for kind, n in measured[path].items() if n > was.get(kind, 0)}
+            assert more == {}, (path, measured[path], was)
+    for uuid in drafted:
+        events = sorted(FailsafeAuditEvent.objects.filter(command__uuid=uuid).values_list("event", flat=True))
+        assert events == ["drafted", "ready", "signed"], events
+    print(f"\nSTATEMENTS outside a transaction: master {MASTER_OUTSIDE_A_TRANSACTION}\nbranch {measured}")
+
+
 # --- 3. A stop draft: its bytes to sign never wait on its housekeeping --------------------------------------
 
 
@@ -337,10 +379,10 @@ def test_a_stop_drafts_answer_never_waits_on_the_write_lock_for_its_supersede_or
     real = views._supersede_past_limit
     holders = []
 
-    def after_another_writer_takes_the_lock(newest):
+    def after_another_writer_takes_the_lock(newest, *args, **kwargs):
         if not holders:
             holders.append(_LockHolder(admin.pk).start(within=1.0))
-        return real(newest)
+        return real(newest, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as patched:
         patched.setattr(views, "_supersede_past_limit", after_another_writer_takes_the_lock)
