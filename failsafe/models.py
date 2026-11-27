@@ -218,7 +218,13 @@ class FailsafeStopMark(models.Model):
     a start made ready at or before that is never delivered either, however
     late it was drafted. A stand-down drafted first and signed last, beside a
     release drafted after it and signed before it, was answered stand-down
-    then release, and the engine ended running."""
+    then release, and the engine ended running.
+
+    And the latest instant a stop made ready was SIGNED as issued
+    (``issued``): a start issued at or before it is never delivered and lifts
+    nothing, however late its row was made. ``created_at`` and ``issued_at``
+    are two reads of the clock, and a start drafted within one tick of a stop
+    could be later by the first and not by the second."""
 
     engine_id = models.CharField(max_length=200, primary_key=True)
     #: The stop's own creation time (FailsafeCommand.created_at).
@@ -230,6 +236,15 @@ class FailsafeStopMark(models.Model):
     #: rest. The poll never delivers a start made ready at or before it. None
     #: until a stop is made ready after migration 0006 (or backfilled by it).
     last_ready_at = models.DateTimeField(null=True, blank=True)
+    #: The latest SIGNED instant (FailsafeCommand.issued_at) of any stop made
+    #: ready for this engine, whichever stop that was: moved forward, never
+    #: back, in the same UPDATE as the rest. The engine orders by it: its
+    #: governor refuses a resume or a release not issued strictly after the
+    #: stops it accepted. So the plane never lifts a stop by, nor delivers, a
+    #: start issued at or before it. None when it is not known (migration
+    #: 0007 found no readable stop row): every start of the engine is then
+    #: held back, until a stop with a readable ``issued_at`` is made ready.
+    issued = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):

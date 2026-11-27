@@ -362,6 +362,28 @@ every stop made ready for its engine. A stand-down drafted first and signed
 last, beside a release drafted after it and signed before it, was answered
 stand-down then release, and the engine ended running.
 
+A start also lifts a stop, and is delivered, only if it was *issued* (the
+`issued_at` the operators signed) strictly after the engine's mark and every stop
+in force. That is the engine's own order: since Mythos-Core #88 its governor
+refuses a resume or a release not issued strictly after the stops it accepted.
+The plane judged by `created_at` alone, a second read of the clock taken when the
+row is inserted. A start drafted within one clock tick of a stop (Windows ticks
+15 ms apart), or across a thread switch between the two reads, could be later by
+one and not by the other. The plane then said the stop was lifted and stopped
+serving it, while the engine refused the start and stayed stopped, and ran when it
+restarted. The mark keeps the latest `issued_at` of any stop made ready for its
+engine (`issued`, migration 0007), moved forward in the UPDATE that already moves
+it. An `issued_at` that cannot be read holds every start back; it never lets one
+through.
+
+After a pause, a stand-down and a release, the plane keeps the pause in force,
+because a release lifts only stand-downs. An engine that applied the three is
+running, rejects the old pause as a replay, and is paused by it again only when it
+restarts. The pause's row on the state view says so (`in_force_note`). To pause such
+an engine now, sign a new pause. Making the two agree is the owner's choice: in
+the core, or by a release lifting the pauses before it, which would make the
+plane less strict.
+
 One command row that cannot be read, or cannot be turned into a command, no
 longer answers the poll 500 (which an engine reads as nothing pending): it is
 left out and counted in `X-Failsafe-Unreadable` (`0` when there was none), every
@@ -396,6 +418,13 @@ put in force: its engine may have been restarted to clear it, with no release on
 record. `python manage.py failsafe_historic_stops` lists those per engine, with
 whether the rule would have each in force and why, and changes nothing;
 `--apply --engine <id> --stop <uuid>` puts in force exactly the stops named.
+
+*Deploy day (migration 0007).* Each stop mark's `issued` is backfilled from the
+`issued_at` of the stop the mark names. A mark whose stop row is gone, or whose
+`issued_at` cannot be read, is left unknown. That holds every start of its engine
+until a stop is made ready again. 0007 writes no command. A start that lifted a
+stop before 0007 without being issued after it stays as it was: the stop is not put
+back in force.
 
 Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
 engagements they created are kept, with the creator unlinked; such an engagement

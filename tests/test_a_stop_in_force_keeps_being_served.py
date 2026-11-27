@@ -944,7 +944,10 @@ def test_the_migration_applies_forward_and_back_and_leaves_the_commands_as_they_
         back = MigrationExecutor(connection).migrate([before])
         assert snapshot(back) == was, "a rollback did not leave the commands as they were"
     finally:
-        MigrationExecutor(connection).migrate([after])
+        # Back to the latest migration of every app, not to 0006: a later migration
+        # (0007) left unapplied would take its column from every test after this one.
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
 
 
 @pytest.mark.django_db

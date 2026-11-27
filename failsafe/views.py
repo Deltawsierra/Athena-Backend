@@ -132,6 +132,31 @@ def _due(expires_at, now):
         return False
 
 
+def _instant(text):
+    """The signed instant ``text`` names (an ``issued_at`` as it was signed):
+    an aware datetime, or None when it cannot be read -- not ISO 8601, or with
+    no offset. None is never after anything, so it lets no start past a stop."""
+    try:
+        value = timezone.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return value if value.tzinfo is not None else None
+
+
+def _issued_after(start, stop):
+    """Whether a start signed as issued at ``start`` was issued STRICTLY after
+    a stop signed as issued at ``stop`` (each an _instant, or a mark's
+    ``issued``): the engine's order (Mythos-Core #88: a resume or release not
+    issued strictly after the stops it accepted is refused). Unknown on either
+    side is not after: a start is held, never a stop."""
+    if start is None or stop is None:
+        return False
+    try:
+        return start > stop
+    except TypeError:
+        return False
+
+
 class _Expiry:
     """The commands in flight past their window, marked expired a bounded few
     at a time by the stop-lane reads.
@@ -212,6 +237,7 @@ class _Unreadable:
     ready_at = None
     lifted_by = None
     lifted_at = None
+    issued_at = None
 
     def __init__(self, pk, why):
         self.pk, self.why = pk, why
@@ -226,13 +252,13 @@ class _Unreadable:
                 found = (
                     FailsafeCommand.objects.filter(pk=pk)
                     .order_by()
-                    .values_list("uuid", "engine_id", "action", "status", "created_at")
+                    .values_list("uuid", "engine_id", "action", "status", "created_at", "issued_at")
                     .first()
                 )
             except Exception:  # noqa: BLE001 - what cannot be read is None, never a failed read
                 found = None
             if found is not None:
-                row.uuid, row.engine_id, row.action, row.status, row.created_at = found
+                row.uuid, row.engine_id, row.action, row.status, row.created_at, row.issued_at = found
         return row
 
 
@@ -650,7 +676,11 @@ IN_FORCE_NOTES = {
     "pause": (
         "In force: answered to its engine on every poll, whatever its window, until a resume drafted and "
         "signed after it. Nothing else ends it: no window, no cancel, and no release -- after a pause, a "
-        "stand-down and a release, this pause is still answered until a resume is signed."
+        "stand-down and a release, this pause is still answered until a resume is signed. But if a "
+        "stand-down and then a release were signed after this pause, an engine that applied them may be "
+        "running now, although this pause is in force here, and it keeps running until it restarts: while it "
+        "runs it rejects this pause as a replay, and only after a restart does this pause stop it again. To "
+        "pause it now, sign a new pause."
     ),
     "stand_down": (
         "In force: answered to its engine on every poll, whatever its window, until a release drafted and "
@@ -1347,15 +1377,20 @@ def _make_start_ready(start):
 
     What it lifts: the stops of its own kind -- a resume lifts pauses, a
     release lifts stand-downs, and nothing lifts a terminate -- in force for
-    its engine and drafted before it. Every stop in force was made ready
-    before this moment, so it is later than each in both orders. A stand-down
+    its engine, drafted before it and issued before it. Every stop in force
+    was made ready before this moment, so it is later than each in that order
+    too. A stand-down
     is not lifted by a resume, nor a pause by a release: after a pause, a
     stand-down and a release, the pause is still in force until a resume is
     signed. That never under-holds.
 
     It lifts nothing when the poll will never deliver it (_PollRead._held):
     its engine has no mark, or a stop made ready for its engine -- the mark,
-    or one in force -- was drafted at or after it.
+    or one in force -- was drafted at or after it, or was issued at or after
+    it (its signed ``issued_at``, the engine's order: an engine refuses a
+    start not issued strictly after the stops it accepted). It lifted such a
+    stop before, by ``created_at`` alone, while the engine refused the start
+    and stayed stopped -- and ran when it restarted, served no stop.
 
     ``ready_at`` is strictly after the engine's last stop made ready, even on
     a clock that ties, so a start signed after a stop is never read as
@@ -1364,12 +1399,12 @@ def _make_start_ready(start):
     in_force = list(
         FailsafeCommand.objects.filter(engine_id=start.engine_id, status=_READY, in_force=True)
         .order_by("-created_at")
-        .values_list("pk", "uuid", "action", "created_at", "ready_at")[:POLL_STOP_LIMIT]
+        .values_list("pk", "uuid", "action", "created_at", "ready_at", "issued_at")[:POLL_STOP_LIMIT]
     )
     at = timezone.now()
     last = max(
         [mark.last_ready_at] * (mark is not None and mark.last_ready_at is not None)
-        + [ready for *_rest, ready in in_force if ready is not None],
+        + [ready for _pk, _uuid, _action, _created, ready, _issued in in_force if ready is not None],
         default=None,
     )
     if last is not None and at <= last:
@@ -1377,13 +1412,24 @@ def _make_start_ready(start):
     start.mark_ready(at=at)
     if mark is None:
         return [], "no stop was ever made ready for its engine, so the poll holds every start of it back"
-    newest = max([mark.created_at] + [created for _pk, _uuid, _action, created, _ready in in_force])
+    newest = max([mark.created_at] + [created for _pk, _uuid, _action, created, _ready, _issued in in_force])
     if start.created_at <= newest:
         return [], "it was drafted at or before a stop made ready for its engine, so the poll never delivers it"
-    # Every stop in force was drafted before it (the check above) and made
-    # ready before it (now): it lifts those of its own kind, and no other.
+    issued = _instant(start.issued_at)
+    if not all(
+        _issued_after(issued, stop)
+        for stop in [mark.issued, *(_instant(stop_issued) for *_rest, stop_issued in in_force)]
+    ):
+        return [], (
+            "it was not issued strictly after every stop made ready for its engine (by the issued_at they were "
+            "signed with), so an engine refuses it and the poll never delivers it"
+        )
+    # Every stop in force was drafted and issued before it (the checks above)
+    # and made ready before it (now): it lifts those of its own kind, and no other.
     lifted = [
-        (pk, stop_uuid) for pk, stop_uuid, action, _created, _ready in in_force if action == _LIFTS[start.action]
+        (pk, stop_uuid)
+        for pk, stop_uuid, action, _created, _ready, _issued in in_force
+        if action == _LIFTS[start.action]
     ]
     if lifted:
         FailsafeCommand.objects.filter(pk__in=[pk for pk, _uuid in lifted], in_force=True).update(
@@ -1852,7 +1898,13 @@ def _mark_stop_made_ready(command):
     statements now than then. In a savepoint, and never raised: a failure is
     logged and the signature stands; the poll still holds back older starts
     by the ready stop itself while it is ready -- and a stop in force stays
-    ready."""
+    ready.
+
+    In the same UPDATE, the mark's ``issued`` moves forward to the stop's
+    signed instant when that is later (or the mark had none): never back, so
+    a stop drafted later but issued earlier leaves it where it was. A stop
+    whose ``issued_at`` cannot be read leaves it as it is; that stop, while
+    in force, holds every start back by itself."""
     if command.action not in STOP_ACTIONS:
         return
     try:
@@ -1861,27 +1913,33 @@ def _mark_stop_made_ready(command):
             newer = Q(created_at__lt=command.created_at)
             types = {"created_at": DateTimeField(), "stop_uuid": UUIDField(), "action": CharField()}
             said = {} if command.ready_at is None else {"last_ready_at": command.ready_at}
+            issued = _instant(command.issued_at)
+            later = Q(issued__lt=issued) | Q(issued__isnull=True)
+            signed = {} if issued is None else {
+                "issued": Case(When(later, then=Value(issued, output_field=DateTimeField())), default=F("issued"))
+            }
             moved = FailsafeStopMark.objects.filter(engine_id=command.engine_id).update(
                 updated_at=timezone.now(),
                 **said,
+                **signed,
                 **{
                     name: Case(When(newer, then=Value(value, output_field=types[name])), default=F(name))
                     for name, value in fields.items()
                 },
             )
             if not moved:
-                FailsafeStopMark.objects.create(engine_id=command.engine_id, **fields, **said)
+                FailsafeStopMark.objects.create(engine_id=command.engine_id, **fields, **said, issued=issued)
     except Exception:  # noqa: BLE001 - a stop's signature must never fail on its mark
         logger.exception("could not move the stop mark of engine %r to %s", command.engine_id, command.uuid)
 
 
 def _stop_marks(engines):
-    """{engine_id: (created_at, stop uuid, action, last_ready_at)} of the marks
-    of ``engines``: one read of their rows by the primary key. _UNREADABLE
-    when the read fails."""
+    """{engine_id: (created_at, stop uuid, action, last_ready_at, issued)} of
+    the marks of ``engines``: one read of their rows by the primary key.
+    _UNREADABLE when the read fails."""
     try:
         return {
-            mark.engine_id: (mark.created_at, str(mark.stop_uuid), mark.action, mark.last_ready_at)
+            mark.engine_id: (mark.created_at, str(mark.stop_uuid), mark.action, mark.last_ready_at, mark.issued)
             for mark in FailsafeStopMark.objects.filter(engine_id__in=sorted(engines))
         }
     except Exception:  # noqa: BLE001 - an unreadable mark holds every start back, never a stop
@@ -1890,10 +1948,10 @@ def _stop_marks(engines):
 
 
 def _supersede(held):
-    """Mark the starts ``held`` ({pk: (stop uuid, stop action, True when it is
-    held for when it was made ready, not for when it was drafted)})
-    superseded, each with an audit event naming the stop it was drafted or
-    made ready before: one
+    """Mark the starts ``held`` ({pk: (stop uuid, stop action, why: "drafted",
+    "made ready" or "issued" -- at or before a stop made ready for its
+    engine)}) superseded, each with an audit event naming the stop it was
+    drafted, made ready or issued before: one
     UPDATE of at most EXPIRE_PER_READ rows still ready, one read of the rows
     that write changed (its own ``updated_at``, so two reads at once never
     record one twice), and one insert, in one transaction that never waits
@@ -1919,14 +1977,7 @@ def _supersede(held):
                     detail={
                         "by": "state read",
                         "superseded_by": held[pk][0],
-                        "reason": (
-                            f"made ready at or before a stop was made ready for its engine (its newest stop "
-                            f"drafted is the {held[pk][1]} {held[pk][0]}): delivered after that stop, it would "
-                            "undo it"
-                            if held[pk][2]
-                            else f"drafted at or before the {held[pk][1]} {held[pk][0]}, the newest stop made "
-                                 "ready for its engine: delivered after it, it would undo that stop"
-                        ),
+                        "reason": _HELD_REASONS[held[pk][2]].format(action=held[pk][1], uuid=held[pk][0]),
                     },
                 )
                 for pk in mine
@@ -1935,11 +1986,30 @@ def _supersede(held):
         logger.warning("could not mark %d held-back failsafe starts superseded", len(held), exc_info=True)
 
 
+#: Why the state read marks a held start superseded (_supersede), by how it is held.
+_HELD_REASONS = {
+    "made ready": (
+        "made ready at or before a stop was made ready for its engine (its newest stop drafted is the {action} "
+        "{uuid}): delivered after that stop, it would undo it"
+    ),
+    "drafted": (
+        "drafted at or before the {action} {uuid}, the newest stop made ready for its engine: delivered after it, "
+        "it would undo that stop"
+    ),
+    "issued": (
+        "issued at or before the latest instant a stop made ready for its engine was signed as issued (its newest "
+        "stop drafted is the {action} {uuid}): an engine refuses a start not issued strictly after the stops it "
+        "accepted, and delivered after that stop it would undo it"
+    ),
+}
+
+
 def _supersede_listed_starts(rows):
     """The ready resumes and releases a state read listed that the newest stop
     made ready for their engine (its mark) was drafted at or after, or that
-    were made ready at or before a stop was last made ready for it:
-    superseded (_supersede). Only by a mark: a start of an engine with none is
+    were made ready at or before a stop was last made ready for it, or that
+    were issued at or before the latest stop made ready for it was (the
+    mark's ``issued``; unknown holds): superseded (_supersede). Only by a mark: a start of an engine with none is
     held back by the poll but never marked. At most STATE_LIST_LIMIT rows, by
     their uuid, then their engines' marks by the primary key."""
     uuids = [
@@ -1951,22 +2021,24 @@ def _supersede_listed_starts(rows):
         return
     try:
         starts = list(FailsafeCommand.objects.filter(uuid__in=uuids).order_by().values_list(
-            "pk", "engine_id", "created_at", "ready_at"))
+            "pk", "engine_id", "created_at", "ready_at", "issued_at"))
     except Exception:  # noqa: BLE001 - nothing here may fail the read
         logger.exception("could not read %d listed starts", len(uuids))
         return
-    marks = _stop_marks({engine_id for _pk, engine_id, _created, _ready in starts})
+    marks = _stop_marks({engine_id for _pk, engine_id, *_rest in starts})
     if marks is _UNREADABLE:
         return
     held = {}
-    for pk, engine_id, created, ready in starts:
+    for pk, engine_id, created, ready, issued_at in starts:
         if engine_id not in marks:
             continue
-        drafted, stop_uuid, action, last_ready = marks[engine_id]
+        drafted, stop_uuid, action, last_ready, issued = marks[engine_id]
         if created <= drafted:
-            held[pk] = (stop_uuid, action, False)
+            held[pk] = (stop_uuid, action, "drafted")
         elif ready is not None and last_ready is not None and ready <= last_ready:
-            held[pk] = (stop_uuid, action, True)
+            held[pk] = (stop_uuid, action, "made ready")
+        elif not _issued_after(_instant(issued_at), issued):
+            held[pk] = (stop_uuid, action, "issued")
     _supersede(held)
 
 
@@ -2000,6 +2072,14 @@ class _PollRead(_Read):
     marks such starts superseded (_supersede_listed_starts). A start drafted
     after the stop is answered.
 
+    And by the SIGNED order, which is the engine's: a start not issued
+    strictly after its engine's mark (the latest ``issued_at`` of any stop
+    made ready for it) and every ready stop of its engine on this page is
+    never delivered either. An engine refuses such a start and stays stopped;
+    delivered, the plane said the stop lifted while the engine held it, and
+    served it no stop when it restarted. A ready stop whose ``issued_at``
+    cannot be read holds back every start of its engine on this page.
+
     Each part is one index read of at most its limit + 1 keys
     (fsc_st_act_ct, fsc_eng_st_act_ct): the work is the limits, whatever the
     number of ready commands."""
@@ -2023,12 +2103,14 @@ class _PollRead(_Read):
         self.in_force = set()
 
     @staticmethod
-    def _held(start, marks, ready_stops, made_ready=None):
+    def _held(start, marks, ready_stops, made_ready=None, issued_on_page=None):
         """Whether ``start`` is held back: its engine's mark is missing or
         unreadable; or the newer of its mark and the newest ready stop of its
-        engine on this page was drafted at or after it; or a stop was made
-        ready for its engine -- by its mark, or by a ready stop on this page
-        -- at or after the start was made ready.
+        engine on this page was drafted at or after it; or it was not issued
+        strictly after its mark's ``issued`` and every ready stop of its
+        engine on this page (``issued_on_page``: the latest, or _UNREADABLE);
+        or a stop was made ready for its engine -- by its mark, or by a ready
+        stop on this page -- at or after the start was made ready.
 
         The last is the order the two were SIGNED in. A stand-down drafted
         first and signed last, beside a release drafted after it and signed
@@ -2038,11 +2120,17 @@ class _PollRead(_Read):
         backfilled) is judged by its drafting time alone, as before."""
         if marks is _UNREADABLE or start.engine_id not in marks:
             return True
-        newest, _uuid, _action, last = marks[start.engine_id]
+        newest, _uuid, _action, last, issued = marks[start.engine_id]
         ready = ready_stops.get(start.engine_id)
         if ready is not None and ready > newest:
             newest = ready
         if start.created_at <= newest:
+            return True
+        signed = _instant(start.issued_at)
+        if not _issued_after(signed, issued):
+            return True
+        page_issued = (issued_on_page or {}).get(start.engine_id)
+        if page_issued is _UNREADABLE or (page_issued is not None and not _issued_after(signed, page_issued)):
             return True
         on_page = (made_ready or {}).get(start.engine_id)
         if on_page is not None and (last is None or on_page > last):
@@ -2053,7 +2141,7 @@ class _PollRead(_Read):
         """This page's rows by lane, and the next page's cursor or None. No
         start is on a page that left a stop for the next one: the starts wait
         for the stops' last page."""
-        rows, continuing, ready_stops, made_ready = {}, {}, {}, {}
+        rows, continuing, ready_stops, made_ready, issued_on_page = {}, {}, {}, {}, {}
         for name, tiers, limit in self.lanes:
             if self.after is not None and name not in self.after:
                 continue  # a lane a page before this one finished
@@ -2085,6 +2173,11 @@ class _PollRead(_Read):
                     seen = made_ready.get(command.engine_id)
                     if command.ready_at is not None and (seen is None or command.ready_at > seen):
                         made_ready[command.engine_id] = command.ready_at
+                    signed, seen = _instant(command.issued_at), issued_on_page.get(command.engine_id)
+                    if signed is None:
+                        issued_on_page[command.engine_id] = _UNREADABLE
+                    elif seen is not _UNREADABLE and (seen is None or signed > seen):
+                        issued_on_page[command.engine_id] = signed
                     if command.in_force:
                         self.in_force.add(command.action)
                 # A stop a later signed start has lifted is not answered, even
@@ -2104,7 +2197,9 @@ class _PollRead(_Read):
                 ]
                 marks = _stop_marks({command.engine_id for command in starts}) if starts else {}
                 self.held = {
-                    command.pk for command in starts if self._held(command, marks, ready_stops, made_ready)
+                    command.pk
+                    for command in starts
+                    if self._held(command, marks, ready_stops, made_ready, issued_on_page)
                 }
                 entries = [(key, None if command is not None and command.pk in self.held else command)
                            for key, command in entries]
